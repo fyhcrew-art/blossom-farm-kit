@@ -1,0 +1,7 @@
+# Blossom farm kit - packet filter rule (loaded by services/farm-firewall.sh
+# into the pf anchor com.apple/blossom-farm). Written by install.sh.
+#
+# New TCP connections from the network to the Mac's range of temporary ports
+# are dropped: that is where the GADS provider opens its per-phone ports.
+# Loopback, connections the Mac starts itself, and UDP are not affected.
+block drop in quick on ! lo0 proto tcp from any to any port @PORT_FIRST@:@PORT_LAST@ flags S/SA

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Blossom farm kit. install.sh fills in the placeholders of this template
+     and writes the result to /Library/LaunchDaemons. Do not edit the
+     installed file: install.sh rewrites it. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>blossom-farm.mongodb</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>@FARM_ROOT@/services/farm-run.sh</string>
+        <string>--log</string>
+        <string>@FARM_ROOT@/logs/mongodb.log</string>
+        <string>--</string>
+        <string>@FARM_ROOT@/bin/mongodb/bin/mongod</string>
+        <string>--config</string>
+        <string>@FARM_ROOT@/config/mongod.conf</string>
+    </array>
+    <key>UserName</key>
+    <string>@SERVICE_USER@</string>
+    <key>GroupName</key>
+    <string>@SERVICE_GROUP@</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>@FARM_ROOT@/var/home</string>
+        <key>TMPDIR</key>
+        <string>@FARM_ROOT@/var/tmp</string>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>@FARM_ROOT@/var</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ExitTimeOut</key>
+    <integer>25</integer>
+    <key>Umask</key>
+    <integer>23</integer>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>64000</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>64000</integer>
+    </dict>
+</dict>
+</plist>

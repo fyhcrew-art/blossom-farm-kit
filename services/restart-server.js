@@ -19,13 +19,19 @@
  *   - refuses to start without a secret of at least 32 characters; there is
  *     no built-in default;
  *   - the secret is read from a file (GADS_RESTART_SECRET_FILE) so that it is
- *     not visible in the service's registry entry or process list;
+ *     not visible in the service's settings (the Windows registry, the
+ *     launchd property list) or in the process list;
  *   - the secret is compared in constant time;
  *   - listens on 127.0.0.1 only (the tunnel connects to it locally);
  *   - sends no CORS headers: it is called server to server, never by a browser;
- *   - runs only fixed commands (sc.exe start|stop|query <fixed service name>);
- *     nothing from a request ever reaches a command line;
+ *   - runs only fixed commands with fixed service names (Windows: sc.exe
+ *     start|stop|query; macOS: /bin/launchctl print|bootstrap|kickstart|
+ *     bootout); nothing from a request ever reaches a command line;
  *   - never logs the secret or request headers.
+ *
+ * The same file runs on Windows and on macOS. What differs is the service
+ * controller (how a service is asked, started and stopped) and the names of
+ * the services; the HTTP contract is the same on both.
  *
  * No dependencies beyond Node.js itself.
  */
@@ -50,6 +56,19 @@ const SERVICES = Object.freeze({
   cloudflare: 'Cloudflared',
 })
 
+// launchd labels created by install.sh (macOS). Each has its property list
+// at /Library/LaunchDaemons/<label>.plist.
+const MACOS_SERVICES = Object.freeze({
+  mongodb: 'blossom-farm.mongodb',
+  hub: 'blossom-farm.hub',
+  provider: 'blossom-farm.provider',
+  gate: 'blossom-farm.gate',
+  keep_available: 'blossom-farm.keep-available',
+  cloudflare: 'blossom-farm.cloudflared',
+})
+
+const servicesFor = platform => (platform === 'darwin' ? MACOS_SERVICES : SERVICES)
+
 /** Constant-time comparison of two strings of any length. */
 function safeEqual(a, b) {
   const ha = crypto.createHash('sha256').update(String(a), 'utf8').digest()
@@ -73,18 +92,25 @@ function loadSecret(env = process.env) {
     throw new Error('no restart secret configured: set GADS_RESTART_SECRET_FILE to a file holding the secret. There is no default secret.')
   }
   if (secret.length < MIN_SECRET_LENGTH) {
-    throw new Error(`the restart secret is too short (${secret.length} characters, minimum ${MIN_SECRET_LENGTH}). Generate a new one with scripts\\rotate-secrets.ps1.`)
+    throw new Error(`the restart secret is too short (${secret.length} characters, minimum ${MIN_SECRET_LENGTH}). Generate a new one with the kit's rotate-secrets script.`)
   }
   return secret
 }
 
-/** The real service controller: sc.exe with fixed arguments, no shell. */
-function scController() {
-  const run = (args) => new Promise(resolve => {
+/*
+ * A service controller is four functions that take a service name:
+ *   isRunning(name) -> boolean      start(name) -> exit code
+ *   isStopped(name) -> boolean      stop(name)  -> exit code
+ * "runner" is how the controller executes its program; the tests replace it.
+ */
+
+/** The Windows service controller: sc.exe with fixed arguments, no shell. */
+function scController(runner) {
+  const run = runner || ((args) => new Promise(resolve => {
     execFile('sc.exe', args, { windowsHide: true, timeout: 30000 }, (err, stdout) => {
       resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, out: String(stdout || '') })
     })
-  })
+  }))
   return {
     // "STATE : 4 RUNNING": the label before the colon is translated on some
     // Windows languages, the number and the state name are not.
@@ -101,12 +127,51 @@ function scController() {
   }
 }
 
+/**
+ * The macOS service controller: /bin/launchctl with fixed arguments, no
+ * shell. The farm services are launchd daemons that launchd keeps alive, so
+ * "stop" means taking the service out of launchd (bootout) and "start" means
+ * putting it back from its property list (bootstrap) and starting it
+ * (kickstart). A service is stopped when launchd no longer knows it.
+ */
+function launchctlController(runner) {
+  const run = runner || ((args) => new Promise(resolve => {
+    execFile('/bin/launchctl', args, { timeout: 60000 }, (err, stdout, stderr) => {
+      resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, out: String(stdout || '') + String(stderr || '') })
+    })
+  }))
+  const target = name => `system/${name}`
+  const print = name => run(['print', target(name)])
+  return {
+    // "launchctl print" shows a line "state = running" for a running service.
+    isRunning: async name => {
+      const r = await print(name)
+      return r.code === 0 && /^\s*state = running\s*$/m.test(r.out)
+    },
+    // bootout removes the service; "print" then fails (113, not found).
+    isStopped: async name => (await print(name)).code !== 0,
+    start: async name => {
+      if ((await print(name)).code !== 0) {
+        const loaded = await run(['bootstrap', 'system', `/Library/LaunchDaemons/${name}.plist`])
+        if (loaded.code !== 0) return loaded.code
+      }
+      return (await run(['kickstart', target(name)])).code
+    },
+    stop: async name => (await run(['bootout', target(name)])).code,
+  }
+}
+
+/** The controller for the system this runs on. */
+const controllerFor = (platform, runner) => (platform === 'darwin' ? launchctlController(runner) : scController(runner))
+
 function createApp(options) {
   const secret = options && options.secret
   if (typeof secret !== 'string' || secret.length < MIN_SECRET_LENGTH) {
     throw new Error(`a restart secret of at least ${MIN_SECRET_LENGTH} characters is required`)
   }
-  const sc = options.controller || scController()
+  const platform = options.platform || process.platform
+  const SERVICES = options.services || servicesFor(platform)
+  const sc = options.controller || controllerFor(platform, options.run)
   const log = options.log || (msg => console.log(`[restart-server] ${new Date().toISOString()} ${msg}`))
   const wait = options.wait || (ms => new Promise(r => setTimeout(r, ms)))
   // Time between answering and touching the tunnel, so the answer gets out.
@@ -115,16 +180,18 @@ function createApp(options) {
   let actionInProgress = false
 
   // How long a stop may take before it is given up: nssm's own stop sequence
-  // (console 5 s, then window, threads, terminate) plus a margin.
+  // on Windows (console 5 s, then window, threads, terminate) or launchd's
+  // on macOS (the services' ExitTimeOut), plus a margin.
   const stopTimeoutMs = options.stopTimeoutMs === undefined ? 25000 : options.stopTimeoutMs
   const stopPollMs = 500
 
   const start = async name => { const code = await sc.start(name); log(`start ${name} -> ${code}`) }
 
   /**
-   * Stops a service and waits until Windows reports it as stopped. Windows
+   * Stops a service and waits until the system reports it as stopped. Windows
    * refuses to stop a service while one that depends on it is still stopping
-   * (error 1051), and refuses to start one that is still stopping (1056), so
+   * (error 1051), and refuses to start one that is still stopping (1056);
+   * launchd cannot load a service again while it is still being removed. So
    * a stop that is only requested is not enough. Returns true when stopped.
    */
   async function stopAndWait(name) {
@@ -152,6 +219,7 @@ function createApp(options) {
     await stopAndWait(SERVICES.cloudflare)
     // Everything that depends on the hub must be down before the hub is asked
     // to stop, otherwise Windows refuses and the hub is never restarted.
+    // (launchd has no such rule; the same order is kept on macOS.)
     await stopAndWait(SERVICES.keep_available)
     await stopAndWait(SERVICES.gate)
     await stopAndWait(SERVICES.provider)
@@ -283,6 +351,9 @@ function main() {
   app.listen(port, () => console.log(`[restart-server] ${new Date().toISOString()} listening on http://${HOST}:${port}`))
 }
 
-module.exports = { createApp, loadSecret, safeEqual, scController, SERVICES, HOST, DEFAULT_PORT, MIN_SECRET_LENGTH }
+module.exports = {
+  createApp, loadSecret, safeEqual, scController, launchctlController, controllerFor, servicesFor,
+  SERVICES, MACOS_SERVICES, HOST, DEFAULT_PORT, MIN_SECRET_LENGTH,
+}
 
 if (require.main === module) main()

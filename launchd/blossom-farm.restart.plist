@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Blossom farm kit. install.sh fills in the placeholders of this template
+     and writes the result to /Library/LaunchDaemons. Do not edit the
+     installed file: install.sh rewrites it. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>blossom-farm.restart</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>@FARM_ROOT@/services/farm-run.sh</string>
+        <string>--log</string>
+        <string>@FARM_ROOT@/logs/restart-server.log</string>
+        <string>--</string>
+        <string>@FARM_ROOT@/bin/node/bin/node</string>
+        <string>@FARM_ROOT@/services/restart-server.js</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>GADS_RESTART_SECRET_FILE</key>
+        <string>@FARM_ROOT@/config/restart-secret.txt</string>
+        <key>GADS_RESTART_PORT</key>
+        <string>19999</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>@FARM_ROOT@/services</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ExitTimeOut</key>
+    <integer>25</integer>
+    <key>Umask</key>
+    <integer>23</integer>
+</dict>
+</plist>

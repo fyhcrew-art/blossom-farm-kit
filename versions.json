@@ -24,6 +24,74 @@
     "ffmpeg": { "id": "Gyan.FFmpeg", "version": "9.1" },
     "cloudflared": { "id": "Cloudflare.cloudflared", "version": "2026.11.2" }
   },
+  "macos": {
+    "node": "26.13.1",
+    "mongodb": "8.3.11",
+    "mongodbTools": "100.20.1",
+    "cloudflared": "2026.11.2",
+    "homebrew": {
+      "ffmpeg": "ffmpeg",
+      "openssl": "openssl@3"
+    },
+    "arm64": {
+      "minimumMacOS": "26.0",
+      "hub": {
+        "zipUrl": "https://github.com/shamanec/GADS/releases/download/v6.0.0/gads-mac-arm64.zip",
+        "zipSha256": "45641c15a502dc106b155bbb86eab5f7e5ff6d4e28f04cd24c28eb51ab20b4a0",
+        "exeSha256": "486e99c270df54b05394f01083dca613136e4c3bcd0900dcac21cfc9d7d71d08"
+      },
+      "provider": {
+        "url": "https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/gads-v6.0.0-drag.1/GADS-drag-darwin-arm64",
+        "sha256": "382554b57497c238265cf95ef579952a34b0ba12ae9e7aec95d46dd2c1ded51f"
+      },
+      "node": {
+        "url": "https://nodejs.org/dist/v26.13.1/node-v26.13.1-darwin-arm64.tar.gz",
+        "sha256": "aec2514ea1ceb2ba52455e9ec65986f6749a06dd759e5db2a72e6889668c9735"
+      },
+      "mongodb": {
+        "url": "https://fastdl.mongodb.org/osx/mongodb-macos-arm64-8.3.11.tgz",
+        "sha256": "b586c3972880fcdea90690a6d22c22cd260b0972de717ca710c0bc77c64b039e"
+      },
+      "mongodbTools": {
+        "url": "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-macos-arm64-100.20.1.zip",
+        "sha256": "2d49b4bd58477ce7ffbad2c4d1a686f2befa3ce27e8c7cf8fcd2869d8f73063a"
+      },
+      "cloudflared": {
+        "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.11.2/cloudflared-darwin-arm64.tgz",
+        "sha256": "f6d58eeec91ad1ec5fd1f7e4a587303772929b2625be5d24068033851c36ff55",
+        "exeSha256": "8654fbdc9057f3e13e95f7892f417f8643113bee1b91ee2388fd0acb05210d55"
+      }
+    },
+    "x86_64": {
+      "minimumMacOS": "15.0",
+      "hub": {
+        "zipUrl": "https://github.com/shamanec/GADS/releases/download/v6.0.0/gads-mac-amd64.zip",
+        "zipSha256": "13e043f9ef320237a577924e4b7fea6113f36d3ecd55f6a227f39b3932d9ce80",
+        "exeSha256": "5bfb028f520e69f8d4ebfad1f1e5fb00bb76ac2e06eeb850a00311a3f8c10e49"
+      },
+      "provider": {
+        "url": "https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/gads-v6.0.0-drag.1/GADS-drag-darwin-amd64",
+        "sha256": "40222d309cc3a9608aee4252413eeea55f178180dbd1c84e400a090be9af1104"
+      },
+      "node": {
+        "url": "https://nodejs.org/dist/v26.13.1/node-v26.13.1-darwin-x64.tar.gz",
+        "sha256": "82bb96078a24ca50b9c9a38f2379e6be6d87171fcd400fc14c8934b3bce96e2f"
+      },
+      "mongodb": {
+        "url": "https://fastdl.mongodb.org/osx/mongodb-macos-x86_64-8.3.11.tgz",
+        "sha256": "45b4a7913c1384d4b3ce32c81630a5c0e1993de2f6119f511995ec2324dec5c9"
+      },
+      "mongodbTools": {
+        "url": "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-macos-x86_64-100.20.1.zip",
+        "sha256": "de677258cb2dd2f8dfce714021dcf5ebdd812b07f391118d3af5200370d2f67c"
+      },
+      "cloudflared": {
+        "url": "https://github.com/cloudflare/cloudflared/releases/download/2026.11.2/cloudflared-darwin-amd64.tgz",
+        "sha256": "6153d9ec629174882a3adbff2f7dc5a24b4f3bdd7ccc38eaa84fba26eb890311",
+        "exeSha256": "870dc2094f98befdd993c455234562be4eee51f8fca6e2e356df4579fa7e6766"
+      }
+    }
+  },
   "npm": {
     "appium": "3.9.1",
     "xcuitestDriver": "12.22.8",

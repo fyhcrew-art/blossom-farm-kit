@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Blossom farm kit. install.sh fills in the placeholders of this template
+     and writes the result to /Library/LaunchDaemons. Do not edit the
+     installed file: install.sh rewrites it. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>blossom-farm.gate</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>@FARM_ROOT@/services/farm-run.sh</string>
+        <string>--log</string>
+        <string>@FARM_ROOT@/logs/provider-gate.log</string>
+        <string>--</string>
+        <string>@FARM_ROOT@/bin/node/bin/node</string>
+        <string>@FARM_ROOT@/services/provider-gate.js</string>
+    </array>
+    <key>UserName</key>
+    <string>@SERVICE_USER@</string>
+    <key>GroupName</key>
+    <string>@SERVICE_GROUP@</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>@FARM_ROOT@/var/home</string>
+        <key>TMPDIR</key>
+        <string>@FARM_ROOT@/var/tmp</string>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>FARM_GATE_PORT</key>
+        <string>10002</string>
+        <key>FARM_GATE_HUB_PORT</key>
+        <string>10000</string>
+        <key>FARM_GATE_PROVIDER_PORT</key>
+        <string>10001</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>@FARM_ROOT@/services</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>ExitTimeOut</key>
+    <integer>25</integer>
+    <key>Umask</key>
+    <integer>23</integer>
+</dict>
+</plist>

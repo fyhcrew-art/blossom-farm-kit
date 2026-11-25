@@ -10,7 +10,7 @@ const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 
 const SERVER = path.join(__dirname, '..', 'services', 'restart-server.js')
-const { createApp, loadSecret, safeEqual, SERVICES, HOST } = require(SERVER)
+const { createApp, loadSecret, safeEqual, scController, launchctlController, controllerFor, servicesFor, SERVICES, MACOS_SERVICES, HOST } = require(SERVER)
 
 const SECRET = 'a'.repeat(64)
 
@@ -48,8 +48,10 @@ async function withApp(options, fn) {
   const controller = options.controller || fakeController()
   let release
   const gate = new Promise(r => { release = r })
+  // The Windows names unless a test asks otherwise: these tests must give the
+  // same result on every system they run on.
   const app = createApp({
-    secret: SECRET, controller, log: () => {}, replyGraceMs: 0,
+    secret: SECRET, controller, services: options.services || SERVICES, log: () => {}, replyGraceMs: 0,
     wait: options.hold ? () => gate : async () => {},
   })
   await new Promise(r => app.listen(0, r))
@@ -245,7 +247,7 @@ test('a service that never stops is given up after the timeout and everything is
   const realStop = controller.stop
   controller.stop = async name => { if (name === SERVICES.hub) { controller.calls.push('stop GadsHub (hangs)'); return 0 } return realStop(name) }
   const logged = []
-  const app = createApp({ secret: SECRET, controller, log: m => logged.push(m), replyGraceMs: 0, wait: async () => {}, stopTimeoutMs: 2000 })
+  const app = createApp({ secret: SECRET, controller, services: SERVICES, log: m => logged.push(m), replyGraceMs: 0, wait: async () => {}, stopTimeoutMs: 2000 })
   await new Promise(r => app.listen(0, r))
   try {
     assert.strictEqual((await request(app.server.address().port, 'POST', '/restart-all', auth)).status, 200)
@@ -333,4 +335,207 @@ test('the real controller only ever runs sc.exe with fixed service names (no she
   assert.match(src, /const \{ execFile \} = require\('child_process'\)/)
   assert.doesNotMatch(src, /execSync|spawn|shell:\s*true/)
   for (const name of Object.values(SERVICES)) assert.match(name, /^[A-Za-z]+$/)
+})
+
+// ---------------------------------------------------------------------------
+// The service controllers. Their program (sc.exe, launchctl) is replaced by a
+// stand-in that records every call; nothing is started or stopped for real.
+// ---------------------------------------------------------------------------
+
+test('servicesFor and controllerFor choose by system: launchd on macOS, the Windows service manager otherwise', async () => {
+  assert.strictEqual(servicesFor('darwin'), MACOS_SERVICES)
+  assert.strictEqual(servicesFor('win32'), SERVICES)
+  assert.strictEqual(servicesFor('linux'), SERVICES)
+  assert.deepStrictEqual(Object.keys(MACOS_SERVICES), Object.keys(SERVICES), 'the same six programs on both systems')
+  for (const name of Object.values(MACOS_SERVICES)) assert.match(name, /^blossom-farm\.[a-z]+(-[a-z]+)*$/)
+  const calls = []
+  const run = async args => { calls.push(args.join(' ')); return { code: 0, out: '' } }
+  await controllerFor('darwin', run).stop('blossom-farm.hub')
+  await controllerFor('win32', run).stop('GadsHub')
+  assert.deepStrictEqual(calls, ['bootout system/blossom-farm.hub', 'stop GadsHub'])
+})
+
+test('sc controller: reads the state number, treats a missing service as stopped, runs fixed arguments', async () => {
+  const calls = []
+  const answers = {
+    'query GadsHub': { code: 0, out: 'SERVICE_NAME: GadsHub\r\n        STATE              : 4  RUNNING\r\n' },
+    'query FarmGate': { code: 0, out: '        ESTADO             : 1  STOPPED\r\n' },
+    'query KeepAvailable': { code: 0, out: '        STATE              : 3  STOP_PENDING\r\n' },
+    'query Nope': { code: 1060, out: '[SC] EnumQueryServicesStatus:OpenService FAILED 1060:\r\n' },
+  }
+  const sc = scController(async args => { calls.push(args.join(' ')); return answers[args.join(' ')] || { code: 0, out: '' } })
+  assert.strictEqual(await sc.isRunning('GadsHub'), true)
+  assert.strictEqual(await sc.isStopped('GadsHub'), false)
+  assert.strictEqual(await sc.isRunning('FarmGate'), false)
+  assert.strictEqual(await sc.isStopped('FarmGate'), true, 'a translated label does not matter')
+  assert.strictEqual(await sc.isStopped('KeepAvailable'), false, 'still stopping is not stopped')
+  assert.strictEqual(await sc.isStopped('Nope'), true)
+  assert.strictEqual(await sc.start('GadsHub'), 0)
+  assert.strictEqual(await sc.stop('GadsHub'), 0)
+  assert.deepStrictEqual(calls.slice(-2), ['start GadsHub', 'stop GadsHub'])
+})
+
+/** What "launchctl print system/<label>" writes for a daemon (shortened). */
+const printOut = state => `system/blossom-farm.hub = {\n\tactive count = 1\n\tpath = /Library/LaunchDaemons/blossom-farm.hub.plist\n\ttype = LaunchDaemon\n\tstate = ${state}\n\n\tprogram = /bin/bash\n\tpid = 412\n}\n`
+const NOT_FOUND = { code: 113, out: 'Bad request.\nCould not find service "blossom-farm.hub" in domain for system\n' }
+
+test('launchctl controller: running, not running and not loaded', async () => {
+  let answer = { code: 0, out: printOut('running') }
+  const calls = []
+  const lc = launchctlController(async args => { calls.push(args.join(' ')); return answer })
+  assert.strictEqual(await lc.isRunning('blossom-farm.hub'), true)
+  assert.strictEqual(await lc.isStopped('blossom-farm.hub'), false)
+  answer = { code: 0, out: printOut('not running') }
+  assert.strictEqual(await lc.isRunning('blossom-farm.hub'), false, '"not running" must not read as running')
+  assert.strictEqual(await lc.isStopped('blossom-farm.hub'), false, 'launchd still knows it, so it may not be loaded again yet')
+  answer = NOT_FOUND
+  assert.strictEqual(await lc.isRunning('blossom-farm.hub'), false)
+  assert.strictEqual(await lc.isStopped('blossom-farm.hub'), true)
+  assert.ok(calls.every(c => c === 'print system/blossom-farm.hub'))
+})
+
+test('launchctl controller: start loads the property list when launchd does not know the service, then starts it', async () => {
+  const calls = []
+  let loaded = false
+  const lc = launchctlController(async args => {
+    calls.push(args.join(' '))
+    if (args[0] === 'print') return loaded ? { code: 0, out: printOut('running') } : NOT_FOUND
+    if (args[0] === 'bootstrap') { loaded = true; return { code: 0, out: '' } }
+    return { code: 0, out: '' }
+  })
+  assert.strictEqual(await lc.start('blossom-farm.hub'), 0)
+  assert.deepStrictEqual(calls, ['print system/blossom-farm.hub', 'bootstrap system /Library/LaunchDaemons/blossom-farm.hub.plist', 'kickstart system/blossom-farm.hub'])
+  calls.length = 0
+  assert.strictEqual(await lc.start('blossom-farm.hub'), 0)
+  assert.deepStrictEqual(calls, ['print system/blossom-farm.hub', 'kickstart system/blossom-farm.hub'], 'already loaded: no second bootstrap')
+  calls.length = 0
+  assert.strictEqual(await lc.stop('blossom-farm.hub'), 0)
+  assert.deepStrictEqual(calls, ['bootout system/blossom-farm.hub'])
+})
+
+test('launchctl controller: a property list that cannot be loaded is reported, and nothing is started', async () => {
+  const calls = []
+  const lc = launchctlController(async args => {
+    calls.push(args[0])
+    if (args[0] === 'print') return NOT_FOUND
+    if (args[0] === 'bootstrap') return { code: 5, out: 'Bootstrap failed: 5: Input/output error\n' }
+    return { code: 0, out: '' }
+  })
+  assert.strictEqual(await lc.start('blossom-farm.hub'), 5)
+  assert.deepStrictEqual(calls, ['print', 'bootstrap'])
+})
+
+/**
+ * A stand-in for launchctl that behaves like launchd: bootout only begins the
+ * removal (the service stays known for a number of "print" calls), bootstrap
+ * fails while the service is still known (as launchd does, with error 5 or
+ * 37), and a bootstrapped service runs at once (RunAtLoad).
+ */
+function fakeLaunchd(pendingPolls) {
+  const state = {}
+  for (const name of Object.values(MACOS_SERVICES)) state[name] = 'running'
+  const pending = {}
+  const calls = []
+  const label = t => String(t).replace(/^system\//, '')
+  const run = async args => {
+    const [verb, a, b] = args
+    if (verb === 'print') {
+      const name = label(a)
+      if (state[name] === 'leaving' && --pending[name] <= 0) state[name] = 'gone'
+      if (!state[name] || state[name] === 'gone') return { code: 113, out: `Could not find service "${name}" in domain for system\n` }
+      return { code: 0, out: `system/${name} = {\n\tstate = ${state[name] === 'running' ? 'running' : 'not running'}\n}\n` }
+    }
+    if (verb === 'bootout') {
+      const name = label(a)
+      if (state[name] === 'gone') { calls.push(`bootout ${name} -> 113`); return { code: 113, out: '' } }
+      calls.push(`bootout ${name}`); state[name] = 'leaving'; pending[name] = pendingPolls
+      return { code: 0, out: '' }
+    }
+    if (verb === 'bootstrap') {
+      const name = String(b).replace(/^\/Library\/LaunchDaemons\//, '').replace(/\.plist$/, '')
+      assert.strictEqual(a, 'system')
+      assert.match(String(b), /^\/Library\/LaunchDaemons\/blossom-farm\.[a-z-]+\.plist$/)
+      if (state[name] !== 'gone') { calls.push(`bootstrap ${name} -> 5`); return { code: 5, out: 'Bootstrap failed: 5: Input/output error\n' } }
+      calls.push(`bootstrap ${name}`); state[name] = 'running'
+      return { code: 0, out: '' }
+    }
+    if (verb === 'kickstart') { calls.push(`kickstart ${label(a)}`); return { code: 0, out: '' } }
+    throw new Error(`unexpected launchctl call: ${args.join(' ')}`)
+  }
+  return { run, calls, state }
+}
+
+async function withMacApp(launchd, fn) {
+  const app = createApp({ secret: SECRET, platform: 'darwin', run: launchd.run, log: () => {}, replyGraceMs: 0, wait: async () => {} })
+  await new Promise(r => app.listen(0, r))
+  try { await fn({ app, port: app.server.address().port }) } finally { await new Promise(r => app.server.close(r)) }
+}
+
+test('macOS: GET /status answers the same six booleans, read from launchd', async () => {
+  const launchd = fakeLaunchd(1)
+  await withMacApp(launchd, async ({ port }) => {
+    let r = await request(port, 'GET', '/status', auth)
+    assert.strictEqual(r.status, 200)
+    assert.deepStrictEqual(r.json, { hub: true, provider: true, cloudflare: true, keep_available: true, mongodb: true, action_in_progress: false })
+    launchd.state[MACOS_SERVICES.gate] = 'gone'
+    launchd.state[MACOS_SERVICES.cloudflare] = 'stopped'
+    r = await request(port, 'GET', '/status', auth)
+    assert.deepStrictEqual(r.json, { hub: true, provider: false, cloudflare: false, keep_available: true, mongodb: true, action_in_progress: false })
+    assert.strictEqual((await request(port, 'GET', '/status')).status, 401)
+  })
+})
+
+test('macOS: POST /restart-all takes every service out of launchd in order, waits, and loads them again; MongoDB is not stopped', async () => {
+  const launchd = fakeLaunchd(4)
+  await withMacApp(launchd, async ({ app, port }) => {
+    const r = await request(port, 'POST', '/restart-all', auth)
+    assert.strictEqual(r.status, 200)
+    assert.deepStrictEqual(r.json, { ok: true, message: 'Restarting all services...' })
+    await settle(app)
+    assert.deepStrictEqual(launchd.calls, [
+      'bootout blossom-farm.cloudflared', 'bootout blossom-farm.keep-available', 'bootout blossom-farm.gate', 'bootout blossom-farm.provider', 'bootout blossom-farm.hub',
+      'kickstart blossom-farm.mongodb',
+      'bootstrap blossom-farm.hub', 'kickstart blossom-farm.hub',
+      'bootstrap blossom-farm.provider', 'kickstart blossom-farm.provider',
+      'bootstrap blossom-farm.gate', 'kickstart blossom-farm.gate',
+      'bootstrap blossom-farm.keep-available', 'kickstart blossom-farm.keep-available',
+      'bootstrap blossom-farm.cloudflared', 'kickstart blossom-farm.cloudflared'])
+    for (const name of Object.values(MACOS_SERVICES)) assert.strictEqual(launchd.state[name], 'running', name)
+  })
+})
+
+test('macOS: /restart-provider, /start-provider and /restart-cloudflare touch only their own services', async () => {
+  const launchd = fakeLaunchd(3)
+  await withMacApp(launchd, async ({ app, port }) => {
+    assert.strictEqual((await request(port, 'POST', '/restart-provider', auth)).status, 200)
+    await settle(app)
+    assert.deepStrictEqual(launchd.calls.splice(0), ['bootout blossom-farm.provider', 'bootstrap blossom-farm.provider', 'kickstart blossom-farm.provider', 'kickstart blossom-farm.gate'])
+    assert.strictEqual((await request(port, 'POST', '/start-provider', auth)).status, 200)
+    await settle(app)
+    assert.deepStrictEqual(launchd.calls.splice(0), ['kickstart blossom-farm.provider', 'kickstart blossom-farm.gate'])
+    assert.strictEqual((await request(port, 'POST', '/restart-cloudflare', auth)).status, 200)
+    await settle(app)
+    assert.deepStrictEqual(launchd.calls.splice(0), ['bootout blossom-farm.cloudflared', 'bootstrap blossom-farm.cloudflared', 'kickstart blossom-farm.cloudflared'])
+  })
+})
+
+test('macOS: /start-all brings back services that launchd no longer knows', async () => {
+  const launchd = fakeLaunchd(1)
+  for (const name of Object.values(MACOS_SERVICES)) launchd.state[name] = 'gone'
+  await withMacApp(launchd, async ({ app, port }) => {
+    assert.strictEqual((await request(port, 'POST', '/start-all', auth)).status, 200)
+    await settle(app)
+    assert.deepStrictEqual(launchd.calls.filter(c => c.startsWith('bootstrap')), [
+      'bootstrap blossom-farm.mongodb', 'bootstrap blossom-farm.hub', 'bootstrap blossom-farm.provider',
+      'bootstrap blossom-farm.gate', 'bootstrap blossom-farm.keep-available', 'bootstrap blossom-farm.cloudflared'])
+    assert.deepStrictEqual((await request(port, 'GET', '/status', auth)).json,
+      { hub: true, provider: true, cloudflare: true, keep_available: true, mongodb: true, action_in_progress: false })
+  })
+})
+
+test('the macOS controller only ever runs /bin/launchctl by its full path, with fixed service names (no shell)', () => {
+  const src = fs.readFileSync(SERVER, 'utf8')
+  assert.match(src, /execFile\('\/bin\/launchctl'/)
+  assert.strictEqual((src.match(/execFile\(/g) || []).length, 2, 'two programs are ever run: sc.exe and launchctl')
+  assert.doesNotMatch(src, /execSync|spawn|shell:\s*true/)
 })
