@@ -3,8 +3,9 @@
     Removes the farm services from this computer; optionally the data too.
 .DESCRIPTION
         powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
-            removes the six Windows services. C:\farm, the database, the tunnel
-            and the installed programs stay: install.ps1 brings the farm back.
+            removes the six Windows services and the kit's Windows Firewall
+            rules. C:\farm, the database, the tunnel and the installed programs
+            stay: install.ps1 brings the farm back.
 
         powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1 -RemoveData
             also deletes the tunnel at Cloudflare (when possible), the GADS
@@ -51,6 +52,9 @@ try {
         if ($code -ne 0) { $null = Invoke-Native -File 'sc.exe' -Arguments @('delete', $name) }
         Write-Ok ($name + ' removed')
     }
+
+    $removedRules = Remove-FarmFirewallBlock
+    if ($removedRules -gt 0) { Write-Ok ('' + $removedRules + ' Windows Firewall rule(s) of the kit removed.') }
 
     if ($RemoveData) {
         Write-Step 'Deleting the tunnel at Cloudflare'

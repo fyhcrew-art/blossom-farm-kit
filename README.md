@@ -26,10 +26,14 @@ There is no onboarding call. This repository is the whole of it.
                     +---------------------------------------+
 ```
 
-* Nothing on the PC listens on your network. Every program listens on
-  `127.0.0.1` only; `cloudflared` connects *outwards* to Cloudflare, and
-  Cloudflare gives the three host names a valid certificate. You open no port
-  on your router.
+* The five programs in the drawing listen on `127.0.0.1` only;
+  `cloudflared` connects *outwards* to Cloudflare, and Cloudflare gives the
+  three host names a valid certificate. You open no port on your router.
+* One exception you should know: for each connected iPhone, GADS opens a few
+  more ports on all addresses of the PC. The installer adds Windows Firewall
+  rules that keep other computers on your network away from them. Keep
+  Windows Firewall switched on ([`docs/security.md`](docs/security.md),
+  section 1).
 * **Hub**: the list of phones and the logins. Blossom signs in here.
 * **Provider**: talks to the phones. It has no login of its own, so the kit
   never publishes it directly: the public address leads to the **provider
@@ -72,9 +76,11 @@ All of it runs as Windows services that start with the PC:
 ### 2. Download the kit
 
 On the farm PC, download the latest kit from
-<https://github.com/fyhcrew-art/blossom-farm-kit/releases> ("Source code
-(zip)" of the newest `kit-v…` release), and unpack it, for example to
-`C:\blossom-farm-kit`. Keep the folder: the maintenance scripts are in it.
+<https://github.com/fyhcrew-art/blossom-farm-kit/releases/latest>: the file
+"Source code (zip)" of the release whose name starts with `kit-v`. (Releases
+named `GADS-drag …` on the same page are a program the installer fetches by
+itself, not the kit.) Unpack it, for example to `C:\blossom-farm-kit`. Keep
+the folder: the maintenance scripts are in it.
 
 ### 3. Run the installer
 
@@ -95,8 +101,8 @@ What the installer does, in order (it prints each step):
 | Step | What happens |
 |---|---|
 | 1 Checks | Administrator, 64-bit Windows 10 1809+/11, 10 GB free. |
-| 2 Folders | Creates `C:\farm` and makes it readable by Administrators and SYSTEM only. |
-| 3 Programs | Installs, with `winget` and at pinned versions: NSSM, MongoDB, Node.js, FFmpeg, cloudflared. Programs that are already installed are kept as they are. |
+| 2 Folders | Creates `C:\farm` and makes it readable by Administrators and SYSTEM only. A `C:\farm` that already exists, has content and was not made by this kit stops the installer: it will not adopt a folder somebody else prepared. |
+| 3 Programs | Installs, with `winget` and at pinned versions: NSSM, MongoDB, Node.js, FFmpeg, cloudflared. Programs that are already installed are kept as they are. Checks for Apple's USB support (iTunes from Apple's installer, see `docs/phones.md`). |
 | 4 GADS | Downloads the GADS hub from its publisher's release and the patched provider from this repository's release, and checks the SHA-256 of both against `versions.json`. A file with a wrong checksum is deleted, not used. |
 | 5 MongoDB | Starts it and checks that it listens on this PC only. |
 | 6 Hub + password | Starts the hub (on this PC only). GADS creates its administrator `admin` with a default password that anybody can look up; **the installer makes you replace it before anything is reachable from outside.** You choose it (14+ characters), typing is hidden. |
@@ -104,8 +110,8 @@ What the installer does, in order (it prints each step):
 | 8 Host names | Asks for the three host names. |
 | 9 Tunnel | Opens the Cloudflare sign-in in a browser, creates the tunnel `blossom-farm`, creates the three DNS records, writes and validates the tunnel configuration. |
 | 10 Restart secret | Generates it (256 random bits). |
-| 11 Services | Creates the Windows services (auto-start, restart on crash, rotating logs in `C:\farm\logs`) and starts them; the tunnel last. Switches off sleep on mains power. |
-| 12 Self-test | Performs the checks of Blossom's "Test connection" against your public addresses, plus three of its own: that the provider and the restart service refuse a stranger, and that the tunnel refuses the hub paths GADS leaves without a login. |
+| 11 Services | Adds the Windows Firewall rules for the provider's per-phone ports. Creates the Windows services (auto-start, restart on crash, rotating logs in `C:\farm\logs`) and starts them; the tunnel last. Switches off sleep on mains power. |
+| 12 Self-test | Performs the checks of Blossom's "Test connection" against your public addresses, sending its requests the way Blossom's servers do, plus four of its own: that the provider and the restart service refuse a stranger, and that the tunnel refuses the two kinds of hub path GADS leaves without a login. |
 
 At the end it prints what to paste into Blossom:
 
@@ -123,7 +129,10 @@ At the end it prints what to paste into Blossom:
 log.** Copy them straight into Blossom or a password manager.
 
 The installer can be run again at any time. It keeps the database, the
-tunnel, the secrets and the passwords, and repairs what is missing.
+tunnel, the secrets and the passwords, and repairs what is missing. A farm
+that is running keeps running: services whose settings and files did not
+change are not restarted, and if the installer stops half-way (a wrong
+password, Ctrl+C, an error) it starts again whatever it had stopped.
 
 **Appium: off unless you ask for it.** No screen of Blossom CRM needs Appium:
 the phone list, Control, live video, the AI assistant, downloads to a phone
@@ -137,12 +146,17 @@ automation, include it:
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -WithAppium
 ```
 
-This also installs Appium and its iOS driver under `C:\farm` (pinned in
-`versions.json`) and lets the provider start one Appium server per phone. It
-can be added later by running the installer again with the switch. Read
-`docs/security.md`, section 3, first: with Appium on, the tunnel rule that
-refuses "appium" paths on the hub address is what stands between the internet
-and those servers.
+This also installs Appium, its iOS driver and the GADS plugin under `C:\farm`
+and lets the provider start one Appium server per phone. It can be added
+later by running the installer again with the switch. Read
+`docs/security.md` first, sections 3 and 8:
+
+* with Appium on, the tunnel rule that refuses "appium" paths on the hub
+  address is what stands between the internet and those servers;
+* only the versions of the three packages themselves are pinned in
+  `versions.json`. The hundreds of packages they depend on are chosen by npm
+  on the day you install and are **not** checksum-verified by this kit,
+  unlike the GADS programs.
 
 ### 4. Connect it to Blossom
 
@@ -170,12 +184,12 @@ Run these from an Administrator PowerShell inside the kit folder
 
 | Script | What it is for |
 |---|---|
-| `scripts\status.ps1` | Services, ports, program checksums, disk. `-Logs` adds the last lines of every log. Changes nothing. |
+| `scripts\status.ps1` | Services, ports, the firewall, program checksums, disk. `-Logs` adds the last lines of every log with session tokens and your host names masked: copy **this output** when you ask for help, never a log file itself (`docs/security.md`, section 4). Changes nothing. |
 | `scripts\self-test.ps1` | The connection test against the public addresses. |
 | `scripts\rotate-secrets.ps1` | New restart secret (`-RestartSecret`), new password for `blossom` (`-HubUser`), for `admin` (`-AdminPassword`), or `-All`. Use it whenever somebody with Phone Farm access leaves. |
 | `scripts\update.ps1` | Moves the farm to the versions of a newer kit; `-Rollback` goes back. |
 | `scripts\export-farm.ps1`, `scripts\import-farm.ps1` | Move the farm to another PC without changing anything in Blossom. |
-| `scripts\uninstall.ps1` | Removes the services; with `-RemoveData` also the tunnel, the database and `C:\farm`. |
+| `scripts\uninstall.ps1` | Removes the services and the kit's firewall rules; with `-RemoveData` also the tunnel, the database and `C:\farm`. |
 
 Where things are:
 
@@ -186,6 +200,7 @@ Where things are:
 | `C:\farm\config` | `farm.json` (host names, no secrets), `restart-secret.txt`, `keep-available.json`, `cloudflared\` (tunnel configuration and credentials) |
 | `C:\farm\logs` | one log per service, rotated at 10 MB, rotated files deleted after 30 days |
 | `C:\farm\Provider1` | the provider's own folder: its log, per-phone logs, cached pairings |
+| `C:\farm\export` | archives written by `export-farm.ps1` (every secret of the farm: move them to an encrypted medium and delete them) |
 
 ## Updating
 
@@ -205,13 +220,19 @@ Where things are:
 ## Troubleshooting
 
 Start with `scripts\status.ps1 -Logs` on the PC and "Test connection" in
-Blossom. The first step that is not OK is the cause.
+Blossom. The first step that is not OK is the cause. To ask for help, copy
+the output of `scripts\status.ps1 -Logs` (it masks session tokens and your
+host names). Do not post files from `C:\farm\logs`: GADS writes request
+addresses into them, and those can contain a login token.
 
 | What you see | Likely cause | What to do |
 |---|---|---|
 | `install.ps1`: "must run as Administrator" | Normal PowerShell window | Start → type `powershell` → right-click → Run as administrator. |
 | `install.ps1`: "running scripts is disabled on this system" | You ran `.\install.ps1` directly | Use `powershell -ExecutionPolicy Bypass -File .\install.ps1`. |
 | `install.ps1`: "winget is not available" | Old Windows 10, or Windows without the Store (LTSC, Server) | Install "App Installer" from the Microsoft Store, or update Windows. On editions without the Store, install the programs named in `versions.json` yourself and run the installer again: it keeps programs it finds. |
+| winget: "Argument name was not recognized", or winget fails on every program | winget on this PC is older than the installer expects | Microsoft Store → Library → Get updates, let "App Installer" update, open a new Administrator PowerShell, run the installer again. |
+| `install.ps1`: "C:\farm already exists and cannot be used" | A folder of that name exists, has content, and was not created and locked by this kit | Rename it (`Rename-Item C:\farm C:\farm-old`) and run the installer again. If you do not know where the folder comes from, have the PC checked. |
+| "… is not at its download address (HTTP 404)" | The file the kit pins was not published yet or was withdrawn | Use the newest kit from the releases page. If you have the exact `GADS-drag.exe` from elsewhere: `install.ps1 -ProviderExe <path>` (its SHA-256 must be the pinned one). |
 | winget: "No version found matching" | The pinned version was withdrawn from winget | Install the nearest newer version: `winget install --exact --id <id>`; then run the installer again. Tell us (issue) so the pin is refreshed. |
 | "…its SHA-256 is wrong … The file was deleted" | Damaged or altered download | Run again. If it repeats, do not work around it: report it. |
 | "The GADS hub does not start" | Port 10000 in use, or MongoDB down | `C:\farm\logs\hub.log`; `Get-Service MongoDB`. |
@@ -224,7 +245,12 @@ Blossom. The first step that is not OK is the cause.
 | Self-test: "Hub paths containing appium are not refused by the tunnel" | The tunnel configuration was changed by hand | Run `install.ps1` again (it rewrites the configuration). If it stays, stop the tunnel (`Stop-Service Cloudflared`) and report it. |
 | Provider log: "Appium is not available" | Appium is switched on for the provider in the hub but was not installed | Run `install.ps1 -WithAppium`, or switch "Set up Appium servers" off for the provider in the hub page. |
 | Self-test, Provider: "not the provider behind it" (502) | `GadsProvider` is not running | `C:\farm\Provider1\provider.log` and `C:\farm\logs\provider.log`. If it says *Could not provide WebDriverAgent.ipa file from MongoDB*: iOS was switched on for the provider before a WebDriverAgent was uploaded — `docs/phones.md`, step 3. |
-| Blossom "Test connection" fails at Hub sign-in although the self-test passes | A login wall or a challenge in front of the host names | Remove Cloudflare Access applications and "Under Attack"/challenge rules for the three names (`docs/security.md`). |
+| Blossom "Test connection" fails at Secure connection or Hub sign-in with an error page (HTML or 403), or the self-test says "Cloudflare blocked or challenged the request" | A login wall or a challenge in front of the host names | Cloudflare dashboard → Security → Settings: switch **Browser Integrity Check** off (it is on by default), or switch it off for the three farm names with a configuration rule. Remove Cloudflare Access applications and "Under Attack"/challenge/bot rules for the three names (`docs/network.md`, section 5). |
+| Phone list or Control fails on and off with "server unreachable" / error 429 | A Cloudflare rate-limiting rule on the hub sign-in fires on normal use | Raise or remove the rule: Blossom signs in on every refresh of the phone list (`docs/network.md`, section 5). |
+| After a restart the site is Connected but every phone is Offline until somebody signs in to Windows | Apple's USB support is the Microsoft Store version, which only runs in a signed-in session | Install iTunes from Apple's own installer (`docs/phones.md`, section 0); `Get-Service 'Apple Mobile Device Service'` must then show a service. |
+| A phone is connected but never becomes live; WebDriverAgent install or launch errors in the provider log | The WDA bundle ID in the provider does not match the signed app, or the provisioning profile does not cover it | `docs/phones.md`, section 2, "The bundle ID": for the pre-built file signed in the hub it is `com.facebook.WebDriverAgentRunner` and the App ID must be `*`. |
+| `status.ps1`: "listens on all addresses … no kit firewall rule covers it", or "Windows Firewall is switched OFF" | The firewall rules are missing, or the firewall is off | Run `install.ps1` again (it recreates the rules) and switch Windows Firewall on (`docs/security.md`, section 1). |
+| "Restart all" in Blossom's Services panel seems to do nothing | A program did not stop in time | `C:\farm\logs\restart-server.log` names the service that did not stop. Restart it on the PC: `Restart-Service <name> -Force`. |
 | Blossom: taps answer "device is not available" (422) | keep-available is not running | `Get-Service KeepAvailable`, `C:\farm\logs\keep-available.log`. If you created extra workspaces in the hub: `scripts\rotate-secrets.ps1 -KeepAvailable` makes it cover all of them. |
 | A phone is Offline | Cable, hub power, phone locked, pairing lost | Unlock it, look at it in the hub's own page, "Restart Provider" in Blossom's Services panel. |
 | Online but no picture in Control | FFmpeg missing from the provider's path, or the browser cannot reach the PC directly | `scripts\status.ps1` (FFmpeg must be listed); try another network. Video goes peer to peer, see `docs/network.md`. |
@@ -263,7 +289,8 @@ winget, the site in Blossom) with the way to remove each.
 | `services/` | `restart-server.js`, `provider-gate.js`, `keep-available.ps1` |
 | `scripts/` | status, self-test, update, rotate-secrets, export, import, uninstall |
 | `patch/` | the provider patch and what it does |
-| `.github/workflows/` | `build-gads.yml` builds the patched provider and publishes it; `ci.yml` tests the kit |
+| `.github/` | `workflows/build-gads.yml` builds the patched provider and publishes it with its source and licence files (`scripts/make-source-archive.sh`); `workflows/ci.yml` tests the kit |
+| `LICENSE`, `LICENSE-AGPL-3.0`, `NOTICE` | the licences, and what applies to which part |
 | `docs/` | [`phones.md`](docs/phones.md), [`network.md`](docs/network.md), [`security.md`](docs/security.md), [`RELEASING.md`](docs/RELEASING.md) |
 | `tests/` | tests of the services (Node) and of the pure PowerShell functions (Pester) |
 
@@ -271,11 +298,14 @@ winget, the site in Blossom) with the way to remove each.
 
 * The files of this kit are under the MIT licence ([`LICENSE`](LICENSE)),
   **except** `patch/provider-drag.patch`, which modifies GADS and is under the
-  GNU AGPL v3.0, like the GADS source.
+  GNU AGPL v3.0, like the GADS source
+  ([`LICENSE-AGPL-3.0`](LICENSE-AGPL-3.0) is the text).
 * GADS is not part of this repository. Its source is AGPL-3.0; its web
   interface (`hub-ui`) is proprietary. The installer downloads the hub from
   the GADS publisher's own release page, and the provider from this
-  repository's release, where it is published with its complete source.
+  repository's release, where it is published together with its source
+  archive, its build instructions and the licence notices of the libraries
+  compiled into it.
 * Details and the third-party programs the installer fetches:
   [`NOTICE`](NOTICE).
 

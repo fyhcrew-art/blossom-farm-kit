@@ -5,6 +5,11 @@
 # Runs on a tag "gads-v*" (builds and publishes a release) or by hand
 # (builds; publishes only when asked). The build is reproducible: the result
 # must have the SHA-256 pinned in versions.json, otherwise the job fails.
+#
+# Nothing is published unless versions.json records the maintainers' decision
+# to publish a binary that embeds upstream's "resources" folder (Apple's
+# developer disk image among it): gadsDrag.redistributeEmbeddedResources must
+# be true. See NOTICE, section 2b, and docs/RELEASING.md.
 name: Build GADS-drag
 
 on:
@@ -34,6 +39,7 @@ jobs:
     outputs:
       release_tag: ${{ steps.pins.outputs.release_tag }}
       version: ${{ steps.pins.outputs.version }}
+      redistribute: ${{ steps.pins.outputs.redistribute }}
     steps:
       - name: Check out the kit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,6 +60,7 @@ jobs:
             echo "sha256=$(jq -er .gadsDrag.sha256 versions.json)"
             echo "go_version=$(jq -er .gadsDrag.goVersion versions.json)"
             echo "swag_version=$(jq -er .gadsDrag.swagVersion versions.json)"
+            echo "redistribute=$(jq -r '.gadsDrag.redistributeEmbeddedResources == true' versions.json)"
           } >> "$GITHUB_OUTPUT"
 
       - name: The pushed tag must be the one in versions.json
@@ -127,14 +134,17 @@ jobs:
           go vet ./provider/router/
           go test ./provider/...
 
-      - name: Source archive (the AGPL requires offering the source of what is published)
+      # After the build and its tests on purpose: the script adds vendor/ to the
+      # tree, and the published exe is built in module mode, without it.
+      - name: Source archive, licence texts of the linked modules, the AGPL text
         env:
           VERSION: ${{ steps.pins.outputs.version }}
-        run: |
-          set -euo pipefail
-          cp kit/patch/provider-drag.patch gads/provider-drag.patch
-          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='2020-01-01 00:00:00Z' \
-              --exclude=.git -czf "dist/GADS-drag-${VERSION}-source.tar.gz" gads
+          UPSTREAM_COMMIT: ${{ steps.pins.outputs.upstream_commit }}
+          UPSTREAM_TAG: ${{ steps.pins.outputs.upstream_tag }}
+          GO_VERSION: ${{ steps.pins.outputs.go_version }}
+          SWAG_VERSION: ${{ steps.pins.outputs.swag_version }}
+          GOFLAGS: ''
+        run: bash kit/.github/scripts/make-source-archive.sh
 
       - name: Checksums, and the reproducibility check
         env:
@@ -142,7 +152,7 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          sha256sum GADS-drag.exe GADS-drag-*-source.tar.gz | tee SHA256SUMS
+          sha256sum GADS-drag.exe GADS-drag-*-source.tar.gz THIRD-PARTY-NOTICES.txt LICENSE-AGPL-3.0.txt | tee SHA256SUMS
           BUILT="$(sha256sum GADS-drag.exe | cut -d' ' -f1)"
           if [ "$BUILT" != "$PINNED" ]; then
             echo "::error::GADS-drag.exe has SHA-256 $BUILT but versions.json pins $PINNED. If the patch, the upstream commit, the Go version or the swag version changed, put the new value into versions.json (gadsDrag.sha256) and tag again. If nothing changed, do not publish: find out why the build differs."
@@ -167,6 +177,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: The decision to publish must be recorded in versions.json
+        env:
+          REDISTRIBUTE: ${{ needs.build.outputs.redistribute }}
+        run: |
+          set -euo pipefail
+          if [ "$REDISTRIBUTE" != "true" ]; then
+            echo "::error::Not published. GADS-drag.exe embeds upstream's 'resources' folder, which holds Apple's developer disk image and other pre-built files. Publishing it makes this repository a distributor of them. Read NOTICE, section 2b, and docs/RELEASING.md (\"Before the first gads release\"); if you decide to publish, set gadsDrag.redistributeEmbeddedResources to true in versions.json in the commit you tag. The build itself succeeded and is kept as a workflow artifact."
+            exit 1
+          fi
+
       - name: Fetch the build
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -185,12 +205,18 @@ jobs:
           cd dist
           sha256sum -c SHA256SUMS
           cat > notes.md <<NOTES
-          GADS provider with the Blossom patch, for Windows x64 (${VERSION}).
+          **This is not the kit.** To set up a farm, download the newest release whose name starts with \`kit-v\`. The kit's installer fetches the file below by itself.
+
+          GADS provider with the Blossom patch, for Windows x64 (${VERSION}). A modified version of GADS, not the original.
 
           * Built by this repository's workflow from https://github.com/shamanec/GADS plus \`patch/provider-drag.patch\`; the exact upstream commit is in \`versions.json\`.
-          * Licence: GNU AGPL v3.0, like the GADS source it is built from. The complete source of this binary is attached (\`GADS-drag-${VERSION}-source.tar.gz\`).
+          * Licence: GNU AGPL v3.0, like the GADS source it is built from (\`LICENSE-AGPL-3.0.txt\`).
+          * Source: \`GADS-drag-${VERSION}-source.tar.gz\` holds the patched GADS tree, the generated \`docs\` package, the sources of all Go modules it is built from (\`vendor/\`), the patch, \`BUILD.md\` (how this file was built) and \`MODIFICATIONS.md\` (what was changed, and when). One thing is left out and named in the archive with checksums and its upstream address: Apple's developer disk image (\`resources/ios-ddi\`), which the build embeds.
+          * \`THIRD-PARTY-NOTICES.txt\`: the licence texts of the Go modules compiled into the program.
           * It does **not** contain the GADS hub web interface (\`hub-ui\`, proprietary). Use it as the provider only; the hub is the publisher's own release.
           * SHA-256 values are in \`SHA256SUMS\`; the installer of the kit verifies the one pinned in \`versions.json\`.
           NOTES
-          gh release create "$TAG" --target "$TARGET" --title "GADS-drag ${VERSION}" --notes-file notes.md \
-            GADS-drag.exe SHA256SUMS "GADS-drag-${VERSION}-source.tar.gz"
+          # --latest=false: the "Latest" badge and /releases/latest belong to the
+          # tested kit-v releases, never to a provider-only release.
+          gh release create "$TAG" --target "$TARGET" --title "GADS-drag ${VERSION}" --notes-file notes.md --latest=false \
+            GADS-drag.exe SHA256SUMS "GADS-drag-${VERSION}-source.tar.gz" THIRD-PARTY-NOTICES.txt LICENSE-AGPL-3.0.txt

@@ -18,9 +18,12 @@
     not changed by this script; see README, section "Updating".
 .PARAMETER Rollback
     Put back the programs and service scripts that the last update replaced.
+.PARAMETER ProviderExe
+    Path of a GADS-drag.exe you already have, used instead of downloading it.
+    Only accepted when its SHA-256 is the one pinned in versions.json.
 #>
 [CmdletBinding()]
-param([switch]$Rollback)
+param([switch]$Rollback, [string]$ProviderExe = '')
 
 $ErrorActionPreference = 'Stop'
 $KitRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -106,6 +109,12 @@ try {
     if ((Test-Path -LiteralPath $paths.ProviderExe) -and ((Get-FileSha256 -Path $paths.ProviderExe) -eq $providerHash)) {
         Copy-Item -LiteralPath $paths.ProviderExe -Destination $newProvider -Force
     } else {
+        if ($ProviderExe) {
+            if (-not (Test-Path -LiteralPath $ProviderExe -PathType Leaf) -or ((Get-FileSha256 -Path $ProviderExe) -ne $providerHash)) {
+                Stop-Farm -Problem ('-ProviderExe: ' + $ProviderExe + ' is missing or does not have the SHA-256 this kit pins for the provider ' + $new.gadsDrag.version + '.') -WhatToDo 'Nothing was changed. Use the GADS-drag.exe of exactly this version, or leave -ProviderExe out to download it.'
+            }
+            Copy-Item -LiteralPath $ProviderExe -Destination $newProvider -Force
+        }
         Get-VerifiedDownload -Url $new.gadsDrag.url -Sha256 $new.gadsDrag.sha256 -OutFile $newProvider -What ('the patched GADS provider ' + $new.gadsDrag.version)
     }
     Write-Ok 'Both programs are downloaded and their SHA-256 values match.'
@@ -126,7 +135,7 @@ try {
 
     $bad = @(Start-FarmPrograms)
     if ($bad.Count -gt 0) {
-        Stop-Farm -Problem ('After the update these services did not start: ' + ($bad -join ', ')) -WhatToDo 'Go back with   scripts\update.ps1 -Rollback   and report the end of the matching log in C:\farm\logs on the kit repository.'
+        Stop-Farm -Problem ('After the update these services did not start: ' + ($bad -join ', ')) -WhatToDo 'Go back with   scripts\update.ps1 -Rollback   . To report it on the kit repository, copy the output of   scripts\status.ps1 -Logs   (it masks session tokens and your host names). Never post a file from C:\farm\logs itself: GADS writes request addresses into its logs, and they can contain a login token.'
     }
     Write-Ok 'Updated and running. Check with scripts\status.ps1, then "Test connection" in Blossom.'
     Write-Note 'If this kit changed the tunnel configuration or the services (see its release notes), run install.ps1 once as well.'

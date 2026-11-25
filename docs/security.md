@@ -10,14 +10,43 @@ that you can check them.
 ## 1. What is exposed to the internet
 
 Three https host names, through the Cloudflare Tunnel. Nothing else: no port
-is open on your router, and every farm program listens on `127.0.0.1` only
-(`install.ps1` and `scripts\status.ps1` verify it).
+is open on your router.
 
 | Host name | Leads to | What protects it |
 |---|---|---|
 | hub | the GADS hub: its web page and its API | the hub's own user names and passwords |
 | provider | the **provider gate**, and behind it the GADS provider | a valid hub session token, checked by the gate with the hub |
 | restart | the restart service | the restart secret (256 random bits) |
+
+### What listens on the PC, and what your local network can reach
+
+* MongoDB, the hub, the provider's own port, the provider gate and the
+  restart service listen on `127.0.0.1` only: nothing outside the PC can
+  connect to them. `install.ps1` and `scripts\status.ps1` check these five
+  ports.
+* **The per-phone ports are different.** For every connected iPhone the GADS
+  provider opens three more ports (WebDriverAgent, the screen stream, the
+  WebDriverAgent video), on port numbers it picks at run time, and upstream
+  GADS opens them on **all** network addresses of the PC, not on `127.0.0.1`
+  (`provider/devices/ios.go`, through go-ios `ios/forward/forward.go`). With
+  `-WithAppium` the same goes for one Appium server per phone
+  (`provider/devices/appium.go` starts it without an address). None of these
+  ports asks for a login: whoever reaches a WebDriverAgent port can take
+  screenshots and tap on that phone, past the hub, the gate and the tunnel.
+* What closes them: **Windows Firewall.** `install.ps1` creates rules named
+  "Blossom farm - no network access to …" that refuse incoming TCP connections
+  to `GADS-drag.exe`, to `GADS.exe` and, with `-WithAppium`, to `node.exe`.
+  A block rule wins over any "allow" rule for the same program (for example
+  one made long ago by clicking "Allow access"). Connections from the PC to
+  itself are never filtered by Windows Firewall, so the farm is unaffected;
+  the live video is UDP and is not touched. `scripts\status.ps1` lists every
+  port the farm programs have open, says whether a rule covers it, and warns
+  when Windows Firewall is switched off.
+* What that means for you: **keep Windows Firewall on.** If another security
+  product replaces it, the kit's rules do nothing, and that product must
+  block incoming connections to the PC itself. Either way, a farm PC belongs
+  on a network you control, not on a shared office or guest Wi-Fi. The kit
+  does not change how GADS opens these ports; the rule is the protection.
 
 ### Why a tunnel and not port forwarding
 
@@ -56,7 +85,13 @@ leads to `services/provider-gate.js`, which:
   remembers the answer for 30 seconds;
 * refuses when the hub cannot be asked (fails closed);
 * never passes on the provider's profiling pages (`/debug/…`) or the
-  endpoints the provider only serves to local helpers.
+  endpoints the provider only serves to local helpers. The gate compares the
+  path the way the provider reads it, that is after percent-decoding
+  (`/%64ebug` is `/debug`), and answers 400 to a path that could be read in
+  two ways (an encoded slash or backslash, `..`, a broken percent-code);
+* removes the `token` parameter from the address before it passes a request
+  on. The provider does not need it, and GADS writes every request address to
+  its log (section 4).
 
 Limits you should know:
 
@@ -92,8 +127,8 @@ state of the software the farm runs on.
 * **No protection against password guessing** on the hub's sign-in
   (`hub/auth/auth.go`: no rate limit, no lock-out). The passwords the kit
   generates are 256 random bits; the one you choose for `admin` must be long.
-  A Cloudflare rate-limiting rule on `/authenticate` is worth adding
-  (`docs/network.md`, section 5).
+  A Cloudflare rate-limiting rule on `/authenticate` can blunt a flood of
+  guesses, within limits (`docs/network.md`, section 5).
 * **Hub paths that contain the word "appium" skip the login check**
   (`hub/auth/auth.go`, `AuthMiddleware`: any path containing "appium" is let
   through). Behind such paths the hub forwards to the provider, and from there
@@ -119,11 +154,17 @@ state of the software the farm runs on.
   view does not load through the public address; open the hub page on the PC
   (`http://127.0.0.1:10000`) for that.
 * **Some hub endpoints are registered outside the login check**
-  (`hub/router/handler.go`), among them `/available-devices` (the device list
-  of a workspace, for whoever knows the workspace id) and `/provider-update`
-  (how a provider reports to the hub). The kit refuses `/provider-update` at
-  the tunnel; `/available-devices` stays reachable because the hub's own page
-  needs it.
+  (`hub/router/handler.go`: everything registered before
+  `auth.AuthMiddleware()` is added). All of them, and what the kit does:
+
+  | Hub path | What it gives without a login | The kit |
+  |---|---|---|
+  | `POST /provider-update` | how a provider reports to the hub; a stranger could feed it false device states | refused at the tunnel (403) |
+  | `GET /admin/provider/<nickname>/info` | the provider's record from the database, sent again every second for as long as the connection stays open: operating system, port, WebDriverAgent bundle ID and, if you set one, the **supervision password** (`docs/phones.md`, section 6). Each open connection also costs the hub one database query per second | refused at the tunnel (403); the self-test checks it from outside. The hub page's provider view therefore only works on the PC (`http://127.0.0.1:10000`) |
+  | `GET /available-devices` | the device list of a workspace, for whoever knows the workspace id | stays reachable: the hub's own page needs it |
+  | `/devices/control/<udid>/in-use`, `/lock`, `/unlock`, `/release` | nothing: these handlers check the session token themselves (`hub/router/routes.go`) | passed on |
+  | `POST /authenticate`, `POST /oauth/token` | the sign-in itself | passed on |
+  | `GET /swagger/…` | the hub's API description; no data of yours | passed on |
 * **Both programs answer any website's scripts** (CORS is open in both
   routers). This matters together with the next point.
 
@@ -143,6 +184,26 @@ user list.
 In GADS 6.0.0 a session token is valid for **one hour** from sign-in
 (`hub/auth/auth.go`) and is not cancelled by a password change. (Later GADS
 versions extend sessions; check again when a kit moves to a newer GADS.)
+
+### Session tokens end up in the hub's log
+
+GADS writes the address of every request to its output, and the kit keeps
+that output in `C:\farm\logs\hub.log` and `provider.log`. The hub accepts its
+session token as part of an address (`…?token=…`, used for WebSocket
+connections), so **`hub.log` can contain session tokens that are valid for up
+to an hour**, and with the `blossom` user those are administrator tokens. The
+kit cannot switch this off in the hub: it runs the publisher's own program.
+What it does:
+
+* the provider gate removes the token from the address before the provider
+  sees it, so `provider.log` does not collect the tokens of the live-video
+  connections;
+* `C:\farm\logs` is readable by Administrators and SYSTEM only;
+* `scripts\status.ps1 -Logs` masks tokens and your host names before it
+  prints the end of a log.
+
+What you must do: **never post, mail or upload a file from `C:\farm\logs`.**
+When you ask for help, copy the output of `scripts\status.ps1 -Logs`.
 
 ### When somebody leaves, or loses Phone Farm access
 
@@ -175,13 +236,19 @@ in the product's code at the time of writing:
   domain is not sent along with such cross-site requests.
 
 With Access in front, "Test connection" fails at *Secure connection* or *Hub
-sign-in*. The same goes for "Under Attack" mode and challenge pages. If a
+sign-in*. The same goes for "Under Attack" mode, challenge pages and, possibly,
+Browser Integrity Check (below). If a
 future version of Blossom can pass an Access service token, this page and the
 installer will say so; until then the protections are the ones in section 1.
 
-What does help at Cloudflare without breaking anything: the rate-limiting
-rule from `docs/network.md`, and, if your team works from known countries
-only, a WAF rule that blocks the hub and provider host names elsewhere. Be
+One Cloudflare setting is on by default and belongs to the same family:
+**Browser Integrity Check** challenges requests without a User-Agent header,
+which is how Blossom's servers call a farm today. `docs/network.md`, section
+5, says when and how to switch it off for the farm's host names.
+
+What can help at Cloudflare: a generous rate-limiting rule (read
+`docs/network.md`, section 5, first: Blossom signs in often, and a tight rule
+breaks it), and, if your team works from known countries only, a WAF rule that blocks the hub and provider host names elsewhere. Be
 aware that Blossom's own servers must stay allowed; ask Blossom support where
 they call from before you restrict by country or IP address.
 
@@ -204,20 +271,34 @@ How the kit handles them:
   characters, read from a file, and compares it in constant time.
 * Secrets are generated with the operating system's cryptographic random
   generator.
-* They are never passed on a command line, never written to a log, and not
-  kept in the services' registry entries (the restart service gets the *path*
-  of its secret file, not the secret).
+* The kit never passes them on a command line, never writes them to a log of
+  its own, and does not keep them in the services' registry entries (the
+  restart service gets the *path* of its secret file, not the secret). One
+  thing the kit cannot prevent is GADS itself logging request addresses that
+  contain a session token: section 4, "Session tokens end up in the hub's
+  log".
+* `install.ps1` does not adopt a `C:\farm` it did not create. On Windows any
+  signed-in user may create a folder in `C:\`, and the creator of a folder
+  can always change who may write to it. A folder of that name which is not
+  empty, and is not owned by Administrators with access for Administrators
+  and SYSTEM only, stops the installer before anything in it is read or run;
+  an empty one is deleted and created anew. The Administrators group is made
+  the owner of the folder and of every secret file.
 * Passwords you type are read hidden and are not kept in the console history.
 * The two values meant for Blossom are printed once, at the end. Close the
   window afterwards. Do not run the installer inside a recording
   (`Start-Transcript`, screen sharing).
 * An **export archive** (`scripts\export-farm.ps1`) contains all of it and is
-  not encrypted. Handle it like a master key and delete it after the move.
+  not encrypted. It is written to `C:\farm\export\` (Administrators only)
+  unless you name another place, and on an NTFS drive the file is restricted
+  before the first secret is written into it. A USB stick formatted FAT32 or
+  exFAT has no file permissions: the script says so and asks first. Handle
+  the archive like a master key and delete it after the move.
 
 ## 7. The restart service
 
 It is reachable from the internet and runs as SYSTEM, so it is deliberately
-small (`services/restart-server.js`, about 250 lines, no dependencies):
+small (`services/restart-server.js`, under 300 lines, no dependencies):
 
 * five fixed actions and one status call; a request can choose among them and
   nothing else. No part of a request ever reaches a command line: the service
@@ -245,6 +326,18 @@ programs. It cannot read data or control a phone. Rotate it with
   rests on the SHA-256 values pinned in `versions.json`, which the installer
   and `scripts\status.ps1` check. The provider is rebuilt by this repository's
   workflow from public source and must reproduce the pinned value bit for bit.
+* **With `-WithAppium`, npm packages are not checksum-pinned.** The kit pins
+  the *versions* of three packages (`appium`, `appium-xcuitest-driver`,
+  `appium-gads`, in `versions.json`). Each of them pulls in hundreds of other
+  packages, whose versions npm chooses on the day of installation, and npm
+  runs the install scripts of all of them, as Administrator. That is how
+  every Appium installation works, GADS's own instructions included, and it
+  means: a compromised package anywhere in that tree would run with full
+  rights on the farm PC. The kit installs the GADS plugin itself during
+  `install.ps1`, so that the provider service (SYSTEM) finds it in place and
+  does not fetch it by itself when it starts; if the plugin is ever missing
+  or of another version, GADS installs it at start (`provider/provider.go`).
+  Appium is off by default for these reasons; add it only if you use it.
 * **Updates are manual.** Nothing here updates itself: you decide when to move
   to a newer kit. Watch this repository's releases.
 

@@ -32,7 +32,7 @@ function Write-FarmFailure {
     $what = $null
     if ($ex.Data -and $ex.Data.Contains('WhatToDo')) { $what = [string]$ex.Data['WhatToDo'] }
     if (-not $what) {
-        $what = 'This error was not expected. Run the script again; it is safe to re-run. If it stops at the same place, copy the PROBLEM line and open an issue on the kit repository (remove passwords and host names first).'
+        $what = 'This error was not expected. Run the script again; it is safe to re-run. If it stops at the same place, copy the PROBLEM line and open an issue on the kit repository. If a log helps, add the output of scripts\status.ps1 -Logs (it masks session tokens and host names); never post a file from C:\farm\logs itself, and remove passwords first.'
     }
     Write-Host ('WHAT TO DO: ' + $what) -ForegroundColor Yellow
     Write-Host ''
@@ -216,6 +216,11 @@ function Get-CloudflaredConfigText {
         ('  - hostname: ' + $HubHost),
         "    path: '^/provider-update'",
         '    service: http_status:403',
+        '  # GADS 6.0.0 serves the provider record (an endless stream) on this path',
+        '  # without a login. Blossom never calls it; the hub page shows it locally.',
+        ('  - hostname: ' + $HubHost),
+        "    path: '^/admin/provider/[^/]+/info'",
+        '    service: http_status:403',
         '  # GADS hub (has its own login)',
         ('  - hostname: ' + $HubHost),
         ('    service: http://127.0.0.1:' + $HubPort),
@@ -251,6 +256,111 @@ function ConvertTo-NssmArgument {
     if ($Value -match '"') { throw 'A double quote cannot be used in this value.' }
     if ($Value -match '\s') { return '"' + $Value + '"' }
     return $Value
+}
+
+function Hide-LogSecret {
+    # Masks what must not leave the computer when a log line is shown or
+    # posted: a session token in an address (?token=...), a bearer header,
+    # anything shaped like a signed token (JWT), and the given names (the
+    # farm's public host names). GADS writes every request address to its
+    # log, and the hub accepts its session token in the address.
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text,
+        [string[]]$Names = @()
+    )
+    $t = [regex]::Replace($Text, '(?i)([?&;](?:token|access_token|id_token|secret|password)=)[^&\s"''<>]+', '$1<hidden>')
+    $t = [regex]::Replace($t, '(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}', '$1<hidden>')
+    $t = [regex]::Replace($t, 'eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*', '<hidden-token>')
+    foreach ($n in $Names) {
+        if ($n -and $n.Length -ge 4) { $t = [regex]::Replace($t, [regex]::Escape($n), '<host-name>', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) }
+    }
+    return $t
+}
+
+function ConvertTo-WingetVersion {
+    # 'v1.9.25200' or 'v1.4.3531-preview' -> [version] 1.9 / 1.4; $null when
+    # the text holds no version.
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    $m = [regex]::Match([string]$Text, '(\d+)\.(\d+)')
+    if (-not $m.Success) { return $null }
+    return New-Object System.Version([int]$m.Groups[1].Value, [int]$m.Groups[2].Value)
+}
+
+function Protect-NativeArgument {
+    # Windows PowerShell 5.1 wraps an argument that contains a space in double
+    # quotes but does not double a backslash at its end, so the program reads
+    # \" as a literal quote and swallows the arguments that follow. PowerShell
+    # 6 and later double it themselves.
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value,
+        [int]$PSMajor = $PSVersionTable.PSVersion.Major
+    )
+    if ($PSMajor -ge 6) { return $Value }
+    $m = [regex]::Match($Value, '\\+$')
+    if ($m.Success -and $Value -match '\s') { return $Value + $m.Value }
+    return $Value
+}
+
+function ConvertTo-PathList {
+    # A PATH value without empty entries and without a backslash at the end of
+    # an entry ("C:\Program Files\nodejs\" means the same folder without it).
+    param([AllowEmptyString()][AllowNull()][string]$Path)
+    $parts = @(([string]$Path).Split(';') | ForEach-Object { $_.Trim() } | Where-Object { $_ } | ForEach-Object {
+            if ($_ -match '^[A-Za-z]:\\+$') { $_.Substring(0, 3) } else { $_.TrimEnd('\') }
+        } | Where-Object { $_ })
+    return ($parts -join ';')
+}
+
+function Test-ServiceConfigSame {
+    # Compares two descriptions of a service: hashtables whose values are a
+    # string or a list of strings. Empty entries do not count.
+    param([Parameter(Mandatory = $true)][hashtable]$Current, [Parameter(Mandatory = $true)][hashtable]$Wanted)
+    foreach ($k in $Wanted.Keys) {
+        $a = @(@($Current[$k]) | Where-Object { $null -ne $_ -and [string]$_ -ne '' } | ForEach-Object { [string]$_ })
+        $b = @(@($Wanted[$k]) | Where-Object { $null -ne $_ -and [string]$_ -ne '' } | ForEach-Object { [string]$_ })
+        if ($a.Count -ne $b.Count) { return $false }
+        for ($i = 0; $i -lt $a.Count; $i++) { if ($a[$i] -cne $b[$i]) { return $false } }
+    }
+    return $true
+}
+
+function Get-TextSha256 {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return (-join ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Text)) | ForEach-Object { $_.ToString('x2') })) }
+    finally { $sha.Dispose() }
+}
+
+function Test-FarmRootTrust {
+    # Decides what to do with a farm folder that ALREADY EXISTS before the kit
+    # touches it. On Windows any signed-in user may create a folder in C:\, and
+    # whoever creates a folder owns it and can always change who may write to
+    # it. The services in this folder run as SYSTEM and its files are secrets,
+    # so a folder somebody else prepared must not be adopted.
+    # Returns Action = 'use', 'recreate' (empty: delete it and make a new one)
+    # or 'refuse', with the Reason for a refusal.
+    param(
+        [Parameter(Mandatory = $true)][bool]$IsFolder,
+        [Parameter(Mandatory = $true)][bool]$IsLink,
+        [Parameter(Mandatory = $true)][bool]$IsEmpty,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$OwnerSid,
+        [string[]]$AllowSids = @()
+    )
+    # Administrators, SYSTEM, TrustedInstaller
+    $trusted = @('S-1-5-32-544', 'S-1-5-18', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    $verdict = New-Object PSObject -Property @{ Action = 'use'; Reason = $null }
+    if (-not $IsFolder) { $verdict.Action = 'refuse'; $verdict.Reason = 'It is a file, not a folder.'; return $verdict }
+    if ($IsLink) { $verdict.Action = 'refuse'; $verdict.Reason = 'It is a link to another place, not a folder of its own.'; return $verdict }
+    if ($IsEmpty) { $verdict.Action = 'recreate'; return $verdict }
+    if ($trusted -notcontains $OwnerSid) {
+        $verdict.Action = 'refuse'; $verdict.Reason = 'It was not created by this kit: its owner is not the Administrators group, so whoever made it can still change what is inside.'
+        return $verdict
+    }
+    $others = @($AllowSids | Where-Object { $_ -and ($trusted -notcontains $_) } | Sort-Object -Unique)
+    if ($others.Count -gt 0) {
+        $verdict.Action = 'refuse'; $verdict.Reason = 'It was not locked by this kit: accounts other than Administrators and SYSTEM have access to it, so what is inside cannot be trusted.'
+    }
+    return $verdict
 }
 
 # ---------------------------------------------------------------------------
@@ -301,10 +411,16 @@ function Write-TextFileUtf8 {
 
 function Protect-FarmPath {
     # Leaves only Administrators and SYSTEM on the path (well-known SIDs, so it
-    # works on every Windows language). Inherited permissions are removed.
+    # works on every Windows language). Inherited permissions are removed, and
+    # the Administrators group becomes the owner: an owner can always change
+    # the permissions, so it must not stay with whoever created the path.
     param([Parameter(Mandatory = $true)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { throw ('Path not found: ' + $Path) }
     $isDir = (Get-Item -LiteralPath $Path -Force).PSIsContainer
+    $r = Invoke-Native -File 'icacls.exe' -Arguments @($Path, '/setowner', '*S-1-5-32-544')
+    if ($r.Code -ne 0) {
+        Stop-Farm -Problem ('Could not make Administrators the owner of ' + $Path + ' (icacls exit code ' + $r.Code + ').') -WhatToDo 'Check that the drive is NTFS (file permissions do not exist on FAT/exFAT) and that you run as Administrator, then run the script again.'
+    }
     if ($isDir) {
         $grants = @('*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F')
     } else {
@@ -318,6 +434,56 @@ function Protect-FarmPath {
     # Users, Authenticated Users, Everyone.
     foreach ($sid in @('*S-1-5-32-545', '*S-1-5-11', '*S-1-1-0')) {
         $null = Invoke-Native -File 'icacls.exe' -Arguments @($Path, '/remove:g', $sid)
+    }
+}
+
+function Get-FarmRootVerdict {
+    # Looks at a farm folder that exists and says whether it can be used
+    # (Test-FarmRootTrust holds the rules).
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $item = Get-Item -LiteralPath $Root -Force
+    $isFolder = [bool]$item.PSIsContainer
+    $isLink = [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+    $isEmpty = $false
+    if ($isFolder -and -not $isLink) { $isEmpty = (@(Get-ChildItem -LiteralPath $Root -Force | Select-Object -First 1).Count -eq 0) }
+    $owner = ''
+    $allow = @()
+    try {
+        $acl = Get-Acl -LiteralPath $Root
+        $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+        $allow = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) |
+                Where-Object { [string]$_.AccessControlType -eq 'Allow' } | ForEach-Object { $_.IdentityReference.Value })
+    } catch { $owner = '' }
+    return (Test-FarmRootTrust -IsFolder $isFolder -IsLink $isLink -IsEmpty $isEmpty -OwnerSid $owner -AllowSids $allow)
+}
+
+function Stop-FarmRootUntrusted {
+    param([Parameter(Mandatory = $true)][string]$Root, [Parameter(Mandatory = $true)][string]$Reason)
+    Stop-Farm -Problem ($Root + ' already exists and cannot be used. ' + $Reason) -WhatToDo ('Nothing was changed. If you know the folder (an earlier farm set up by hand), rename it:   Rename-Item ' + $Root + ' ' + $Root + '-old   and run the script again. If you do not know where it comes from, do the same and have the computer checked: the kit keeps secrets and programs that run with full rights in this folder. To move a kit-installed farm from another computer use scripts\export-farm.ps1 and scripts\import-farm.ps1.')
+}
+
+function Initialize-FarmRoot {
+    # Creates the farm folder, or takes over an existing one only when that is
+    # safe, and locks it to Administrators and SYSTEM. Called before anything
+    # in the folder is read or run.
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $created = $false
+    if (Test-Path -LiteralPath $Root) {
+        $verdict = Get-FarmRootVerdict -Root $Root
+        if ($verdict.Action -eq 'refuse') { Stop-FarmRootUntrusted -Root $Root -Reason $verdict.Reason }
+        if ($verdict.Action -eq 'recreate') {
+            # An empty folder of unknown origin: a new one replaces it, so that
+            # nobody keeps a hold on it.
+            Remove-Item -LiteralPath $Root -Force
+        }
+    }
+    if (-not (Test-Path -LiteralPath $Root)) {
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+        $created = $true
+    }
+    Protect-FarmPath -Path $Root
+    if ($created -and @(Get-ChildItem -LiteralPath $Root -Force | Select-Object -First 1).Count -gt 0) {
+        Stop-FarmRootUntrusted -Root $Root -Reason 'Something was put into it while it was being created.'
     }
 }
 
@@ -386,6 +552,11 @@ function Get-VerifiedDownload {
         Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing -TimeoutSec 900
     } catch {
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
+        $status = 0
+        try { if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode } } catch { $status = 0 }
+        if ($status -eq 404) {
+            Stop-Farm -Problem ($What + ' is not at its download address (HTTP 404): ' + $Url) -WhatToDo 'The file was not published yet, or it was withdrawn. Check the kit''s releases page for a newer kit and use that. If there is none, report it on the kit repository. This is not a fault of your computer or your connection.'
+        }
         Stop-Farm -Problem ('Downloading ' + $What + ' failed: ' + $_.Exception.Message) -WhatToDo ('Check the internet connection of this computer and run the script again. Address: ' + $Url)
     } finally {
         $ProgressPreference = $oldProgress
@@ -406,10 +577,14 @@ function Invoke-FarmHttp {
         [string]$Method = 'GET',
         [hashtable]$Headers = @{},
         [string]$Body = $null,
-        [int]$TimeoutSec = 15
+        [int]$TimeoutSec = 15,
+        # Send what Blossom's servers send: no User-Agent and no Accept header.
+        # Cloudflare treats a request without a User-Agent differently
+        # (Browser Integrity Check), so the self-test must look the same.
+        [switch]$LikeBlossom
     )
     Enable-Tls12
-    $result = New-Object PSObject -Property @{ Status = 0; Text = ''; Json = $null; Error = $null }
+    $result = New-Object PSObject -Property @{ Status = 0; Text = ''; Json = $null; Error = $null; Challenge = $false }
     $response = $null
     try {
         $req = [System.Net.HttpWebRequest][System.Net.WebRequest]::Create($Url)
@@ -417,8 +592,12 @@ function Invoke-FarmHttp {
         $req.AllowAutoRedirect = $false
         $req.Timeout = $TimeoutSec * 1000
         $req.ReadWriteTimeout = $TimeoutSec * 1000
-        $req.UserAgent = 'blossom-farm-kit'
-        $req.Accept = 'application/json'
+        if ($LikeBlossom) {
+            $req.Headers['Accept-Encoding'] = 'identity'
+        } else {
+            $req.UserAgent = 'blossom-farm-kit'
+            $req.Accept = 'application/json'
+        }
         foreach ($k in $Headers.Keys) { $req.Headers[$k] = [string]$Headers[$k] }
         if ($Body -ne $null -and $Body -ne '') {
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
@@ -435,12 +614,15 @@ function Invoke-FarmHttp {
             if ($_.Exception.Response) { $response = $_.Exception.Response } else { throw }
         }
         $result.Status = [int]$response.StatusCode
+        # Cloudflare marks an answer that is its own challenge or block page.
+        if ($response.Headers['cf-mitigated']) { $result.Challenge = $true }
         $reader = New-Object System.IO.StreamReader($response.GetResponseStream(), [System.Text.Encoding]::UTF8)
         try {
             $buffer = New-Object char[] 1048576
             $read = $reader.ReadBlock($buffer, 0, $buffer.Length)   # at most 1 MB of text
             $result.Text = New-Object string($buffer, 0, $read)
         } finally { $reader.Close() }
+        if ($result.Status -eq 403 -and $result.Text -match '(?i)<html|<!doctype' -and $result.Text -match '(?i)cloudflare') { $result.Challenge = $true }
         $trimmed = $result.Text.TrimStart()
         if ($trimmed.StartsWith('{') -or $trimmed.StartsWith('[')) {
             try { $result.Json = $result.Text | ConvertFrom-Json } catch { $result.Json = $null }
@@ -494,7 +676,12 @@ function Get-FarmPaths {
 
 function Read-FarmConfig {
     # The non-secret record of this installation ($null when not installed).
+    # Nothing is read from a farm folder that somebody else prepared.
     param([Parameter(Mandatory = $true)]$Paths)
+    if (Test-Path -LiteralPath $Paths.Root) {
+        $verdict = Get-FarmRootVerdict -Root $Paths.Root
+        if ($verdict.Action -eq 'refuse') { Stop-FarmRootUntrusted -Root $Paths.Root -Reason $verdict.Reason }
+    }
     if (-not (Test-Path -LiteralPath $Paths.FarmJson)) { return $null }
     try { return (Get-Content -LiteralPath $Paths.FarmJson -Raw | ConvertFrom-Json) }
     catch { Stop-Farm -Problem ($Paths.FarmJson + ' cannot be read as JSON.') -WhatToDo 'Run install.ps1 again; it rewrites the file.' }
@@ -559,9 +746,13 @@ function Install-WingetPackage {
     if (-not (Get-ToolPath -Name 'winget')) {
         Stop-Farm -Problem 'winget (the Windows package manager) is not available on this computer.' -WhatToDo 'Install "App Installer" from the Microsoft Store (it contains winget), or update Windows 10 to version 1809 or later, then run the script again. See README, section Troubleshooting.'
     }
+    # winget before 1.4 does not know --disable-interactivity and stops on it.
+    $wingetVersion = $null
+    try { $wingetVersion = ConvertTo-WingetVersion -Text ((Invoke-Native -File 'winget.exe' -Arguments @('--version')).Output -join ' ') } catch { $wingetVersion = $null }
     Write-Note ('Installing ' + $What + ' ' + $Version + ' with winget...')
     $wingetArgs = @('install', '--exact', '--id', $Id, '--version', $Version, '--source', 'winget', '--scope', 'machine',
-        '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+        '--silent', '--accept-package-agreements', '--accept-source-agreements')
+    if ($wingetVersion -and $wingetVersion -ge (New-Object System.Version(1, 4))) { $wingetArgs += '--disable-interactivity' }
     & winget.exe @wingetArgs | Out-Host
     $code = $LASTEXITCODE
     if ($code -ne 0 -and -not (Find-FarmTool -Command $Command)) {
@@ -572,7 +763,7 @@ function Install-WingetPackage {
     }
     $found = Find-FarmTool -Command $Command
     if (-not $found) {
-        Stop-Farm -Problem ('Installing ' + $What + ' with winget did not work (winget exit code ' + $code + ').') -WhatToDo ('Run this yourself and read its message:  winget install --exact --id ' + $Id + ' --version ' + $Version + '   Then run the script again. If the version is no longer offered, see README, section Troubleshooting.')
+        Stop-Farm -Problem ('Installing ' + $What + ' with winget did not work (winget exit code ' + $code + ').') -WhatToDo ('Read winget''s own message above. If it says an argument name was not recognized, winget is too old: update "App Installer" in the Microsoft Store (Library -> Get updates) and run the script again. Otherwise run this yourself and read its message:  winget install --exact --id ' + $Id + ' --version ' + $Version + '   Then run the script again. If the version is no longer offered, see README, section Troubleshooting.')
     }
     Write-Ok ($What + ' installed (' + $found + ')')
 }
@@ -581,12 +772,35 @@ function Invoke-Nssm {
     # Runs nssm and returns its exit code; output is discarded (nssm prints
     # UTF-16, which is unreadable in a console transcript anyway).
     param([Parameter(Mandatory = $true)][string]$Nssm, [Parameter(Mandatory = $true)][string[]]$Arguments)
-    return (Invoke-Native -File $Nssm -Arguments $Arguments).Code
+    $safe = @($Arguments | ForEach-Object { Protect-NativeArgument -Value $_ })
+    return (Invoke-Native -File $Nssm -Arguments $safe).Code
+}
+
+function Get-FarmServiceConfig {
+    # What Windows has on record for an nssm service (read from the registry,
+    # where nssm keeps it), in the shape Test-ServiceConfigSame compares.
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Services\' + $Name
+    $svc = Get-ItemProperty -LiteralPath $key -ErrorAction SilentlyContinue
+    $par = Get-ItemProperty -LiteralPath ($key + '\Parameters') -ErrorAction SilentlyContinue
+    return @{
+        ImagePath           = ([string](Get-JsonProperty -Object $svc -Name 'ImagePath')).Trim('"')
+        DependOnService     = @(Get-JsonProperty -Object $svc -Name 'DependOnService')
+        Application         = [string](Get-JsonProperty -Object $par -Name 'Application')
+        AppParameters       = [string](Get-JsonProperty -Object $par -Name 'AppParameters')
+        AppDirectory        = [string](Get-JsonProperty -Object $par -Name 'AppDirectory')
+        AppStdout           = [string](Get-JsonProperty -Object $par -Name 'AppStdout')
+        AppEnvironmentExtra = @(Get-JsonProperty -Object $par -Name 'AppEnvironmentExtra')
+        KitConfig           = [string](Get-JsonProperty -Object $par -Name 'BlossomFarmKitConfig')
+    }
 }
 
 function Set-FarmService {
-    # Creates or updates one nssm service. Idempotent: an existing service is
-    # stopped, reconfigured in place and left stopped.
+    # Creates or updates one nssm service. Idempotent. A service that is
+    # running and already configured exactly as asked is left alone, running:
+    # stopping the hub would stop the services that depend on it as well. Any
+    # other existing service is stopped, reconfigured in place and left
+    # stopped. Returns $true when the service was (re)configured.
     param(
         [Parameter(Mandatory = $true)][string]$Nssm,
         [Parameter(Mandatory = $true)][string]$Name,
@@ -598,14 +812,36 @@ function Set-FarmService {
         [Parameter(Mandatory = $true)][string]$LogFile,
         [string[]]$DependsOn = @(),
         [string[]]$Environment = @(),
+        # Files the program reads when it starts (its script, its configuration).
+        # When one of them changed, the service is restarted even though its
+        # settings are the same.
+        [string[]]$WatchFiles = @(),
         [switch]$DelayedStart
     )
     if (-not (Test-Path -LiteralPath $Application)) {
         Stop-Farm -Problem ('Cannot create the service ' + $Name + ': ' + $Application + ' does not exist.') -WhatToDo 'Run install.ps1 again from the start; an earlier step did not finish.'
     }
+    $start = 'SERVICE_AUTO_START'
+    if ($DelayedStart) { $start = 'SERVICE_DELAYED_AUTO_START' }
+    # What is compared with the registry, to notice a service that was changed
+    # by hand since the kit configured it.
+    $wanted = @{
+        DependOnService = $DependsOn; Application = $Application; AppParameters = $Parameters
+        AppDirectory = $Directory; AppEnvironmentExtra = $Environment
+    }
+    # A fingerprint of everything this function sets, stored with the service
+    # once it is completely configured.
+    $watched = @(@($Application) + $WatchFiles | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | ForEach-Object { Get-FileSha256 -Path $_ })
+    $fingerprint = Get-TextSha256 -Text ((@($Nssm, $Application, $Parameters, $Directory, $LogFile, $DisplayName, $Description, $start) + @('deps') + $DependsOn + @('env') + $Environment + @('files') + $watched) -join "`n")
+    $parametersKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\' + $Name + '\Parameters'
     $existing = Get-Service -Name $Name -ErrorAction SilentlyContinue
     if ($existing) {
+        $current = Get-FarmServiceConfig -Name $Name
+        if ($existing.Status -eq 'Running' -and $current.KitConfig -eq $fingerprint -and (Test-ServiceConfigSame -Current $current -Wanted $wanted)) {
+            return $false
+        }
         if ($existing.Status -ne 'Stopped') { Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2 }
+        Remove-ItemProperty -LiteralPath $parametersKey -Name 'BlossomFarmKitConfig' -ErrorAction SilentlyContinue
         $null = Invoke-Nssm -Nssm $Nssm -Arguments @('set', $Name, 'Application', $Application)
     } else {
         $code = Invoke-Nssm -Nssm $Nssm -Arguments @('install', $Name, $Application)
@@ -613,8 +849,6 @@ function Set-FarmService {
             Stop-Farm -Problem ('nssm could not create the service ' + $Name + ' (exit code ' + $code + ').') -WhatToDo 'Check that no other program uses a service of that name (services.msc), then run the script again.'
         }
     }
-    $start = 'SERVICE_AUTO_START'
-    if ($DelayedStart) { $start = 'SERVICE_DELAYED_AUTO_START' }
     $settings = @(
         @('AppParameters', $Parameters),
         @('AppDirectory', $Directory),
@@ -641,16 +875,33 @@ function Set-FarmService {
             Stop-Farm -Problem ('nssm could not set ' + $s[0] + ' on the service ' + $Name + ' (exit code ' + $code + ').') -WhatToDo 'Run the script again. If it repeats, remove the service with scripts\uninstall.ps1 -ServicesOnly and install again.'
         }
     }
+    $problem = $null
     if ($DependsOn.Count -gt 0) {
-        $null = Invoke-Nssm -Nssm $Nssm -Arguments (@('set', $Name, 'DependOnService') + $DependsOn)
+        $code = Invoke-Nssm -Nssm $Nssm -Arguments (@('set', $Name, 'DependOnService') + $DependsOn)
+        if ($code -ne 0) { $problem = 'DependOnService (nssm exit code ' + $code + ')' }
     } else {
         $null = Invoke-Nssm -Nssm $Nssm -Arguments @('reset', $Name, 'DependOnService')
     }
-    if ($Environment.Count -gt 0) {
-        $null = Invoke-Nssm -Nssm $Nssm -Arguments (@('set', $Name, 'AppEnvironmentExtra') + $Environment)
-    } else {
-        $null = Invoke-Nssm -Nssm $Nssm -Arguments @('reset', $Name, 'AppEnvironmentExtra')
+    # The environment is written straight into the registry value nssm reads
+    # (a list of NAME=value strings), not through nssm's command line: a value
+    # with spaces that ends in a backslash (a PATH usually does) is mangled by
+    # Windows PowerShell 5.1 on the way and would swallow the entries after it.
+    try {
+        if ($Environment.Count -gt 0) {
+            Set-ItemProperty -LiteralPath $parametersKey -Name 'AppEnvironmentExtra' -Type MultiString -Value ([string[]]$Environment) -ErrorAction Stop
+        } else {
+            Remove-ItemProperty -LiteralPath $parametersKey -Name 'AppEnvironmentExtra' -ErrorAction SilentlyContinue
+        }
+    } catch { $problem = 'AppEnvironmentExtra (' + $_.Exception.Message + ')' }
+    $after = Get-FarmServiceConfig -Name $Name
+    if (-not $problem -and -not (Test-ServiceConfigSame -Current $after -Wanted @{ AppEnvironmentExtra = $Environment })) {
+        $problem = 'AppEnvironmentExtra (what Windows has on record differs from what was set)'
     }
+    if ($problem) {
+        Stop-Farm -Problem ('The service ' + $Name + ' could not be configured completely: ' + $problem + '.') -WhatToDo 'Run the script again. If it repeats, remove the service with scripts\uninstall.ps1 -ServicesOnly and install again.'
+    }
+    Set-ItemProperty -LiteralPath $parametersKey -Name 'BlossomFarmKitConfig' -Type String -Value $fingerprint
+    return $true
 }
 
 function Start-FarmService {
@@ -684,6 +935,58 @@ function Wait-TcpPort {
     return $false
 }
 
+$FarmFirewallPrefix = 'Blossom farm - no network access to '
+
+function Set-FarmFirewallBlock {
+    # One Windows Firewall rule that refuses incoming TCP connections to one
+    # program. Why: for every iPhone the GADS provider opens ports
+    # (WebDriverAgent, the screen stream) on ALL network addresses of the
+    # computer, on port numbers chosen at run time, and neither they nor an
+    # Appium server ask for a login. Everything the farm needs reaches these
+    # ports from the computer itself (the loopback address, which the firewall
+    # never filters), so the rule costs nothing. A block rule wins over any
+    # "allow" rule for the same program. TCP only: the live video (WebRTC) is
+    # UDP and is not touched. Returns $true when the rule is in place.
+    param([Parameter(Mandatory = $true)][string]$Label, [Parameter(Mandatory = $true)][string]$Program)
+    $display = $FarmFirewallPrefix + $Label
+    try {
+        Get-NetFirewallRule -DisplayName $display -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+        $null = New-NetFirewallRule -DisplayName $display -Group 'Blossom farm kit' `
+            -Description 'Blossom farm kit: other computers must not reach the ports this program opens. Loopback traffic on this computer is not affected.' `
+            -Direction Inbound -Action Block -Protocol TCP -Program $Program -Profile Any -Enabled True -ErrorAction Stop
+        return $true
+    } catch { return $false }
+}
+
+function Remove-FarmFirewallBlock {
+    # Removes every firewall rule the kit created. Returns how many.
+    $rules = @()
+    try { $rules = @(Get-NetFirewallRule -DisplayName ($FarmFirewallPrefix + '*') -ErrorAction SilentlyContinue) } catch { $rules = @() }
+    foreach ($r in $rules) { try { Remove-NetFirewallRule -Name $r.Name -ErrorAction Stop } catch { Write-Warn ('Could not remove the firewall rule "' + $r.DisplayName + '".') } }
+    return $rules.Count
+}
+
+function Get-FarmFirewallState {
+    # Available: the firewall could be asked at all. ProfilesOff: profiles
+    # (Domain, Private, Public) on which Windows Firewall is switched off.
+    # Programs: the programs (lower case) that have an enabled kit block rule.
+    $state = New-Object PSObject -Property @{ Available = $false; ProfilesOff = @(); Programs = @() }
+    try {
+        $profiles = @(Get-NetFirewallProfile -ErrorAction Stop)
+        $state.ProfilesOff = @($profiles | Where-Object { [string]$_.Enabled -ne 'True' } | ForEach-Object { [string]$_.Name })
+        $rules = @(Get-NetFirewallRule -DisplayName ($FarmFirewallPrefix + '*') -ErrorAction SilentlyContinue |
+                Where-Object { [string]$_.Enabled -eq 'True' -and [string]$_.Action -eq 'Block' -and [string]$_.Direction -eq 'Inbound' })
+        $programs = @()
+        foreach ($r in $rules) {
+            $filter = $r | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue
+            if ($filter -and $filter.Program) { $programs += ([string]$filter.Program).ToLowerInvariant() }
+        }
+        $state.Programs = $programs
+        $state.Available = $true
+    } catch { $state.Available = $false }
+    return $state
+}
+
 $FarmServiceNames = @('FarmRestart', 'Cloudflared', 'KeepAvailable', 'FarmGate', 'GadsProvider', 'GadsHub')
 
 function Get-FarmServiceNames {
@@ -709,7 +1012,9 @@ function Connect-Hub {
 function Invoke-FarmSelfTest {
     # The same walk the product's "Test connection" takes, from this computer,
     # against the public host names. Returns a list of step results; a step
-    # has Id, State (ok, warn, fail, skip), Detail and Fix.
+    # has Id, State (ok, warn, fail, skip), Detail and Fix. The requests carry
+    # the headers Blossom's servers send (in particular: no User-Agent), so
+    # that Cloudflare treats both alike.
     param(
         [Parameter(Mandatory = $true)][string]$HubHost,
         [Parameter(Mandatory = $true)][string]$ProviderHost,
@@ -750,9 +1055,14 @@ function Invoke-FarmSelfTest {
     & $add 'dns' 'ok' 'All three names resolve to public addresses.' $null
 
     # 3 reach + TLS
-    $r = Invoke-FarmHttp -Url ($hub + '/health') -TimeoutSec 15
+    $r = Invoke-FarmHttp -LikeBlossom -Url ($hub + '/health') -TimeoutSec 15
     if ($r.Status -eq 0) {
         & $add 'reach' 'fail' ('The hub address could not be reached: ' + $r.Error) 'Check that the Cloudflared service is running (scripts\status.ps1) and read C:\farm\logs\cloudflared.log.'
+        return $steps
+    }
+    $challengeFix = 'Cloudflare is answering instead of the farm. Blossom''s servers send plain API requests without a browser''s User-Agent and cannot pass a challenge. In the Cloudflare dashboard of your domain: Security -> Settings, switch "Browser Integrity Check" off (it is on by default), or add a rule that skips it for the three farm host names; and remove any Access application, "Under Attack" mode, managed challenge or bot rule for them (docs\network.md, section 5).'
+    if ($r.Challenge) {
+        & $add 'reach' 'fail' ('Cloudflare blocked or challenged the request (HTTP ' + $r.Status + ') before it reached the hub.') $challengeFix
         return $steps
     }
     if (Test-LooksDown -Status $r.Status -Text $r.Text) {
@@ -767,9 +1077,13 @@ function Invoke-FarmSelfTest {
 
     # 4 sign-in
     $body = (@{ username = $HubUser; password = $HubPassword } | ConvertTo-Json -Compress)
-    $r = Invoke-FarmHttp -Url ($hub + '/authenticate') -Method 'POST' -Body $body -TimeoutSec 15
+    $r = Invoke-FarmHttp -LikeBlossom -Url ($hub + '/authenticate') -Method 'POST' -Body $body -TimeoutSec 15
     $token = Get-JsonProperty -Object (Get-JsonProperty -Object $r.Json -Name 'result') -Name 'access_token'
     if (-not $token) { $token = Get-JsonProperty -Object $r.Json -Name 'access_token' }
+    if ($r.Challenge) {
+        & $add 'signin' 'fail' ('Cloudflare blocked or challenged the sign-in request (HTTP ' + $r.Status + ') before it reached the hub.') $challengeFix
+        return $steps
+    }
     if ($r.Status -eq 401 -or $r.Status -eq 403) {
         & $add 'signin' 'fail' 'The hub refused the user name or password.' 'Reset the login with scripts\rotate-secrets.ps1 -HubUser and enter the new password in Blossom.'
         return $steps
@@ -782,7 +1096,7 @@ function Invoke-FarmSelfTest {
     $auth = @{ Authorization = ('Bearer ' + $token) }
 
     # 5 hub endpoints
-    $r = Invoke-FarmHttp -Url ($hub + '/admin/devices') -Headers $auth -TimeoutSec 15
+    $r = Invoke-FarmHttp -LikeBlossom -Url ($hub + '/admin/devices') -Headers $auth -TimeoutSec 15
     $registered = @()
     $list = Get-JsonProperty -Object (Get-JsonProperty -Object $r.Json -Name 'result') -Name 'devices'
     if ($r.Status -eq 200 -and $null -ne $r.Json) {
@@ -802,7 +1116,7 @@ function Invoke-FarmSelfTest {
     # the hub checks, so a percent-encoded spelling is refused as well.)
     $leaks = @()
     foreach ($probe in @('/device/kit-selftest/appium/status', '/device/kit-selftest/APPIUM/status', '/device/kit-selftest/appiumSource')) {
-        $r = Invoke-FarmHttp -Url ($hub + $probe) -TimeoutSec 15
+        $r = Invoke-FarmHttp -LikeBlossom -Url ($hub + $probe) -TimeoutSec 15
         if ($r.Status -ne 403) { $leaks += ($probe + ' -> HTTP ' + $r.Status) }
     }
     if ($leaks.Count -gt 0) {
@@ -811,8 +1125,17 @@ function Invoke-FarmSelfTest {
         & $add 'hub-appium' 'ok' 'Hub paths containing "appium" are refused at the tunnel (403), as they must be.' $null
     }
 
+    # extra check, not part of the product's test: GADS 6.0.0 serves the
+    # provider record as an endless stream on this path without a login.
+    $r = Invoke-FarmHttp -LikeBlossom -Url ($hub + '/admin/provider/' + [Uri]::EscapeDataString($Nickname) + '/info') -TimeoutSec 8
+    if ($r.Status -eq 403) {
+        & $add 'hub-provider-info' 'ok' 'The provider record of the hub is refused at the tunnel (403), as it must be.' $null
+    } else {
+        & $add 'hub-provider-info' 'fail' ('The hub path /admin/provider/<nickname>/info is not refused by the tunnel (HTTP ' + $r.Status + '). GADS serves it without a login.') 'Run install.ps1 again: it rewrites the tunnel configuration and restarts the tunnel. If it stays like this, report it on the kit repository (privately: Security -> Report a vulnerability); see docs\security.md, section 3.'
+    }
+
     # 6 phones
-    $r = Invoke-FarmHttp -Url ($hub + '/provider/' + [Uri]::EscapeDataString($Nickname) + '/devices') -Headers $auth -TimeoutSec 15
+    $r = Invoke-FarmHttp -LikeBlossom -Url ($hub + '/provider/' + [Uri]::EscapeDataString($Nickname) + '/devices') -Headers $auth -TimeoutSec 15
     $sync = @()
     $syncList = Get-JsonProperty -Object $r.Json -Name 'result'
     if ($r.Status -eq 200 -and $syncList) { $sync = @($syncList) }
@@ -829,7 +1152,7 @@ function Invoke-FarmSelfTest {
     # 7 provider (through the gate)
     $path = '/'
     if ($udids.Count -gt 0) { $path = '/device/' + [Uri]::EscapeDataString([string]$udids[0]) + '/info' }
-    $r = Invoke-FarmHttp -Url ($provider + $path) -Headers $auth -TimeoutSec 15
+    $r = Invoke-FarmHttp -LikeBlossom -Url ($provider + $path) -Headers $auth -TimeoutSec 15
     if ($r.Status -eq 0) {
         & $add 'provider' 'fail' ('The provider address could not be reached: ' + $r.Error) 'Check the Cloudflared service and the provider host name in the tunnel configuration.'
     } elseif ($r.Status -eq 401) {
@@ -840,7 +1163,7 @@ function Invoke-FarmSelfTest {
         & $add 'provider' 'ok' ('The provider answers at ' + $ProviderHost + '. (Live video is opened by a browser and is not part of this test.)') $null
     }
     # extra check, not part of the product's test: the provider must NOT answer without a token
-    $r = Invoke-FarmHttp -Url ($provider + '/devices') -TimeoutSec 15
+    $r = Invoke-FarmHttp -LikeBlossom -Url ($provider + '/devices') -TimeoutSec 15
     if ($r.Status -eq 200) {
         & $add 'provider-locked' 'fail' 'The provider address answers WITHOUT a login. Anyone who learns this host name could control the phones.' 'The provider host name must point at the provider gate (port 10002), never at the provider itself (port 10001). Run install.ps1 again to rewrite the tunnel configuration.'
     } elseif ($r.Status -eq 401) {
@@ -850,7 +1173,7 @@ function Invoke-FarmSelfTest {
     }
 
     # 8 restart service
-    $r = Invoke-FarmHttp -Url ($restart + '/status') -Headers @{ Authorization = ('Bearer ' + $RestartSecret) } -TimeoutSec 15
+    $r = Invoke-FarmHttp -LikeBlossom -Url ($restart + '/status') -Headers @{ Authorization = ('Bearer ' + $RestartSecret) } -TimeoutSec 15
     if ($r.Status -eq 0) {
         & $add 'restart' 'fail' ('The restart service could not be reached: ' + $r.Error) 'Check the Cloudflared and FarmRestart services (scripts\status.ps1).'
     } elseif ($r.Status -eq 401 -or $r.Status -eq 403) {
@@ -865,7 +1188,7 @@ function Invoke-FarmSelfTest {
         if ($off.Count -gt 0) { & $add 'restart' 'warn' ('Answers. Reported as not running: ' + ($off -join ', ') + '.') 'Run scripts\status.ps1.' }
         else { & $add 'restart' 'ok' 'Answers, and reports every program as running.' $null }
     }
-    $r = Invoke-FarmHttp -Url ($restart + '/status') -TimeoutSec 15
+    $r = Invoke-FarmHttp -LikeBlossom -Url ($restart + '/status') -TimeoutSec 15
     if ($r.Status -ne 401) {
         & $add 'restart-locked' 'fail' ('Without the secret the restart service answered HTTP ' + $r.Status + ' (expected 401).') 'Do not use this farm until this is understood: read C:\farm\logs\restart-server.log and docs\security.md.'
     } else {
@@ -878,7 +1201,7 @@ function Write-SelfTestReport {
     # Prints the steps; returns $true when nothing failed.
     param([Parameter(Mandatory = $true)]$Steps)
     $titles = @{ address = 'Addresses'; dns = 'DNS'; reach = 'Secure connection (TLS)'; signin = 'Hub sign-in'; hub = 'Hub answers like GADS';
-        'hub-appium' = 'Hub refuses unauthenticated Appium paths'; devices = 'Phones'; provider = 'Provider'; 'provider-locked' = 'Provider refuses strangers'; restart = 'Restart service'; 'restart-locked' = 'Restart service refuses strangers' }
+        'hub-appium' = 'Hub refuses unauthenticated Appium paths'; 'hub-provider-info' = 'Hub refuses the open provider record'; devices = 'Phones'; provider = 'Provider'; 'provider-locked' = 'Provider refuses strangers'; restart = 'Restart service'; 'restart-locked' = 'Restart service refuses strangers' }
     $allOk = $true
     foreach ($s in $Steps) {
         $color = 'Green'; $mark = 'OK    '

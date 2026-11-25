@@ -1,8 +1,21 @@
 diff --git a/provider/router/control.go b/provider/router/control.go
-index 22c0264..89d29f6 100644
+index 22c0264..209fbc7 100644
 --- a/provider/router/control.go
 +++ b/provider/router/control.go
-@@ -275,6 +275,152 @@ func devicePinch(dev devices.PlatformDevice, x, y, scale float64) (*http.Respons
+@@ -1,5 +1,12 @@
+ package router
+ 
++// MODIFIED FILE - NOT THE ORIGINAL GADS FILE.
++// Changed by Blossom CRM (https://github.com/fyhcrew-art/blossom-farm-kit),
++// November 2026: added the custom actions "drag", "source" and
++// "open_url" (deviceDrag, wdaSessionID, deviceOpenURL and three cases in
++// executeCustomAction).
++// The changes are under the GNU AGPL v3.0, like the original file.
++
+ import (
+ 	"GADS/common/models"
+ 	"GADS/common/utils"
+@@ -275,6 +282,152 @@ func devicePinch(dev devices.PlatformDevice, x, y, scale float64) (*http.Respons
  	}
  }
  
@@ -155,7 +168,7 @@ index 22c0264..89d29f6 100644
  func deviceDoubleTap(dev devices.PlatformDevice, x, y float64) (*http.Response, error) {
  	requestBody := struct {
  		X float64 `json:"x"`
-@@ -489,6 +635,24 @@ func executeCustomAction(dev devices.PlatformDevice, actionType string, params m
+@@ -489,6 +642,24 @@ func executeCustomAction(dev devices.PlatformDevice, actionType string, params m
  	case "unlock":
  		return deviceLock(dev, "unlock")
  
@@ -180,3 +193,40 @@ index 22c0264..89d29f6 100644
  	case "pinch_in":
  		x := utils.GetFloat(params, "x", 250)
  		y := utils.GetFloat(params, "y", 500)
+diff --git a/provider/router/handler.go b/provider/router/handler.go
+index fcf97e7..a3f226c 100644
+--- a/provider/router/handler.go
++++ b/provider/router/handler.go
+@@ -9,6 +9,12 @@
+ 
+ package router
+ 
++// MODIFIED FILE - NOT THE ORIGINAL GADS FILE.
++// Changed by Blossom CRM (https://github.com/fyhcrew-art/blossom-farm-kit),
++// November 2026: every answer carries the X-Source-Code header
++// (sourceOffer below), which says where the source of this program is.
++// The change is under the GNU AGPL v3.0, like the original file.
++
+ import (
+ 	"GADS/provider/config"
+ 	"net/http/pprof"
+@@ -17,8 +23,19 @@ import (
+ 	"github.com/gin-gonic/gin"
+ )
+ 
++// sourceOffer is sent with every answer of this modified provider, so that
++// whoever uses it over a network is told where to get its complete source
++// (GNU AGPL v3.0, section 13). Each release there carries the source archive
++// of the binary published with it. If you change this program further and
++// let others use it over a network, point this at YOUR source.
++const sourceOffer = "https://github.com/fyhcrew-art/blossom-farm-kit/releases"
++
+ func HandleRequests() *gin.Engine {
+ 	r := gin.Default()
++	r.Use(func(c *gin.Context) {
++		c.Header("X-Source-Code", sourceOffer)
++		c.Next()
++	})
+ 	rConfig := cors.DefaultConfig()
+ 	rConfig.AllowAllOrigins = true
+ 	rConfig.AllowHeaders = []string{"Authorization", "Content-Type"}

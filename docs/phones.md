@@ -25,10 +25,28 @@ during installation.
   membership year; a removed phone keeps its slot until the yearly reset). A
   free Apple ID signs for 7 days only and needs Xcode on a Mac with the phone
   attached, so it does not carry a farm.
-* **Apple's USB support on the PC.** Install **Apple Devices** from the
-  Microsoft Store (or iTunes, which GADS's documentation names; one of them,
-  not both) before plugging in a phone. `install.ps1` warns when it finds
-  neither.
+* **Apple's USB support on the PC: iTunes from Apple's own installer.**
+  Download *iTunes for Windows* from Apple's website as an installer file
+  (`iTunes64Setup.exe`; at the time of writing <https://www.apple.com/itunes/>
+  offers it under "Looking for other versions", next to the button that leads
+  to the Microsoft Store) and install it before plugging in a phone. It registers a
+  Windows service called **Apple Mobile Device Service**, which starts with
+  the PC and runs with nobody signed in. That is what a farm needs: the GADS
+  provider is a Windows service too and talks to the phones through it. GADS's
+  own documentation names iTunes.
+
+  Do **not** rely on the Microsoft Store apps (*Apple Devices*, or iTunes
+  from the Store). As far as we could establish, they do not install that
+  Windows service; their device process runs only inside a signed-in Windows
+  session. The farm would then work while you are logged in and, after a
+  power cut or a Windows Update restart, show every phone as Offline until
+  somebody signs in at the PC. We have not measured this on every Windows
+  version; `install.ps1` tells you which of the two it found, and the check
+  that settles it is simple: `Get-Service 'Apple Mobile Device Service'` must
+  show the service, and README step 6 (restart, touch nothing, phones come
+  back) must pass. If you must use a Store app, set the PC to sign in
+  automatically, and accept what that means for a PC that holds the farm's
+  secrets.
 * A Mac is not needed.
 
 ## 1. On each iPhone
@@ -82,8 +100,14 @@ phones yet; that is step 2.
 
 1. *Devices*: register every iPhone (name and UDID; section 4 says where to
    find the UDID).
-2. *Identifiers*: create an App ID. A wildcard such as `com.yourname.*` is the
-   simplest choice.
+2. *Identifiers*: create an App ID of the **wildcard** kind whose bundle ID
+   is a single star: `*`. This matters. The pre-built WebDriverAgent has the
+   bundle identifier `com.facebook.WebDriverAgentRunner.xctrunner`, and the
+   hub's signing keeps that identifier (see "The bundle ID" below). A profile
+   for `*` covers it; a profile for `com.yourname.*` does **not**, and iOS
+   then refuses to install the app. (If the Apple site does not let you
+   create `*`, sign outside the hub instead: "Signing outside the hub"
+   below.)
 3. *Certificates*: create an **Apple Development** certificate. Apple asks for
    a certificate signing request (CSR). The hub page makes one without a Mac:
    Admin → Files → generate a signing request; it downloads a zip with the
@@ -106,19 +130,38 @@ stores the result. **Installing it on the phones is done by GADS:** once iOS
 is switched on for the provider (section 3), the provider puts the signed
 WebDriverAgent on each phone and starts it by itself.
 
-If you prefer to sign outside the hub, GADS's documentation names zsign,
-fastlane sigh and codesign; upload the signed file under Admin → Files as a
-WebDriverAgent upload. Building WebDriverAgent yourself in Xcode on a Mac is
-described under
+**The bundle ID. Read this, it is the usual reason a phone never goes live.**
+
+* The pre-built `WebDriverAgent.ipa` from step 1 has the bundle identifier
+  `com.facebook.WebDriverAgentRunner.xctrunner` (checked in the file's
+  `Info.plist`).
+* Signing in the hub page does not change it: in GADS 6.0.0 the hub runs
+  zsign without a new bundle identifier (`hub/signing/signing.go`), so the
+  signed app keeps `com.facebook.WebDriverAgentRunner.xctrunner`.
+* The value to enter as **WDA bundle ID** in section 3 is therefore
+  **`com.facebook.WebDriverAgentRunner`**. GADS adds `.xctrunner` by itself
+  (`provider/config/config.go`) and starts the app under that name.
+* The provisioning profile must cover that identifier, which is why the App
+  ID above is `*`.
+
+**Signing outside the hub** (alternative). GADS's documentation names zsign,
+fastlane sigh and codesign. With these you can give the app an identifier of
+your own, and then an App ID such as `com.yourname.*` is enough. With zsign:
+
+```
+zsign -k key.pem -c certificate.pem -m profile.mobileprovision -b com.yourname.WebDriverAgentRunner.xctrunner -o WebDriverAgent-signed.ipa WebDriverAgent.ipa
+```
+
+Upload the result under Admin → Files as a WebDriverAgent upload (without
+signing), and enter `com.yourname.WebDriverAgentRunner` as WDA bundle ID in
+section 3. The rule is always the same: **WDA bundle ID = the bundle
+identifier inside the signed app, minus `.xctrunner`.** Building
+WebDriverAgent yourself in Xcode on a Mac, where you choose the identifier in
+Xcode, is described under
 [Build WebDriverAgent IPA file manually using Xcode](https://github.com/shamanec/GADS/blob/v6.0.0/docs/provider.md#build-webdriveragent-ipa-file-manually-using-xcode).
 
 Notes that save hours:
 
-* **The bundle ID.** Write down the bundle identifier WDA is signed with (the
-  App ID of your profile, for example `com.yourname.WebDriverAgentRunner`).
-  GADS adds `.xctrunner` to it by itself when it starts the app, so the
-  provisioning profile must cover `com.yourname.WebDriverAgentRunner.xctrunner`
-  too. A wildcard App ID (`com.yourname.*`) does.
 * **A new phone later** means: register its UDID at Apple, download the
   profile again, sign and upload again.
 * **Expiry.** When the signature runs out, every phone stops responding on the
@@ -135,7 +178,9 @@ your provider (`Provider1`):
 
 * turn **Provide iOS** on;
 * choose the uploaded **WebDriverAgent** build;
-* enter the **WDA bundle ID** (without `.xctrunner`);
+* enter the **WDA bundle ID**: `com.facebook.WebDriverAgentRunner` when you
+  signed the pre-built file in the hub page (section 2, "The bundle ID");
+  otherwise the identifier you signed with, without `.xctrunner`;
 * leave the host address `127.0.0.1` and the port `10001` as they are;
 * leave **Set up Appium servers** as the installer set it: off after a plain
   `install.ps1`, on after `install.ps1 -WithAppium`. Do not switch it on by
@@ -153,7 +198,7 @@ Check `C:\farm\Provider1\provider.log`: it should not end in an error.
 
 Admin → Devices → add a device:
 
-* **UDID**: the phone's identifier. In the Apple Devices app (or iTunes),
+* **UDID**: the phone's identifier. In iTunes,
   click the serial number on the phone's summary page until it shows the UDID
   (25 characters with a hyphen on recent iPhones, 40 on older ones).
 * **Name**: anything; Blossom shows it until you rename the phone there.
@@ -169,6 +214,12 @@ GADS asks for a provider restart after a device is added or changed.
 The phone should now show in the hub page, and you should be able to open and
 control it there. **If it does not work in the hub page, it will not work in
 Blossom**: fix it here first. The GADS FAQ covers the usual WDA install loops.
+
+A phone that is connected but never becomes live, with WebDriverAgent install
+or launch errors in `C:\farm\Provider1\provider.log`: check first that the WDA
+bundle ID in the provider's settings is the identifier inside the signed app
+minus `.xctrunner`, and that the provisioning profile covers that identifier
+and contains this phone's UDID (section 2).
 
 ## 5. Live video
 
@@ -205,7 +256,7 @@ give each one its name, market, accounts and people.
 ## Checklist for phone number two and onwards
 
 - [ ] iOS not 17.0–17.3, passcode off, Auto-Lock Never, Developer Mode on
-- [ ] UDID registered at Apple and included in the provisioning profile (sign and upload WDA again if you had to add it)
+- [ ] UDID registered at Apple and included in the provisioning profile (sign and upload WDA again if you had to add it); WDA bundle ID in the provider still matches the signed app
 - [ ] plugged into a powered hub, Trust tapped
 - [ ] added under Admin → Devices with screen size and stream type, assigned to the provider
 - [ ] provider restarted, phone controllable in the hub page

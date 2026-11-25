@@ -164,6 +164,21 @@ Describe 'Get-CloudflaredConfigText' {
         $block | Should -BeLessThan $hub
         $script:lines[$block + 1] | Should -Be '    service: http_status:403'
     }
+    It 'refuses the hub path that serves the provider record without a login, before the hub rule' {
+        $block = [array]::IndexOf($script:lines, "    path: '^/admin/provider/[^/]+/info'")
+        $hub = [array]::LastIndexOf($script:lines, '  - hostname: farm-hub.yourdomain.com')
+        $block | Should -BeGreaterThan 0
+        $block | Should -BeLessThan $hub
+        $script:lines[$block - 1] | Should -Be '  - hostname: farm-hub.yourdomain.com'
+        $script:lines[$block + 1] | Should -Be '    service: http_status:403'
+        '/admin/provider/Provider1/info' | Should -Match '^/admin/provider/[^/]+/info'
+        '/admin/providers' | Should -Not -Match '^/admin/provider/[^/]+/info'
+        '/admin/providers/logs' | Should -Not -Match '^/admin/provider/[^/]+/info'
+    }
+    It 'has three refusal rules on the hub name and none on the others' {
+        @($script:lines | Where-Object { $_ -eq '    service: http_status:403' }).Count | Should -Be 3
+        @($script:lines | Where-Object { $_ -eq '  - hostname: farm-hub.yourdomain.com' }).Count | Should -Be 4
+    }
     It 'ends with the catch-all rule' {
         ($script:lines | Where-Object { $_ })[-1] | Should -Be '  - service: http_status:404'
     }
@@ -217,6 +232,136 @@ Describe 'Small helpers' {
     }
 }
 
+Describe 'Hide-LogSecret' {
+    It 'masks a session token in a request address, as GADS logs it' {
+        $line = '[GIN] 2026/01/01 - 10:00:00 | 101 | 12m3s | 127.0.0.1 | GET      "/device/00008030-AAAA/ios-webrtc?token=eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyIjoiYiJ9.c2lnbmF0dXJl"'
+        $out = Hide-LogSecret -Text $line
+        $out | Should -Not -Match 'eyJ'
+        $out | Should -Match 'ios-webrtc\?token=<hidden>'
+        $out | Should -Match '^\[GIN\] 2026/01/01'
+    }
+    It 'masks the token wherever it stands in the query, and keeps the other parameters' {
+        Hide-LogSecret -Text 'GET "/devices/control/x/lock?ttl_minutes=5&token=abc.def-123&x=1"' | Should -Be 'GET "/devices/control/x/lock?ttl_minutes=5&token=<hidden>&x=1"'
+    }
+    It 'masks a bare JWT and a bearer header' {
+        Hide-LogSecret -Text 'token eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyIjoiYiJ9.c2ln was refused' | Should -Be 'token <hidden-token> was refused'
+        Hide-LogSecret -Text 'Authorization: Bearer 0123456789abcdef0123456789abcdef' | Should -Be 'Authorization: Bearer <hidden>'
+    }
+    It 'masks the given host names, in any letter case' {
+        Hide-LogSecret -Text 'connected to Farm-Hub.yourdomain.com and farm-restart.yourdomain.com' -Names @('farm-hub.yourdomain.com', 'farm-restart.yourdomain.com') |
+            Should -Be 'connected to <host-name> and <host-name>'
+    }
+    It 'leaves an ordinary line and an empty line alone' {
+        Hide-LogSecret -Text 'provider started on 127.0.0.1:10001' | Should -Be 'provider started on 127.0.0.1:10001'
+        Hide-LogSecret -Text '' | Should -Be ''
+    }
+}
+
+Describe 'ConvertTo-WingetVersion' {
+    It 'reads <Text> as <Want>' -ForEach @(
+        @{ Text = 'v1.9.25200'; Want = '1.9' }
+        @{ Text = 'v1.3.2691'; Want = '1.3' }
+        @{ Text = 'v1.4.3531-preview'; Want = '1.4' }
+        @{ Text = '1.12.350'; Want = '1.12' }
+    ) {
+        (ConvertTo-WingetVersion -Text $Text).ToString() | Should -Be $Want
+    }
+    It 'knows that 1.3 is older than 1.4 and 1.12 is newer' {
+        (ConvertTo-WingetVersion -Text 'v1.3.2691') -lt (New-Object System.Version(1, 4)) | Should -BeTrue
+        (ConvertTo-WingetVersion -Text 'v1.12.350') -ge (New-Object System.Version(1, 4)) | Should -BeTrue
+    }
+    It 'returns nothing for text without a version' {
+        ConvertTo-WingetVersion -Text 'not recognized' | Should -BeNullOrEmpty
+        ConvertTo-WingetVersion -Text '' | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Protect-NativeArgument (Windows PowerShell 5.1 quoting)' {
+    It 'doubles the backslashes at the end of a value with spaces' {
+        Protect-NativeArgument -PSMajor 5 -Value 'PATH=C:\Program Files\nodejs;C:\Program Files (x86)\cloudflared\' | Should -Be 'PATH=C:\Program Files\nodejs;C:\Program Files (x86)\cloudflared\\'
+        Protect-NativeArgument -PSMajor 5 -Value 'C:\My Folder\\' | Should -Be 'C:\My Folder\\\\'
+    }
+    It 'leaves a value without spaces, or without a backslash at the end, as it is' {
+        Protect-NativeArgument -PSMajor 5 -Value 'C:\farm\bin\' | Should -Be 'C:\farm\bin\'
+        Protect-NativeArgument -PSMajor 5 -Value 'C:\Program Files\nodejs' | Should -Be 'C:\Program Files\nodejs'
+        Protect-NativeArgument -PSMajor 5 -Value '' | Should -Be ''
+    }
+    It 'changes nothing on PowerShell 7, which does this itself' {
+        Protect-NativeArgument -PSMajor 7 -Value 'C:\My Folder\' | Should -Be 'C:\My Folder\'
+    }
+}
+
+Describe 'ConvertTo-PathList' {
+    It 'drops empty entries and the backslash at the end of an entry' {
+        ConvertTo-PathList -Path 'C:\Windows\system32;;C:\Program Files\nodejs\; C:\Program Files (x86)\cloudflared\;' |
+            Should -Be 'C:\Windows\system32;C:\Program Files\nodejs;C:\Program Files (x86)\cloudflared'
+    }
+    It 'never ends in a backslash, except for a drive root' {
+        ConvertTo-PathList -Path 'C:\a\;D:\' | Should -Be 'C:\a;D:\'
+        ConvertTo-PathList -Path 'C:\a\;C:\b\\' | Should -Not -Match '\\$'
+    }
+    It 'copes with an empty PATH' {
+        ConvertTo-PathList -Path '' | Should -Be ''
+        ConvertTo-PathList -Path $null | Should -Be ''
+    }
+}
+
+Describe 'Test-ServiceConfigSame' {
+    It 'is true for the same values, ignoring empty entries' {
+        Test-ServiceConfigSame -Current @{ Application = 'C:\farm\bin\GADS.exe'; DependOnService = @('MongoDB', ''); AppEnvironmentExtra = $null; Extra = 'x' } `
+            -Wanted @{ Application = 'C:\farm\bin\GADS.exe'; DependOnService = @('MongoDB'); AppEnvironmentExtra = @() } | Should -BeTrue
+    }
+    It 'is false when <Case>' -ForEach @(
+        @{ Case = 'a value differs'; Current = @{ A = 'x' }; Wanted = @{ A = 'y' } }
+        @{ Case = 'only the letter case differs'; Current = @{ A = 'path' }; Wanted = @{ A = 'PATH' } }
+        @{ Case = 'a list is shorter'; Current = @{ A = @('1') }; Wanted = @{ A = @('1', '2') } }
+        @{ Case = 'a list is in another order'; Current = @{ A = @('2', '1') }; Wanted = @{ A = @('1', '2') } }
+        @{ Case = 'the value is missing'; Current = @{ }; Wanted = @{ A = 'x' } }
+        @{ Case = 'three variables were merged into one'; Current = @{ A = @('PATH=C:\x" APPIUM_HOME=C:\farm\appium NPM_CONFIG_PREFIX=C:\farm\npm') }; Wanted = @{ A = @('APPIUM_HOME=C:\farm\appium', 'NPM_CONFIG_PREFIX=C:\farm\npm', 'PATH=C:\x') } }
+    ) {
+        Test-ServiceConfigSame -Current $Current -Wanted $Wanted | Should -BeFalse
+    }
+}
+
+Describe 'Get-TextSha256' {
+    It 'matches the known SHA-256 of "abc"' {
+        Get-TextSha256 -Text 'abc' | Should -Be 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+    }
+}
+
+Describe 'Test-FarmRootTrust (a C:\farm that exists before the kit runs)' {
+    BeforeAll {
+        $script:admins = 'S-1-5-32-544'; $script:system = 'S-1-5-18'
+        $script:user = 'S-1-5-21-1111111111-2222222222-3333333333-1001'
+        $script:authUsers = 'S-1-5-11'; $script:users = 'S-1-5-32-545'
+    }
+    It 'uses a folder that the kit locked: owned by Administrators, only Administrators and SYSTEM on it' {
+        (Test-FarmRootTrust -IsFolder $true -IsLink $false -IsEmpty $false -OwnerSid $script:admins -AllowSids @($script:admins, $script:system)).Action | Should -Be 'use'
+    }
+    It 'replaces an empty folder, whoever made it' {
+        (Test-FarmRootTrust -IsFolder $true -IsLink $false -IsEmpty $true -OwnerSid $script:user -AllowSids @($script:authUsers)).Action | Should -Be 'recreate'
+    }
+    It 'refuses a folder with content that a standard user owns' {
+        $v = Test-FarmRootTrust -IsFolder $true -IsLink $false -IsEmpty $false -OwnerSid $script:user -AllowSids @($script:admins, $script:system)
+        $v.Action | Should -Be 'refuse'
+        $v.Reason | Should -Not -BeNullOrEmpty
+    }
+    It 'refuses a folder with content that <Who> may write to, even when Administrators own it' -ForEach @(
+        @{ Who = 'Authenticated Users'; Sid = 'S-1-5-11' }
+        @{ Who = 'Users'; Sid = 'S-1-5-32-545' }
+        @{ Who = 'Everyone'; Sid = 'S-1-1-0' }
+        @{ Who = 'one user'; Sid = 'S-1-5-21-1111111111-2222222222-3333333333-1001' }
+        @{ Who = 'CREATOR OWNER'; Sid = 'S-1-3-0' }
+    ) {
+        (Test-FarmRootTrust -IsFolder $true -IsLink $false -IsEmpty $false -OwnerSid $script:admins -AllowSids @($script:admins, $script:system, $Sid)).Action | Should -Be 'refuse'
+    }
+    It 'refuses a link, a file, and a folder whose owner cannot be read' {
+        (Test-FarmRootTrust -IsFolder $true -IsLink $true -IsEmpty $true -OwnerSid $script:admins -AllowSids @($script:admins)).Action | Should -Be 'refuse'
+        (Test-FarmRootTrust -IsFolder $false -IsLink $false -IsEmpty $false -OwnerSid $script:admins -AllowSids @($script:admins)).Action | Should -Be 'refuse'
+        (Test-FarmRootTrust -IsFolder $true -IsLink $false -IsEmpty $false -OwnerSid '' -AllowSids @()).Action | Should -Be 'refuse'
+    }
+}
+
 Describe 'versions.json' {
     BeforeAll { $script:v = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\versions.json') -Raw | ConvertFrom-Json }
     It 'pins a SHA-256 for every downloaded program' {
@@ -228,6 +373,9 @@ Describe 'versions.json' {
         $script:v.gads.hubZipUrl | Should -Match '^https://github\.com/shamanec/GADS/releases/download/'
         $script:v.gadsDrag.url | Should -Match '^https://github\.com/fyhcrew-art/blossom-farm-kit/releases/download/'
         $script:v.gadsDrag.url | Should -Match ([regex]::Escape($script:v.gadsDrag.releaseTag))
+    }
+    It 'pins exact versions for the three npm packages of -WithAppium' {
+        foreach ($name in @('appium', 'xcuitestDriver', 'gadsPlugin')) { [string]$script:v.npm.$name | Should -Match '^\d+\.\d+\.\d+$' }
     }
     It 'pins an exact version for every winget package' {
         foreach ($p in $script:v.winget.PSObject.Properties) {

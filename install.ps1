@@ -30,6 +30,15 @@
     Appium server per phone. No screen of Blossom CRM needs it (see README,
     "Appium: off unless you ask for it"). Once chosen it is remembered for
     later runs.
+.PARAMETER ProviderExe
+    Path of a GADS-drag.exe you already have (for example copied from another
+    farm computer), used instead of downloading it. It is only accepted when
+    its SHA-256 is the one pinned in versions.json.
+.PARAMETER SkipFirewallRules
+    Do not create the Windows Firewall rules that keep other computers on
+    your network away from the ports the provider opens for each phone. Only
+    for a computer whose firewall is managed elsewhere (docs\security.md,
+    section 1).
 .PARAMETER SkipPowerSettings
     Do not switch off sleep on mains power.
 .PARAMETER SkipSelfTest
@@ -45,6 +54,8 @@ param(
     [switch]$OverwriteDns,
     [switch]$ResetHubUser,
     [switch]$WithAppium,
+    [string]$ProviderExe = '',
+    [switch]$SkipFirewallRules,
     [switch]$SkipPowerSettings,
     [switch]$SkipSelfTest
 )
@@ -68,6 +79,33 @@ $KeepUserName = 'farm-keepalive'
 $script:NewHubPassword = $null
 $script:NewRestartSecret = $null
 $script:Summary = $null
+
+# Farm services that were running when the script started. Whatever happens
+# (an error, a wrong password, Ctrl+C), the ones this run stopped are started
+# again at the end: a re-run must never leave a working farm switched off.
+$script:WasRunning = @()
+# Set when this run stopped the tunnel on purpose because something was unsafe.
+$script:LeaveTunnelStopped = $false
+$script:ExitCode = 1
+
+function Restore-FarmServices {
+    $back = @(); $down = @()
+    foreach ($name in @('GadsHub', 'GadsProvider', 'FarmGate', 'KeepAvailable', 'FarmRestart', 'Cloudflared')) {
+        if ($script:WasRunning -notcontains $name) { continue }
+        if ($name -eq 'Cloudflared' -and $script:LeaveTunnelStopped) { continue }
+        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if (-not $svc -or $svc.Status -eq 'Running') { continue }
+        try { Start-Service -Name $name -ErrorAction Stop; $back += $name } catch { $down += $name }
+    }
+    if ($back.Count -gt 0) { Write-Host ('Started again (they were running before this script): ' + ($back -join ', ') + '.') -ForegroundColor Yellow }
+    if ($down.Count -gt 0) {
+        Write-Host ('These services were running before and could NOT be started again: ' + ($down -join ', ') + '.') -ForegroundColor Red
+        Write-Host ('Start them yourself:   Start-Service ' + ($down -join ', ') + '   or run install.ps1 again to the end.') -ForegroundColor Red
+    }
+    if ($script:LeaveTunnelStopped -and ($script:WasRunning -contains 'Cloudflared')) {
+        Write-Host 'The tunnel (service Cloudflared) was stopped on purpose and is left stopped: see the message above.' -ForegroundColor Red
+    }
+}
 
 function Show-FinalValues {
     if (-not $script:Summary) { return }
@@ -167,8 +205,19 @@ try {
     Get-ChildItem -LiteralPath $KitRoot -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
     $versions = Read-KitVersions -KitRoot $KitRoot
     $paths = Get-FarmPaths -Root $FarmRoot
-    $previous = Read-FarmConfig -Paths $paths
+    $script:WasRunning = @(Get-FarmServiceNames | Where-Object { $svc = Get-Service -Name $_ -ErrorAction SilentlyContinue; $svc -and $svc.Status -eq 'Running' })
     Write-Ok ('Windows build ' + $os.Build + ', 64-bit, ' + [Math]::Round($drive.Free / 1GB) + ' GB free, Administrator.')
+
+    # ------------------------------------------------------------------
+    Write-Step '2/12  Folders'
+    # ------------------------------------------------------------------
+    # Before anything in C:\farm is read or run: a folder of that name that
+    # this kit did not create and lock is not adopted (any user of the
+    # computer can create C:\farm). Everything under it (secrets, pairing
+    # records of the phones, the tunnel credentials, logs) is for
+    # Administrators and SYSTEM only.
+    Initialize-FarmRoot -Root $paths.Root
+    $previous = Read-FarmConfig -Paths $paths
 
     if (-not $Nickname) {
         $Nickname = 'Provider1'
@@ -178,15 +227,9 @@ try {
     $reason = Test-ProviderNickname -Nickname $Nickname
     if ($reason) { Stop-Farm -Problem ('The provider nickname "' + $Nickname + '" cannot be used.') -WhatToDo $reason }
 
-    # ------------------------------------------------------------------
-    Write-Step '2/12  Folders'
-    # ------------------------------------------------------------------
-    foreach ($dir in @($paths.Root, $paths.Bin, $paths.Config, $paths.Logs, $paths.Services, $paths.Downloads, $paths.Cloudflared)) {
+    foreach ($dir in @($paths.Bin, $paths.Config, $paths.Logs, $paths.Services, $paths.Downloads, $paths.Cloudflared)) {
         if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     }
-    # Everything under C:\farm (secrets, pairing records of the phones, the
-    # tunnel credentials, logs) is for Administrators and SYSTEM only.
-    Protect-FarmPath -Path $paths.Root
     foreach ($file in @('restart-server.js', 'provider-gate.js', 'keep-available.ps1')) {
         Copy-Item -LiteralPath (Join-Path $KitRoot ('services\' + $file)) -Destination (Join-Path $paths.Services $file) -Force
     }
@@ -208,8 +251,20 @@ try {
     $cloudflaredExe = Find-FarmTool -Command 'cloudflared'
     $nssmSource = Find-FarmTool -Command 'nssm'
     # A private copy of nssm.exe: the services keep working when the package
-    # manager later moves or removes its own copy.
-    if (-not (Test-Path -LiteralPath $paths.Nssm)) { Copy-Item -LiteralPath $nssmSource -Destination $paths.Nssm -Force }
+    # manager later moves or removes its own copy. It is the program every
+    # farm service runs through, so a copy that differs from the installed
+    # one is replaced, never trusted as it is.
+    if (-not (Test-Path -LiteralPath $paths.Nssm) -or ((Get-FileSha256 -Path $paths.Nssm) -ne (Get-FileSha256 -Path $nssmSource))) {
+        if (Test-Path -LiteralPath $paths.Nssm) {
+            Write-Warn 'C:\farm\bin\nssm.exe differs from the installed NSSM and is replaced (the farm services are stopped for it and started again below).'
+            foreach ($name in (Get-FarmServiceNames)) {
+                if (Get-Service -Name $name -ErrorAction SilentlyContinue) { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue }
+            }
+            Start-Sleep -Seconds 3
+        }
+        try { Copy-Item -LiteralPath $nssmSource -Destination $paths.Nssm -Force }
+        catch { Stop-Farm -Problem ('Could not write C:\farm\bin\nssm.exe: ' + $_.Exception.Message) -WhatToDo 'A farm service still holds the file. Restart the computer and run install.ps1 again.' }
+    }
     $nssm = $paths.Nssm
 
     $npmPrefix = Join-Path $paths.Root 'npm'
@@ -230,7 +285,7 @@ try {
         $appiumCmd = Join-Path $npmPrefix 'appium.cmd'
         if (-not (Test-Path -LiteralPath $appiumCmd)) {
             Write-Note ('Installing Appium ' + $versions.npm.appium + ' (a few minutes)...')
-            $r = Invoke-Native -File $npmCmd -Arguments @('install', '--global', '--prefix', $npmPrefix, '--no-fund', '--no-audit', ('appium@' + $versions.npm.appium))
+            $r = Invoke-Native -File $npmCmd -Arguments @('install', '--global', '--prefix', $npmPrefix, '--no-fund', ('appium@' + $versions.npm.appium))
             if ($r.Code -ne 0 -or -not (Test-Path -LiteralPath $appiumCmd)) {
                 Stop-Farm -Problem ('npm could not install Appium: ' + (($r.Output | Select-Object -Last 3) -join ' ')) -WhatToDo 'Check the internet connection and run install.ps1 -WithAppium again. To continue without Appium, delete C:\farm\npm and run install.ps1 without -WithAppium.'
             }
@@ -242,16 +297,43 @@ try {
                 Stop-Farm -Problem ('Appium could not install its iOS driver: ' + (($r.Output | Select-Object -Last 3) -join ' ')) -WhatToDo 'Run install.ps1 -WithAppium again. If it repeats, report the text above on the kit repository.'
             }
         }
-        Write-Ok ('Appium ' + $versions.npm.appium + ' with the XCUITest driver is installed under C:\farm.')
+        # The GADS provider installs its own Appium plugin (appium-gads) when
+        # it starts and does not find it: "npm install -g" and "appium plugin
+        # install", run by the service as SYSTEM. Installing the version this
+        # GADS expects here, with the same two commands, means the service
+        # finds it in place and fetches nothing from the internet by itself.
+        $plugin = [string]$versions.npm.gadsPlugin
+        $r = Invoke-Native -File $npmCmd -Arguments @('list', '--global', '--prefix', $npmPrefix, '--depth=0', 'appium-gads')
+        if ($r.Code -ne 0 -or (($r.Output -join ' ') -notmatch ('appium-gads@' + [regex]::Escape($plugin) + '(\s|$)'))) {
+            Write-Note ('Installing the GADS Appium plugin ' + $plugin + '...')
+            $r = Invoke-Native -File $npmCmd -Arguments @('install', '--global', '--prefix', $npmPrefix, '--no-fund', ('appium-gads@' + $plugin))
+            if ($r.Code -ne 0) {
+                Stop-Farm -Problem ('npm could not install the GADS Appium plugin: ' + (($r.Output | Select-Object -Last 3) -join ' ')) -WhatToDo 'Check the internet connection and run install.ps1 -WithAppium again.'
+            }
+        }
+        $r = Invoke-Native -File $appiumCmd -Arguments @('plugin', 'list', '--installed')
+        if (($r.Output -join ' ') -notmatch 'gads') {
+            $r = Invoke-Native -File $appiumCmd -Arguments @('plugin', 'install', '--source=npm', ('appium-gads@' + $plugin))
+            if ($r.Code -ne 0) {
+                Write-Warn ('Appium could not install the GADS plugin now (' + (($r.Output | Select-Object -Last 2) -join ' ') + '). The provider will try again by itself when it starts.')
+            }
+        }
+        Write-Ok ('Appium ' + $versions.npm.appium + ' with the XCUITest driver and the GADS plugin ' + $plugin + ' is installed under C:\farm.')
+        Write-Note 'Only the versions of these three packages are pinned. The packages they depend on are chosen by npm on the day of installation and are not checksum-pinned by this kit (docs\security.md, section 8).'
     }
 
     $apple = Get-Service -Name 'Apple Mobile Device Service' -ErrorAction SilentlyContinue
     $appleStore = $null
     try { $appleStore = Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'AppleInc.AppleDevices*' -or $_.Name -like 'AppleInc.iTunes*' } | Select-Object -First 1 } catch { $appleStore = $null }
-    if ($apple -or $appleStore) {
-        Write-Ok 'Apple''s USB support for iPhones is installed.'
+    if ($apple) {
+        # The classic iTunes installer registers this Windows service; it runs
+        # without anybody signed in, which a farm needs after a restart.
+        try { Set-Service -Name 'Apple Mobile Device Service' -StartupType Automatic -ErrorAction Stop } catch { Write-Warn 'Could not set "Apple Mobile Device Service" to start automatically; check it in services.msc.' }
+        Write-Ok 'Apple''s USB support for iPhones is installed as a Windows service (Apple Mobile Device Service).'
+    } elseif ($appleStore) {
+        Write-Warn 'Apple''s USB support was found only as a Microsoft Store app (Apple Devices or iTunes from the Store), not as the Windows service "Apple Mobile Device Service". As far as we could establish, the Store apps serve phones only while somebody is signed in to Windows: after an unattended restart every phone would stay offline until someone logs in. Install iTunes from Apple''s own installer instead (docs\phones.md, section 0), or set the computer to sign in automatically. The rest of the setup continues.'
     } else {
-        Write-Warn 'Apple''s USB support for iPhones was not found. Install "Apple Devices" (or iTunes) from the Microsoft Store before plugging in phones - see docs\phones.md. The rest of the setup continues.'
+        Write-Warn 'Apple''s USB support for iPhones was not found. Install iTunes for Windows from Apple''s own installer (not from the Microsoft Store) before plugging in phones - see docs\phones.md, section 0. The rest of the setup continues.'
     }
 
     # ------------------------------------------------------------------
@@ -278,6 +360,16 @@ try {
     Write-Ok ('GADS hub ' + $versions.gads.version + ' in place, SHA-256 verified.')
     if (-not $haveProvider) {
         $tmpProvider = Join-Path $paths.Downloads 'GADS-drag.exe'
+        if ($ProviderExe) {
+            # A file the customer brings is held to the same pinned checksum.
+            if (-not (Test-Path -LiteralPath $ProviderExe -PathType Leaf)) {
+                Stop-Farm -Problem ('-ProviderExe: file not found: ' + $ProviderExe) -WhatToDo 'Give the full path of GADS-drag.exe, or leave -ProviderExe out to download it.'
+            }
+            if ((Get-FileSha256 -Path $ProviderExe) -ne $providerHash) {
+                Stop-Farm -Problem ('-ProviderExe: the file does not have the SHA-256 this kit pins for the provider ' + $versions.gadsDrag.version + ' (' + $providerHash + ').') -WhatToDo 'Use the GADS-drag.exe of exactly this version (from the kit''s gads-v... release, or built as patch\README.md describes), or leave -ProviderExe out.'
+            }
+            Copy-Item -LiteralPath $ProviderExe -Destination $tmpProvider -Force
+        }
         Get-VerifiedDownload -Url $versions.gadsDrag.url -Sha256 $versions.gadsDrag.sha256 -OutFile $tmpProvider -What ('the patched GADS provider ' + $versions.gadsDrag.version)
         if (Get-Service -Name 'GadsProvider' -ErrorAction SilentlyContinue) { Stop-Service -Name 'GadsProvider' -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 3 }
         Copy-Item -LiteralPath $tmpProvider -Destination $paths.ProviderExe -Force
@@ -307,7 +399,9 @@ try {
     # ------------------------------------------------------------------
     Write-Step '6/12  GADS hub service and its administrator password'
     # ------------------------------------------------------------------
-    Set-FarmService -Nssm $nssm -Name 'GadsHub' -DisplayName 'Blossom farm - GADS hub' -Description 'GADS device-farm hub (Blossom farm kit).' `
+    # On a re-run the hub is left running when nothing about it changed:
+    # stopping it would also stop the provider and keep-available.
+    $null = Set-FarmService -Nssm $nssm -Name 'GadsHub' -DisplayName 'Blossom farm - GADS hub' -Description 'GADS device-farm hub (Blossom farm kit).' `
         -Application $paths.HubExe -Parameters ('hub --host-address=127.0.0.1 --port=' + $HubPort + ' --mongo-db=127.0.0.1:' + $MongoPort) `
         -Directory $paths.Root -LogFile (Join-Path $paths.Logs 'hub.log') -DependsOn @('MongoDB')
     if (-not (Start-FarmService -Name 'GadsHub' -WaitSec 40) -or -not (Wait-TcpPort -Port $HubPort -WaitSec 60)) {
@@ -324,6 +418,7 @@ try {
     $adminPassword = $null
     if ($adminToken) {
         if (Get-Service -Name 'Cloudflared' -ErrorAction SilentlyContinue) {
+            $script:LeaveTunnelStopped = $true
             Stop-Service -Name 'Cloudflared' -Force -ErrorAction SilentlyContinue
             Write-Warn 'The tunnel was stopped: the hub administrator still had the default password.'
         }
@@ -346,6 +441,7 @@ try {
         if (-not $adminToken) {
             Stop-Farm -Problem 'The hub does not accept the new administrator password.' -WhatToDo 'Run install.ps1 again. Nothing has been opened to the internet.'
         }
+        $script:LeaveTunnelStopped = $false
         Write-Ok 'The default administrator password is gone.'
     } else {
         Write-Note 'The hub administrator password was already changed. Enter it to continue (typing is hidden).'
@@ -578,6 +674,7 @@ try {
         $existingSecret = $null
     }
     if ($haveSecret) {
+        Protect-FarmPath -Path $paths.RestartSecret
         Write-Ok 'The restart secret of the earlier installation is kept.'
     } else {
         $script:NewRestartSecret = New-RandomSecret -Bytes 32 -Format Hex
@@ -589,39 +686,65 @@ try {
     # ------------------------------------------------------------------
     Write-Step '11/12  Windows services'
     # ------------------------------------------------------------------
-    $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    # The machine PATH usually ends in a backslash ("...\cloudflared\"); the
+    # entries are cleaned and PATH is put last, so that no quoting accident
+    # can ever swallow the variables next to it.
+    $machinePath = ConvertTo-PathList -Path ([Environment]::GetEnvironmentVariable('Path', 'Machine'))
     $providerFolder = Join-Path $paths.Root $Nickname
     $providerEnv = @()
     if ($WithAppium) {
-        $providerEnv += ('PATH=' + $npmPrefix + ';' + (Split-Path -Parent $nodeExe) + ';' + (Split-Path -Parent $ffmpegExe) + ';' + $machinePath)
         $providerEnv += ('APPIUM_HOME=' + $appiumHome)
         $providerEnv += ('NPM_CONFIG_PREFIX=' + $npmPrefix)
+        $providerEnv += ('PATH=' + (ConvertTo-PathList -Path ($npmPrefix + ';' + (Split-Path -Parent $nodeExe) + ';' + (Split-Path -Parent $ffmpegExe) + ';' + $machinePath)))
     } else {
-        $providerEnv += ('PATH=' + (Split-Path -Parent $ffmpegExe) + ';' + $machinePath)
+        $providerEnv += ('PATH=' + (ConvertTo-PathList -Path ((Split-Path -Parent $ffmpegExe) + ';' + $machinePath)))
     }
 
-    Set-FarmService -Nssm $nssm -Name 'GadsProvider' -DisplayName 'Blossom farm - GADS provider' -Description 'GADS device-farm provider, patched build (Blossom farm kit).' `
+    # Windows Firewall: for every iPhone the provider opens ports on all
+    # network addresses of this computer (see Set-FarmFirewallBlock). The
+    # rules are made before the provider is started.
+    $blocked = @(@('the GADS provider', $paths.ProviderExe), @('the GADS hub', $paths.HubExe))
+    if ($WithAppium) { $blocked += , @('Node.js (Appium servers)', $nodeExe) }
+    if ($SkipFirewallRules) {
+        Write-Warn 'Skipped the Windows Firewall rules (-SkipFirewallRules). The ports the provider opens for each phone are then only as closed as your own firewall makes them (docs\security.md, section 1).'
+    } else {
+        $missing = @()
+        foreach ($b in $blocked) { if (-not (Set-FarmFirewallBlock -Label $b[0] -Program $b[1])) { $missing += $b[0] } }
+        $fw = Get-FarmFirewallState
+        if ($missing.Count -gt 0 -or -not $fw.Available) {
+            $which = 'the farm programs'
+            if ($missing.Count -gt 0) { $which = ($missing -join ', ') }
+            Write-Warn ('Could not create the Windows Firewall rule(s) for ' + $which + '. If another firewall product manages this computer, block incoming TCP connections to ' + $paths.ProviderExe + ' there (docs\security.md, section 1).')
+        } elseif ($fw.ProfilesOff.Count -gt 0) {
+            Write-Warn ('Firewall rules created, but Windows Firewall is switched OFF for: ' + ($fw.ProfilesOff -join ', ') + '. Rules do nothing while it is off. Switch it on (Windows Security -> Firewall & network protection), or make sure the product that replaces it blocks incoming connections to this computer.')
+        } else {
+            Write-Ok 'Windows Firewall is on and refuses connections from other computers to the provider''s per-phone ports.'
+        }
+    }
+
+    $null = Set-FarmService -Nssm $nssm -Name 'GadsProvider' -DisplayName 'Blossom farm - GADS provider' -Description 'GADS device-farm provider, patched build (Blossom farm kit).' `
         -Application $paths.ProviderExe -Parameters ('provider --nickname=' + $Nickname + ' --hub=' + $HubUrl + ' --mongo-db=127.0.0.1:' + $MongoPort + ' --provider-folder=' + (ConvertTo-NssmArgument -Value $providerFolder) + ' --use-ios-pair-cache') `
         -Directory $paths.Root -LogFile (Join-Path $paths.Logs 'provider.log') -DependsOn @('GadsHub') -Environment $providerEnv
 
-    Set-FarmService -Nssm $nssm -Name 'FarmGate' -DisplayName 'Blossom farm - provider gate' -Description 'Lets only requests with a valid hub token through to the GADS provider (Blossom farm kit).' `
+    $null = Set-FarmService -Nssm $nssm -Name 'FarmGate' -DisplayName 'Blossom farm - provider gate' -Description 'Lets only requests with a valid hub token through to the GADS provider (Blossom farm kit).' `
         -Application $nodeExe -Parameters (ConvertTo-NssmArgument -Value (Join-Path $paths.Services 'provider-gate.js')) `
-        -Directory $paths.Services -LogFile (Join-Path $paths.Logs 'provider-gate.log') `
+        -Directory $paths.Services -LogFile (Join-Path $paths.Logs 'provider-gate.log') -WatchFiles @((Join-Path $paths.Services 'provider-gate.js')) `
         -Environment @(('FARM_GATE_PORT=' + $GatePort), ('FARM_GATE_HUB_PORT=' + $HubPort), ('FARM_GATE_PROVIDER_PORT=' + $ProviderPort))
 
-    Set-FarmService -Nssm $nssm -Name 'KeepAvailable' -DisplayName 'Blossom farm - keep-available' -Description 'Keeps the GADS hub accepting commands (Blossom farm kit).' `
+    $null = Set-FarmService -Nssm $nssm -Name 'KeepAvailable' -DisplayName 'Blossom farm - keep-available' -Description 'Keeps the GADS hub accepting commands (Blossom farm kit).' `
         -Application (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
         -Parameters ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + (ConvertTo-NssmArgument -Value (Join-Path $paths.Services 'keep-available.ps1'))) `
-        -Directory $paths.Services -LogFile (Join-Path $paths.Logs 'keep-available.log') -DependsOn @('GadsHub')
+        -Directory $paths.Services -LogFile (Join-Path $paths.Logs 'keep-available.log') -DependsOn @('GadsHub') `
+        -WatchFiles @((Join-Path $paths.Services 'keep-available.ps1'), $paths.KeepAvailable)
 
-    Set-FarmService -Nssm $nssm -Name 'FarmRestart' -DisplayName 'Blossom farm - restart service' -Description 'Lets Blossom CRM show and restart the farm programs; protected by the restart secret (Blossom farm kit).' `
+    $null = Set-FarmService -Nssm $nssm -Name 'FarmRestart' -DisplayName 'Blossom farm - restart service' -Description 'Lets Blossom CRM show and restart the farm programs; protected by the restart secret (Blossom farm kit).' `
         -Application $nodeExe -Parameters (ConvertTo-NssmArgument -Value (Join-Path $paths.Services 'restart-server.js')) `
-        -Directory $paths.Services -LogFile (Join-Path $paths.Logs 'restart-server.log') `
+        -Directory $paths.Services -LogFile (Join-Path $paths.Logs 'restart-server.log') -WatchFiles @((Join-Path $paths.Services 'restart-server.js'), $paths.RestartSecret) `
         -Environment @(('GADS_RESTART_SECRET_FILE=' + $paths.RestartSecret), ('GADS_RESTART_PORT=' + $RestartPort))
 
-    Set-FarmService -Nssm $nssm -Name 'Cloudflared' -DisplayName 'Blossom farm - Cloudflare tunnel' -Description 'cloudflared tunnel for the farm host names (Blossom farm kit).' `
+    $null = Set-FarmService -Nssm $nssm -Name 'Cloudflared' -DisplayName 'Blossom farm - Cloudflare tunnel' -Description 'cloudflared tunnel for the farm host names (Blossom farm kit).' `
         -Application $cloudflaredExe -Parameters ('tunnel --no-autoupdate --config ' + (ConvertTo-NssmArgument -Value $paths.CloudflaredYml) + ' run') `
-        -Directory $paths.Cloudflared -LogFile (Join-Path $paths.Logs 'cloudflared.log') -DelayedStart
+        -Directory $paths.Cloudflared -LogFile (Join-Path $paths.Logs 'cloudflared.log') -WatchFiles @($paths.CloudflaredYml, $credFile) -DelayedStart
 
     # The tunnel is started last, and only now: the default password is gone,
     # the provider sits behind its gate, the restart service has its secret.
@@ -638,11 +761,14 @@ try {
     if (-not (Wait-TcpPort -Port $ProviderPort -WaitSec 30)) {
         Write-Warn 'The GADS provider is not listening yet. Read C:\farm\logs\provider.log; the self-test below will say more.'
     }
-    # Nothing of the farm may listen on the network: everything is reached
-    # through the tunnel, which connects outwards.
+    # The fixed ports of the farm may not listen on the network: everything
+    # is reached through the tunnel, which connects outwards. (The ports the
+    # provider opens per phone are a different matter: upstream GADS binds
+    # them to all addresses, and the firewall rules above close them.)
     $open = @()
     try { $open = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { @($HubPort, $ProviderPort, $GatePort, $RestartPort) -contains $_.LocalPort -and $_.LocalAddress -ne '127.0.0.1' -and $_.LocalAddress -ne '::1' }) } catch { $open = @() }
     if ($open.Count -gt 0) {
+        $script:LeaveTunnelStopped = $true
         Stop-Service -Name 'Cloudflared' -Force -ErrorAction SilentlyContinue
         Stop-Farm -Problem ('Port ' + $open[0].LocalPort + ' listens on ' + $open[0].LocalAddress + ', which other computers on your network can reach. The tunnel was stopped.') -WhatToDo 'If it is the provider port: open the hub page (Admin -> Providers) and set the host address to 127.0.0.1. Then run install.ps1 again.'
     }
@@ -685,7 +811,7 @@ try {
     Show-FinalValues
     Write-Host 'Next: prepare the phones - docs\phones.md. Then press "Test connection" in Blossom.' -ForegroundColor Cyan
     Write-Host ''
-    exit 0
+    $script:ExitCode = 0
 }
 catch {
     Write-FarmFailure -ErrorRecord $_
@@ -700,5 +826,10 @@ catch {
             Show-FinalValues
         }
     }
-    exit 1
+    $script:ExitCode = 1
 }
+finally {
+    # Also reached after Ctrl+C. Never leave a farm that was working switched off.
+    Restore-FarmServices
+}
+exit $script:ExitCode

@@ -109,3 +109,5 @@ jobs:
           git -C /tmp/gads -c advice.detachedHead=false checkout -q FETCH_HEAD
           git -C /tmp/gads apply --check "$GITHUB_WORKSPACE/patch/provider-drag.patch"
           echo "The patch applies to $COMMIT."
+      - name: The release script parses
+        run: bash -n .github/scripts/make-source-archive.sh

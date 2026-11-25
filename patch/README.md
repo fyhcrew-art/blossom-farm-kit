@@ -10,11 +10,21 @@ CRM uses them when they are there and works without them when they are not.
 | `open_url` | Opens a web address or a deep link on the phone through WebDriverAgent. | The assistant reports it as unavailable. |
 
 All three are reached through the provider's existing
-`POST /device/<udid>/custom-action` endpoint; the patch adds no new route and
-changes one file, `provider/router/control.go` (164 added lines). `drag` and
-`open_url` open a WebDriverAgent session when none is open (no app is
-launched). On Android `drag` falls back to a swipe and `open_url` answers with
-an error.
+`POST /device/<udid>/custom-action` endpoint; the patch adds no new route.
+`drag` and `open_url` open a WebDriverAgent session when none is open (no app
+is launched). On Android `drag` falls back to a swipe and `open_url` answers
+with an error.
+
+The patch changes two files:
+
+* `provider/router/control.go`: the three actions.
+* `provider/router/handler.go`: every answer of the provider carries the
+  header `X-Source-Code: https://github.com/fyhcrew-art/blossom-farm-kit/releases`.
+  This is the offer of source that the AGPL (section 13) asks a modified
+  program to make to the people who use it over a network.
+
+Both files carry a notice at the top that they were modified, by whom and
+when, as the AGPL (section 5a) asks.
 
 ## Upstream base
 
@@ -63,9 +73,18 @@ Differences from upstream's own release build
 To check the published file yourself, run the commands above with Go 1.26.0
 on Linux and compare `sha256sum GADS-drag.exe` with `versions.json`.
 
+After the build and its tests the workflow runs
+`.github/scripts/make-source-archive.sh`, which makes the files published
+next to the binary: the source archive (with `vendor/`, `BUILD.md` and
+`MODIFICATIONS.md`), `THIRD-PARTY-NOTICES.txt` and the AGPL text.
+
 ## Licence
 
 The patch modifies files of GADS that are licensed under the GNU Affero
-General Public License v3.0, and is distributed under the same licence (see
-`../NOTICE`). The binary built from it is published together with its
-complete source (`GADS-drag-<version>-source.tar.gz` on the same release).
+General Public License v3.0, and is distributed under the same licence (text:
+`../LICENSE-AGPL-3.0`; details: `../NOTICE`). The binary built from it is
+published on the same release as `GADS-drag-<version>-source.tar.gz`: the
+patched tree, the sources of the Go modules it is built from, the build
+instructions and a statement of what was modified. Apple's developer disk
+image, which the build embeds, is not in that archive; the archive says where
+to fetch it and gives its checksums (`../NOTICE`, section 2b).

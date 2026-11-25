@@ -4,7 +4,9 @@ Copyright (c) 2026 Blossom CRM (fyhcrew-art)
 
 This licence covers the files of this repository EXCEPT
 patch/provider-drag.patch, which is a modification of GADS and is licensed
-under the GNU Affero General Public License v3.0 (see NOTICE).
+under the GNU Affero General Public License v3.0 (the text is in the file
+LICENSE-AGPL-3.0; see NOTICE), and EXCEPT the file LICENSE-AGPL-3.0 itself,
+which is the licence text of the Free Software Foundation.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

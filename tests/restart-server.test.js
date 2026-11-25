@@ -188,6 +188,81 @@ test('POST /restart-all stops in reverse order, then starts; MongoDB is not stop
   })
 })
 
+/**
+ * A controller that behaves like the Windows service manager with nssm
+ * services: "stop" only requests the stop (the service stays STOP_PENDING for
+ * a number of state queries), the hub cannot be stopped while a service that
+ * depends on it is not fully stopped (1051), and a service that is still
+ * stopping cannot be started (1056).
+ */
+function slowController(pendingPolls) {
+  const state = {}
+  for (const name of Object.values(SERVICES)) state[name] = 'running'
+  const pending = {}
+  const calls = []
+  const dependents = [SERVICES.provider, SERVICES.keep_available]
+  const tick = name => { if (state[name] === 'stopping' && --pending[name] <= 0) state[name] = 'stopped' }
+  return {
+    calls, state,
+    isRunning: async name => state[name] === 'running',
+    isStopped: async name => { tick(name); return state[name] === 'stopped' },
+    start: async name => {
+      if (state[name] === 'stopping') { calls.push(`start ${name} -> 1056`); return 1056 }
+      calls.push(`start ${name}`); state[name] = 'running'; return 0
+    },
+    stop: async name => {
+      if (name === SERVICES.hub && dependents.some(d => state[d] !== 'stopped')) { calls.push(`stop ${name} -> 1051`); return 1051 }
+      if (state[name] === 'stopped') { calls.push(`stop ${name} -> 1062`); return 1062 }
+      calls.push(`stop ${name}`); state[name] = 'stopping'; pending[name] = pendingPolls; return 0
+    },
+  }
+}
+
+test('POST /restart-all waits for every dependent service to be stopped before it stops the hub', async () => {
+  const controller = slowController(4)
+  await withApp({ controller }, async ({ app, port }) => {
+    assert.strictEqual((await request(port, 'POST', '/restart-all', auth)).status, 200)
+    await settle(app)
+    assert.deepStrictEqual(controller.calls, [
+      'stop Cloudflared', 'stop KeepAvailable', 'stop FarmGate', 'stop GadsProvider', 'stop GadsHub',
+      'start MongoDB', 'start GadsHub', 'start GadsProvider', 'start FarmGate', 'start KeepAvailable', 'start Cloudflared'])
+    for (const name of Object.values(SERVICES)) assert.strictEqual(controller.state[name], 'running', name)
+  })
+})
+
+test('POST /restart-provider does not start the provider while it is still stopping', async () => {
+  const controller = slowController(6)
+  await withApp({ controller }, async ({ app, port }) => {
+    assert.strictEqual((await request(port, 'POST', '/restart-provider', auth)).status, 200)
+    await settle(app)
+    assert.deepStrictEqual(controller.calls, ['stop GadsProvider', 'start GadsProvider', 'start FarmGate'])
+    assert.strictEqual(controller.state[SERVICES.provider], 'running')
+  })
+})
+
+test('a service that never stops is given up after the timeout and everything is started again', async () => {
+  const controller = slowController(1)
+  const realStop = controller.stop
+  controller.stop = async name => { if (name === SERVICES.hub) { controller.calls.push('stop GadsHub (hangs)'); return 0 } return realStop(name) }
+  const logged = []
+  const app = createApp({ secret: SECRET, controller, log: m => logged.push(m), replyGraceMs: 0, wait: async () => {}, stopTimeoutMs: 2000 })
+  await new Promise(r => app.listen(0, r))
+  try {
+    assert.strictEqual((await request(app.server.address().port, 'POST', '/restart-all', auth)).status, 200)
+    await settle(app)
+    assert.strictEqual(controller.calls.filter(c => c === 'stop GadsHub (hangs)').length, 2, 'the hub stop is retried once')
+    assert.ok(logged.some(m => /GadsHub could NOT be stopped/.test(m)))
+    assert.deepStrictEqual(controller.calls.slice(-6), ['start MongoDB', 'start GadsHub', 'start GadsProvider', 'start FarmGate', 'start KeepAvailable', 'start Cloudflared'])
+    assert.strictEqual(app.isBusy(), false)
+  } finally { await new Promise(r => app.server.close(r)) }
+})
+
+test('the real controller reads "stopped" from the state number, and treats a missing service as stopped', () => {
+  const src = fs.readFileSync(SERVER, 'utf8')
+  assert.match(src, /1\\s\+STOPPED/)
+  assert.match(src, /1060/)
+})
+
 test('POST /start-provider, /restart-provider, /restart-cloudflare touch only their own services', async () => {
   await withApp({}, async ({ app, port, controller }) => {
     assert.strictEqual((await request(port, 'POST', '/start-provider', auth)).status, 200)

@@ -9,9 +9,11 @@ on the dates given. It is not legal advice.
 
 * Everything except patch/provider-drag.patch: MIT licence (see LICENSE).
 * patch/provider-drag.patch: a modification of GADS source code
-  (provider/router/control.go). Licensed under the GNU Affero General Public
-  License, version 3.0 (AGPL-3.0), the licence of the file it modifies.
-  Text: https://www.gnu.org/licenses/agpl-3.0.html
+  (provider/router/control.go and provider/router/handler.go). Licensed under
+  the GNU Affero General Public License, version 3.0 (AGPL-3.0), the licence
+  of the files it modifies. A copy of that licence is in this repository:
+  LICENSE-AGPL-3.0 (the same text as the LICENSE file of GADS). The patch
+  itself marks both files as modified, by whom and when.
 
 This repository contains no GADS binary, no GADS source file, no
 WebDriverAgent and no Apple software.
@@ -53,28 +55,60 @@ b) The provider. The release assets of this repository include
    - It is built WITHOUT the "ui" build tag, so it contains no hub-ui code.
      (In GADS, embed_ui.go embeds hub-ui/build only under that tag;
      no_embed_ui.go is used otherwise.)
-   - It is distributed under AGPL-3.0. The complete corresponding source
-     (the patched tree, including the generated docs package) is attached to
-     the same release as GADS-drag-<version>-source.tar.gz.
+   - It is distributed under AGPL-3.0. The same release carries, next to
+     the binary:
+       LICENSE-AGPL-3.0.txt      the licence;
+       GADS-drag-<version>-source.tar.gz
+                                 the patched GADS tree, the generated docs
+                                 package, the sources of every Go module the
+                                 program is built from (vendor/), the patch,
+                                 BUILD.md (Go version, tools and the exact
+                                 build command) and MODIFICATIONS.md (what
+                                 was changed, by whom, and the date);
+       THIRD-PARTY-NOTICES.txt   the licence, notice and copyright files of
+                                 the Go modules that are compiled into the
+                                 program (MIT, BSD, Apache-2.0 and others),
+                                 which those licences require to accompany a
+                                 binary. The Go standard library and runtime
+                                 are BSD 3-Clause (https://go.dev/LICENSE).
+     One thing needed to build is NOT in the source archive: the folder
+     resources/ios-ddi (next point). The archive names its three files with
+     their SHA-256 and the upstream address to fetch them from. The archive
+     is therefore the complete source except for those three files.
    - Like every GADS binary, it embeds the "resources" directory of the GADS
      repository: gads-broadcast.ipa and gads-settings.apk (GADS's own helper
      apps), three zsign executables (https://github.com/zhlynn/zsign), and an
      iOS developer disk image with its manifest and trust cache
-     (resources/ios-ddi). GADS's LICENSE-OVERVIEW.txt places all files other
-     than hub-ui under AGPL-3.0; this kit relies on that statement and has
-     not examined the origin of those files further. In particular, the
-     developer disk image is Apple software as far as we can tell. Whoever
-     publishes releases of this repository should take their own view on
-     redistributing a binary that embeds it, exactly as upstream's releases
-     do. An alternative that redistributes nothing is to build the provider
-     on each farm computer from upstream source.
+     (resources/ios-ddi). The provider needs the disk image at run time for
+     iPhones on iOS 17 and later, so it cannot be left out of the binary.
+     GADS's LICENSE-OVERVIEW.txt places all files other than hub-ui under
+     AGPL-3.0; this kit relies on that statement and has not examined the
+     origin of those files further. In particular, the developer disk image
+     is Apple software as far as we can tell, and the .ipa, .apk and zsign
+     files are pre-built: the source archive carries them as upstream ships
+     them, without their source.
+   - Publishing GADS-drag.exe therefore makes this repository a distributor
+     of those embedded files, as upstream's own releases are. That is a
+     decision for the people who publish, and the build workflow does not
+     take it for them: it publishes nothing until versions.json says
+     "redistributeEmbeddedResources": true (docs/RELEASING.md). If the file
+     is ever withdrawn, a farm that has it keeps working, and install.ps1 /
+     update.ps1 accept a local copy with -ProviderExe (checked against the
+     pinned SHA-256). An alternative that redistributes nothing is to build
+     the provider on each farm computer from upstream source and the patch
+     (patch/README.md).
 
-c) AGPL-3.0, section 13 (remote network interaction). A farm operator who
-   runs the modified provider and lets users interact with it over a network
-   must offer those users its source. The source is public: this repository
-   (the patch), upstream at the pinned commit, and the source archive on the
-   release. Operators who change the provider further must publish their
-   changes in the same way.
+c) AGPL-3.0, section 13 (remote network interaction). Section 13 asks that
+   a modified version which people use over a network must itself offer
+   those people its source. The patch does that in the program: every answer
+   of the modified provider carries the HTTP header
+       X-Source-Code: https://github.com/fyhcrew-art/blossom-farm-kit/releases
+   (provider/router/handler.go in the patch), and the releases there carry
+   the source archive described under b). The provider gate passes the header
+   on unchanged. A farm operator who runs the provider as this kit installs
+   it has nothing more to do. An operator who changes the provider further
+   and lets others use it over a network must publish that source and point
+   the header (the constant sourceOffer) at it.
 
 3. Programs the installer fetches (not part of this repository)
 ---------------------------------------------------------------
@@ -94,12 +128,14 @@ versions pinned in versions.json. Licences as stated by the projects:
 Only with "install.ps1 -WithAppium", installed with npm from the npm registry:
 
 * Appium (appium) and its iOS driver (appium-xcuitest-driver) - Apache
-  License 2.0. The GADS provider then installs its own Appium plugin
-  (appium-gads, part of GADS) by itself.
+  License 2.0 - and the GADS Appium plugin (appium-gads, part of GADS). The
+  versions of these three packages are pinned in versions.json. The packages
+  they depend on (several hundred, under their own licences) are resolved by
+  npm at installation time and are neither pinned nor listed here.
 
 Not installed by the kit, but required for iPhones (docs/phones.md):
 
-* Apple Devices or iTunes (Apple) - Apple's licence terms
+* iTunes for Windows (Apple) - Apple's licence terms
 * WebDriverAgent, fork by the GADS author
   (https://github.com/shamanec/WebDriverAgent) - BSD licence of
   WebDriverAgent. The farm operator downloads the pre-built file from that

@@ -27,6 +27,8 @@ try {
     Assert-Administrator
     if (-not (Test-Path -LiteralPath $Archive)) { Stop-Farm -Problem ('Archive not found: ' + $Archive) -WhatToDo 'Give the full path of the .zip file written by export-farm.ps1.' }
     $paths = Get-FarmPaths
+    # A C:\farm that this kit did not create and lock is not adopted.
+    Initialize-FarmRoot -Root $paths.Root
     if ((Test-Path -LiteralPath $paths.FarmJson) -and -not $Force) {
         Stop-Farm -Problem 'This computer already has a farm installation.' -WhatToDo 'To replace it with the archive, run the same command with -Force. Its database, secrets and tunnel settings will be overwritten.'
     }
@@ -38,10 +40,7 @@ try {
     $mongorestore = Find-FarmTool -Command 'mongorestore'
 
     Write-Step '2/5  Unpacking'
-    foreach ($dir in @($paths.Root, $paths.Logs)) {
-        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    }
-    Protect-FarmPath -Path $paths.Root
+    if (-not (Test-Path -LiteralPath $paths.Logs)) { New-Item -ItemType Directory -Path $paths.Logs -Force | Out-Null }
     $stage = Join-Path $paths.Root 'import-stage'
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
     Expand-Archive -LiteralPath $Archive -DestinationPath $stage -Force

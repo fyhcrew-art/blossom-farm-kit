@@ -16,7 +16,14 @@
  *
  * The token is checked by asking the local hub (GET /user-info) and the
  * answer is cached for a short time. Plain HTTP and WebSocket upgrades are
- * both passed on unchanged once the token is accepted.
+ * both passed on once the token is accepted, with one change: the "token"
+ * query parameter is removed first. The provider does not read it, and its
+ * request log (gin writes path and query to provider.log) must not end up
+ * holding hub session tokens.
+ *
+ * The block list is matched against the path the provider will route on,
+ * that is the percent-DECODED path (gin routes on the decoded form), and a
+ * path that cannot be decoded unambiguously is refused with 400.
  *
  * Listens on 127.0.0.1 only, talks to 127.0.0.1 only. No dependencies.
  */
@@ -34,6 +41,44 @@ const MAX_TOKEN_LENGTH = 4096
 // Never passed on, even with a valid token: profiling endpoints and the
 // endpoints the provider only serves to its own local helpers.
 const BLOCKED = [/^\/debug(\/|$)/i, /^\/device\/[^/]+\/appium-plugin(\/|$)/i]
+
+/**
+ * The path the provider will route on, or null when the request target is
+ * refused. gin matches its routes against the percent-decoded path, so the
+ * block list has to see that form too ("/%64ebug" is "/debug" to the
+ * provider). Anything that could be read in two ways is refused instead of
+ * guessed: targets that are not a plain path, encoded slashes, backslashes,
+ * percent signs and control characters, broken percent-codes, dot segments.
+ * Empty segments ("//") are dropped for the comparison only.
+ */
+function routedPath(rawUrl) {
+  const raw = String(rawUrl || '').split('?')[0]
+  if (raw[0] !== '/') return null
+  if (/%(?:2f|5c|25|[01][0-9a-f]|7f)/i.test(raw)) return null
+  let decoded
+  try { decoded = decodeURIComponent(raw) } catch (_) { return null }
+  if (/[\\\x00-\x1f\x7f]/.test(decoded)) return null
+  const parts = []
+  for (const segment of decoded.split('/')) {
+    if (segment === '') continue
+    if (segment === '.' || segment === '..') return null
+    parts.push(segment)
+  }
+  return '/' + parts.join('/')
+}
+
+/** The request target without its "token" query parameter(s); everything else is kept byte for byte. */
+function withoutToken(rawUrl) {
+  const url = String(rawUrl || '')
+  const q = url.indexOf('?')
+  if (q < 0) return url
+  const kept = url.slice(q + 1).split('&').filter(pair => {
+    let name = pair.split('=')[0].replace(/\+/g, ' ')
+    try { name = decodeURIComponent(name) } catch (_) { /* keep the raw name */ }
+    return name !== 'token'
+  })
+  return kept.length ? `${url.slice(0, q)}?${kept.join('&')}` : url.slice(0, q)
+}
 
 function portFrom(value, fallback, name) {
   const port = value === undefined || value === '' ? fallback : Number(value)
@@ -94,8 +139,7 @@ function createGate(options) {
     return ok
   }
 
-  const pathOf = req => String(req.url || '').split('?')[0]
-  const blocked = req => BLOCKED.some(re => re.test(pathOf(req)))
+  const blocked = path => BLOCKED.some(re => re.test(path))
 
   function reply(res, code, error) {
     const text = JSON.stringify({ error })
@@ -105,11 +149,13 @@ function createGate(options) {
 
   const server = http.createServer((req, res) => {
     req.on('error', () => {})
-    if (blocked(req)) { req.resume(); return reply(res, 404, 'Not found') }
+    const path = routedPath(req.url)
+    if (path === null) { req.resume(); return reply(res, 400, 'Bad request path') }
+    if (blocked(path)) { req.resume(); return reply(res, 404, 'Not found') }
     check(tokenFrom(req)).then(ok => {
       if (ok === null) { req.resume(); return reply(res, 503, 'The hub on the farm computer is not answering, so the token cannot be checked') }
       if (!ok) { req.resume(); return reply(res, 401, 'Unauthorized') }
-      const up = http.request({ host: HOST, port: upstreamPort, method: req.method, path: req.url, headers: req.headers }, upRes => {
+      const up = http.request({ host: HOST, port: upstreamPort, method: req.method, path: withoutToken(req.url), headers: req.headers }, upRes => {
         res.writeHead(upRes.statusCode || 502, upRes.headers)
         upRes.pipe(res)
       })
@@ -122,12 +168,14 @@ function createGate(options) {
   server.on('upgrade', (req, socket, head) => {
     socket.on('error', () => {})
     const refuse = (code, text) => { socket.end(`HTTP/1.1 ${code} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`) }
-    if (blocked(req)) return refuse(404, 'Not Found')
+    const path = routedPath(req.url)
+    if (path === null) return refuse(400, 'Bad Request')
+    if (blocked(path)) return refuse(404, 'Not Found')
     check(tokenFrom(req)).then(ok => {
       if (ok === null) return refuse(503, 'Service Unavailable')
       if (!ok) return refuse(401, 'Unauthorized')
       const up = net.connect(upstreamPort, HOST, () => {
-        let raw = `${req.method} ${req.url} HTTP/1.1\r\n`
+        let raw = `${req.method} ${withoutToken(req.url)} HTTP/1.1\r\n`
         for (let i = 0; i < req.rawHeaders.length; i += 2) raw += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`
         up.write(raw + '\r\n')
         if (head && head.length) up.write(head)
@@ -170,6 +218,6 @@ function main() {
   gate.listen(port, () => console.log(`[provider-gate] ${new Date().toISOString()} listening on http://${HOST}:${port} -> provider ${HOST}:${upstreamPort}, tokens checked with hub ${HOST}:${hubPort}`))
 }
 
-module.exports = { createGate, tokenFrom, HOST }
+module.exports = { createGate, tokenFrom, routedPath, withoutToken, HOST }
 
 if (require.main === module) main()

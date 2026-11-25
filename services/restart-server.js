@@ -89,6 +89,13 @@ function scController() {
     // "STATE : 4 RUNNING": the label before the colon is translated on some
     // Windows languages, the number and the state name are not.
     isRunning: async name => /:\s*4\s+RUNNING/.test((await run(['query', name])).out),
+    // "sc stop" returns as soon as the request is accepted; the service is
+    // only down when its state reads 1 STOPPED. A service that does not exist
+    // (error 1060) counts as stopped.
+    isStopped: async name => {
+      const r = await run(['query', name])
+      return /:\s*1\s+STOPPED/.test(r.out) || r.code === 1060 || /\b1060\b/.test(r.out)
+    },
     start: async name => (await run(['start', name])).code,
     stop: async name => (await run(['stop', name])).code,
   }
@@ -107,8 +114,29 @@ function createApp(options) {
 
   let actionInProgress = false
 
+  // How long a stop may take before it is given up: nssm's own stop sequence
+  // (console 5 s, then window, threads, terminate) plus a margin.
+  const stopTimeoutMs = options.stopTimeoutMs === undefined ? 25000 : options.stopTimeoutMs
+  const stopPollMs = 500
+
   const start = async name => { const code = await sc.start(name); log(`start ${name} -> ${code}`) }
-  const stop = async name => { const code = await sc.stop(name); log(`stop ${name} -> ${code}`) }
+
+  /**
+   * Stops a service and waits until Windows reports it as stopped. Windows
+   * refuses to stop a service while one that depends on it is still stopping
+   * (error 1051), and refuses to start one that is still stopping (1056), so
+   * a stop that is only requested is not enough. Returns true when stopped.
+   */
+  async function stopAndWait(name) {
+    const code = await sc.stop(name)
+    log(`stop ${name} -> ${code}`)
+    if (typeof sc.isStopped !== 'function') { await wait(3000); return true }
+    for (let waited = 0; ; waited += stopPollMs) {
+      if (await sc.isStopped(name)) return true
+      if (waited >= stopTimeoutMs) { log(`${name} did not stop within ${Math.round(stopTimeoutMs / 1000)} s`); return false }
+      await wait(stopPollMs)
+    }
+  }
 
   // Order matters: the hub needs MongoDB, the provider needs the hub.
   async function startAll() {
@@ -121,12 +149,16 @@ function createApp(options) {
   }
   async function restartAll() {
     await wait(replyGraceMs)
-    await stop(SERVICES.cloudflare)
-    await stop(SERVICES.keep_available)
-    await stop(SERVICES.gate)
-    await stop(SERVICES.provider)
-    await stop(SERVICES.hub)
-    await wait(3000)
+    await stopAndWait(SERVICES.cloudflare)
+    // Everything that depends on the hub must be down before the hub is asked
+    // to stop, otherwise Windows refuses and the hub is never restarted.
+    await stopAndWait(SERVICES.keep_available)
+    await stopAndWait(SERVICES.gate)
+    await stopAndWait(SERVICES.provider)
+    let hubStopped = await stopAndWait(SERVICES.hub)
+    if (!hubStopped) hubStopped = await stopAndWait(SERVICES.hub)
+    if (!hubStopped) log(`${SERVICES.hub} could NOT be stopped, so it was not restarted; the other services are started again`)
+    await wait(1000)
     await startAll()
   }
   async function startProvider() {
@@ -134,14 +166,14 @@ function createApp(options) {
     await start(SERVICES.gate)
   }
   async function restartProvider() {
-    await stop(SERVICES.provider)
-    await wait(3000)
+    await stopAndWait(SERVICES.provider)
+    await wait(1000)
     await startProvider()
   }
   async function restartCloudflare() {
     await wait(replyGraceMs)
-    await stop(SERVICES.cloudflare)
-    await wait(3000)
+    await stopAndWait(SERVICES.cloudflare)
+    await wait(1000)
     await start(SERVICES.cloudflare)
   }
 

@@ -5,7 +5,7 @@ const http = require('node:http')
 const net = require('node:net')
 const path = require('node:path')
 
-const { createGate, tokenFrom, HOST } = require(path.join(__dirname, '..', 'services', 'provider-gate.js'))
+const { createGate, tokenFrom, routedPath, withoutToken, HOST } = require(path.join(__dirname, '..', 'services', 'provider-gate.js'))
 
 const GOOD = 'good-token'
 
@@ -104,14 +104,56 @@ test('without a token, or with one the hub refuses, nothing reaches the provider
   })
 })
 
-test('with a token the hub accepts, the request is passed on unchanged', async () => {
+test('with a token the hub accepts, the request is passed on; the token never reaches the provider\'s URL', async () => {
   await world(async ({ port, seen }) => {
     const r = await get(port, '/device/abc/tap', { Authorization: `Bearer ${GOOD}`, 'Content-Type': 'application/json' }, 'POST', '{"x":10,"y":20}')
     assert.strictEqual(r.status, 200)
     assert.strictEqual(r.headers['x-from'], 'provider')
     assert.deepStrictEqual(JSON.parse(r.text), { path: '/device/abc/tap', method: 'POST', body: '{"x":10,"y":20}' })
     assert.strictEqual((await get(port, `/device/abc/info?token=${GOOD}`)).status, 200)
-    assert.deepStrictEqual(seen.provider, ['POST /device/abc/tap', `GET /device/abc/info?token=${GOOD}`])
+    assert.strictEqual((await get(port, `/device/abc/files?path=%2Ftmp%2Fa+b&token=${GOOD}&x=1`)).status, 200)
+    assert.strictEqual((await get(port, `/device/abc/info?%74oken=${GOOD}`)).status, 200)
+    assert.deepStrictEqual(seen.provider, ['POST /device/abc/tap', 'GET /device/abc/info', 'GET /device/abc/files?path=%2Ftmp%2Fa+b&x=1', 'GET /device/abc/info'])
+    for (const line of seen.provider) assert.ok(!line.includes(GOOD), 'the provider must not see (and log) the token')
+  })
+})
+
+test('withoutToken: removes only the token parameter and keeps the rest byte for byte', () => {
+  assert.strictEqual(withoutToken('/x'), '/x')
+  assert.strictEqual(withoutToken('/x?token=abc'), '/x')
+  assert.strictEqual(withoutToken('/x?a=1&token=abc&b=%20z'), '/x?a=1&b=%20z')
+  assert.strictEqual(withoutToken('/x?token=abc&token=def&c'), '/x?c')
+  assert.strictEqual(withoutToken('/x?%74oken=abc&tokens=1&Token=2'), '/x?tokens=1&Token=2')
+  assert.strictEqual(withoutToken('/x?a=%zz&token=abc'), '/x?a=%zz')
+})
+
+test('routedPath: the decoded path the provider routes on, or null for anything ambiguous', () => {
+  assert.strictEqual(routedPath('/'), '/')
+  assert.strictEqual(routedPath('/devices?x=%2f'), '/devices')
+  assert.strictEqual(routedPath('/device/00008030-000A1B2C3D4E5F6A/info'), '/device/00008030-000A1B2C3D4E5F6A/info')
+  assert.strictEqual(routedPath('/%64ebug/pprof/heap'), '/debug/pprof/heap')
+  assert.strictEqual(routedPath('//debug//pprof/'), '/debug/pprof')
+  assert.strictEqual(routedPath('/device/x/a%20b'), '/device/x/a b')
+  for (const bad of ['', '*', 'http://127.0.0.1:10001/debug/pprof/', 'debug', '/a%2fb', '/a%2Fb', '/a%5cb', '/a\\b', '/a%25b', '/a%00b', '/a%0ab',
+    '/a%7fb', '/a%zzb', '/a%', '/a%ff', '/a/../debug', '/a/./b', '/%2e%2e/debug', '/a/%2e/b']) {
+    assert.strictEqual(routedPath(bad), null, JSON.stringify(bad))
+  }
+})
+
+test('percent-encoded spellings of blocked paths are not passed on either, with a valid token', async () => {
+  await world(async ({ port, seen }) => {
+    const h = { Authorization: `Bearer ${GOOD}` }
+    for (const p of ['/%64ebug/pprof/heap', '/%44EBUG/pprof/heap', '/d%65bug/pprof/profile?seconds=30', '/%64%65%62%75%67', '//debug/pprof/',
+      '/device/x/%61ppium-plugin/register', '/device/x/appium%2Dplugin/register', '/device/x/APPIUM-%70lugin']) {
+      assert.strictEqual((await get(port, p, h)).status, 404, p)
+    }
+    for (const p of ['/%2e%2e/debug/pprof/', '/device/x/..%2fdebug', '/device/x%2fappium-plugin/y', '/a%5cdebug', '/%25%36%34ebug', '/a%zz']) {
+      assert.strictEqual((await get(port, p, h)).status, 400, p)
+    }
+    assert.match((await upgrade(port, `/%64ebug/pprof/?token=${GOOD}`)).head, /404/)
+    assert.match((await upgrade(port, `/device/x/%61ppium-plugin/ws?token=${GOOD}`)).head, /404/)
+    assert.match((await upgrade(port, `/device/x/..%2f..%2fdebug?token=${GOOD}`)).head, /400/)
+    assert.deepStrictEqual(seen.provider, [])
   })
 })
 
@@ -171,7 +213,7 @@ test('WebSocket upgrade: passed through both ways with the token in the query st
     for (let i = 0; i < 100 && !c.read().includes('hello-through-the-gate'); i++) await new Promise(r => setTimeout(r, 10))
     assert.ok(c.read().includes('hello-through-the-gate'))
     c.socket.destroy()
-    assert.deepStrictEqual(seen.provider, [`UPGRADE /device/abc/ios-webrtc?token=${GOOD}`])
+    assert.deepStrictEqual(seen.provider, ['UPGRADE /device/abc/ios-webrtc'])
     // the gate must not keep the connection once the browser has gone
     let left = 1
     for (let i = 0; i < 100 && left; i++) {

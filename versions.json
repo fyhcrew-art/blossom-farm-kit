@@ -11,7 +11,8 @@
     "releaseTag": "gads-v6.0.0-drag.1",
     "version": "v6.0.0-drag.1",
     "url": "https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/gads-v6.0.0-drag.1/GADS-drag.exe",
-    "sha256": "73b003277a6e202617541e61bf2a9683265ccc212a1927a44dfadd724957f14a",
+    "sha256": "1426a0c7a89376f9151975351d75971a2a1c9c3978822c1771fdb6f572bfcf17",
+    "redistributeEmbeddedResources": false,
     "goVersion": "1.26.0",
     "swagVersion": "v1.16.4"
   },
@@ -25,6 +26,7 @@
   },
   "npm": {
     "appium": "3.9.1",
-    "xcuitestDriver": "12.22.8"
+    "xcuitestDriver": "12.22.8",
+    "gadsPlugin": "0.0.12"
   }
 }
