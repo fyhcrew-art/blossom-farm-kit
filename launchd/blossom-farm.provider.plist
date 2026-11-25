@@ -45,6 +45,8 @@
     <true/>
     <key>ThrottleInterval</key>
     <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Interactive</string>
     <key>ExitTimeOut</key>
     <integer>25</integer>
     <key>Umask</key>

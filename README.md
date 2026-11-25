@@ -91,8 +91,10 @@ On the farm computer, download the latest kit from
 "Source code (zip)" of the release whose name starts with `kit-v`. (Releases
 named `GADS-drag …` on the same page are a program the installer fetches by
 itself, not the kit.) Unpack it, for example to `C:\blossom-farm-kit` on
-Windows, or to `blossom-farm-kit` in your home folder on a Mac. Keep the
-folder: the maintenance scripts are in it.
+Windows, or to `blossom-farm-kit` in your home folder on a Mac (directly in
+the home folder: macOS asks for an extra permission before Terminal may read
+Downloads, Documents or the Desktop). Keep the folder: the maintenance
+scripts are in it.
 
 ### 3. Run the installer
 
