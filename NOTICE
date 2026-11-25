@@ -1,0 +1,107 @@
+Blossom farm kit - licences and third-party software
+====================================================
+
+This file states facts as read from the licence files of the projects named,
+on the dates given. It is not legal advice.
+
+1. This repository
+------------------
+
+* Everything except patch/provider-drag.patch: MIT licence (see LICENSE).
+* patch/provider-drag.patch: a modification of GADS source code
+  (provider/router/control.go). Licensed under the GNU Affero General Public
+  License, version 3.0 (AGPL-3.0), the licence of the file it modifies.
+  Text: https://www.gnu.org/licenses/agpl-3.0.html
+
+This repository contains no GADS binary, no GADS source file, no
+WebDriverAgent and no Apple software.
+
+2. GADS (https://github.com/shamanec/GADS), read at tag v6.0.0
+--------------------------------------------------------------
+
+GADS has two licences. Its LICENSE-OVERVIEW.txt says:
+
+    "Except as noted below, all files in this repository are licensed under
+     the GNU Affero General Public License v3.0."
+    "The following components are proprietary and licensed under the GADS
+     Proprietary License: - hub-ui"
+
+* LICENSE in the GADS repository is the AGPL-3.0 text.
+* PROPRIETARY-LICENSE.txt ("GADS PROPRIETARY LICENSE", last updated
+  23/MAY/2025) covers hub-ui, the hub's web interface. It grants "a
+  non-exclusive, non-transferable, limited license to use the proprietary
+  components of GADS ... solely for your internal business purposes" and
+  forbids, among other things, to "copy, modify, ... decompile, disassemble,
+  or reverse engineer" it and to "distribute, sublicense, lease, rent, loan,
+  or otherwise transfer the Proprietary Software to any third party".
+* hub-ui is a git submodule that points at a private repository; its source
+  is not public. Upstream's release binaries embed a built, obfuscated copy.
+
+What this kit does with each part:
+
+a) The hub. install.ps1 downloads the publisher's own release file
+   (gads-win.zip of v6.0.0) directly from the publisher's GitHub release page
+   to the farm computer, and verifies its SHA-256. This repository and its
+   releases do not contain, mirror or modify that file. The person running a
+   farm uses it on their own computer for their own business; whether that
+   use fits the proprietary licence of the embedded hub-ui is for that person
+   to judge from the licence text quoted above.
+
+b) The provider. The release assets of this repository include
+   GADS-drag.exe, built by .github/workflows/build-gads.yml from the AGPL-3.0
+   source of GADS at the pinned commit plus patch/provider-drag.patch.
+   - It is built WITHOUT the "ui" build tag, so it contains no hub-ui code.
+     (In GADS, embed_ui.go embeds hub-ui/build only under that tag;
+     no_embed_ui.go is used otherwise.)
+   - It is distributed under AGPL-3.0. The complete corresponding source
+     (the patched tree, including the generated docs package) is attached to
+     the same release as GADS-drag-<version>-source.tar.gz.
+   - Like every GADS binary, it embeds the "resources" directory of the GADS
+     repository: gads-broadcast.ipa and gads-settings.apk (GADS's own helper
+     apps), three zsign executables (https://github.com/zhlynn/zsign), and an
+     iOS developer disk image with its manifest and trust cache
+     (resources/ios-ddi). GADS's LICENSE-OVERVIEW.txt places all files other
+     than hub-ui under AGPL-3.0; this kit relies on that statement and has
+     not examined the origin of those files further. In particular, the
+     developer disk image is Apple software as far as we can tell. Whoever
+     publishes releases of this repository should take their own view on
+     redistributing a binary that embeds it, exactly as upstream's releases
+     do. An alternative that redistributes nothing is to build the provider
+     on each farm computer from upstream source.
+
+c) AGPL-3.0, section 13 (remote network interaction). A farm operator who
+   runs the modified provider and lets users interact with it over a network
+   must offer those users its source. The source is public: this repository
+   (the patch), upstream at the pinned commit, and the source archive on the
+   release. Operators who change the provider further must publish their
+   changes in the same way.
+
+3. Programs the installer fetches (not part of this repository)
+---------------------------------------------------------------
+
+Installed with winget from the publishers' own download locations, at the
+versions pinned in versions.json. Licences as stated by the projects:
+
+* MongoDB Community Server (MongoDB.Server) - Server Side Public License v1
+* MongoDB Database Tools (MongoDB.DatabaseTools) - Apache License 2.0
+* Node.js (OpenJS.NodeJS.LTS) - MIT and bundled third-party licences
+* FFmpeg, "full" build by Gyan (Gyan.FFmpeg) - GPL v3 for that build
+* cloudflared (Cloudflare.cloudflared) - Apache License 2.0; use of the
+  Cloudflare service is under Cloudflare's terms
+* NSSM (NSSM.NSSM) - public domain; the installer keeps a private copy of
+  nssm.exe in C:\farm\bin on the farm computer
+
+Not installed by the kit, but required for iPhones (docs/phones.md):
+
+* Apple Devices or iTunes (Apple) - Apple's licence terms
+* WebDriverAgent, fork by the GADS author
+  (https://github.com/shamanec/WebDriverAgent) - BSD licence of
+  WebDriverAgent; it must be signed by the farm operator with their own
+  Apple Developer account
+
+4. Trademarks
+-------------
+
+GADS, Cloudflare, Apple, iPhone, iOS, Windows, MongoDB, Node.js and FFmpeg
+are names of their respective owners. This kit is not affiliated with or
+endorsed by any of them.

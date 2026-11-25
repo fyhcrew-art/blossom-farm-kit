@@ -1,0 +1,12 @@
+# The patch must keep LF line ends or it does not apply.
+*.patch   text eol=lf
+*.js      text eol=lf
+*.json    text eol=lf
+*.yml     text eol=lf
+*.md      text eol=lf
+# Windows PowerShell 5.1 reads both; CRLF is kinder to Notepad on the farm PC.
+*.ps1     text eol=crlf
+*.psm1    text eol=crlf
+*.psd1    text eol=crlf
+LICENSE   text eol=lf
+NOTICE    text eol=lf

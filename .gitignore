@@ -1,0 +1,15 @@
+# Never commit binaries or anything from a real farm.
+*.exe
+*.zip
+*.ipa
+*.p12
+*.pem
+*.mobileprovision
+*.archive
+*.archive.gz
+farm.json
+restart-secret.txt
+keep-available.json
+tunnel-credentials.json
+node_modules/
+dist/
