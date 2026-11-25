@@ -403,7 +403,7 @@ Describe 'Pairing against the stand-in for Blossom' {
         $null = Invoke-Switch -Name 'confirm' -With (Get-Mine -Paths $paths -With @{ label = 'Milan' })
         Wait-FarmPairing -Paths $paths -MaxSec 20 | Should -Be 0
         Should -Invoke -ModuleName FarmKit Write-Host -ParameterFilter { [string]$Object -match 'Confirmed in Blossom as "Milan"\. Blossom sees your farm: 3 phones\.' }
-        Should -Invoke -ModuleName FarmKit Write-Host -Times 0 -ParameterFilter { [string]$Object -match 'bft_' }
+        Should -Invoke -ModuleName FarmKit Write-Host -Exactly -Times 0 -ParameterFilter { [string]$Object -match 'bft_' }
         $null = Invoke-Switch -Name 'set-check' -With @{ ok = $false; devices = 0; failed_step = 'signin'; detail = 'The hub refused the user name or password.' }
         $null = Invoke-Switch -Name 'confirm' -With (Get-Mine -Paths $paths)
         Get-PairingCheckText -Status (Get-FarmPairingStatus -Paths $paths) | Should -Match 'could not use the farm yet \(step: signin\): The hub refused'

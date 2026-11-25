@@ -32,7 +32,7 @@ if [ "$FARM_HAS_CONFIG" = 0 ]; then
     stop_farm 'This Mac has no farm installation (/opt/farm/config/farm.json is missing).' 'Run install.sh first.'
 fi
 if [ ! -f "$FARM_RESTART_SECRET" ]; then
-    stop_farm 'The restart secret file is missing.' 'Run scripts/rotate-secrets.sh --restart-secret, enter the new secret in Blossom, then test again.'
+    stop_farm 'The restart secret file is missing.' 'Run scripts/rotate-secrets.sh --restart-secret (on a computer that is not paired, enter the new secret in Blossom), then test again.'
 fi
 [ -n "$HUB_USER" ] || HUB_USER=$FARM_CFG_HUB_USER
 write_step "Self-test of $FARM_CFG_HUB_HOST, $FARM_CFG_PROVIDER_HOST, $FARM_CFG_RESTART_HOST"

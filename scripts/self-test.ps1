@@ -23,7 +23,7 @@ try {
         Stop-Farm -Problem 'This computer has no farm installation (C:\farm\config\farm.json is missing).' -WhatToDo 'Run install.ps1 first.'
     }
     if (-not (Test-Path -LiteralPath $paths.RestartSecret)) {
-        Stop-Farm -Problem 'The restart secret file is missing.' -WhatToDo 'Run scripts\rotate-secrets.ps1 -RestartSecret, enter the new secret in Blossom, then test again.'
+        Stop-Farm -Problem 'The restart secret file is missing.' -WhatToDo 'Run scripts\rotate-secrets.ps1 -RestartSecret (on a computer that is not paired, enter the new secret in Blossom), then test again.'
     }
     if (-not $HubUser) { $HubUser = [string]$farm.hubUser }
     Write-Step ('Self-test of ' + $farm.hubHost + ', ' + $farm.providerHost + ', ' + $farm.restartHost)

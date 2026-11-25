@@ -232,8 +232,9 @@ When you ask for help, copy the output of the status script with logs.
 
 1. Remove their access in Blossom.
 2. On the farm computer: the `rotate-secrets` script with `-HubUser` /
-   `--hub-user`, and enter the new hub password in Blossom (Farm setup →
-   Edit). If that person also knew the `admin` password or sat at the farm
+   `--hub-user`. A paired computer hands the new hub password to Blossom by
+   itself (section 9); otherwise enter it in Blossom (Farm setup → Edit).
+   If that person also knew the `admin` password or sat at the farm
    computer: `-All` / `--all`.
 3. In the hub page (`http://127.0.0.1:10000`, Admin → Users) delete every
    user you do not recognise. A hub administrator can create further

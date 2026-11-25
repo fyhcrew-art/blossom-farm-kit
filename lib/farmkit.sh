@@ -1556,7 +1556,7 @@ invoke_farm_self_test() {
         return 0
     fi
     if [ "$HTTP_STATUS" -eq 401 ] || [ "$HTTP_STATUS" -eq 403 ]; then
-        _fk_step signin fail 'The hub refused the user name or password.' 'Reset the login with scripts/rotate-secrets.sh --hub-user and enter the new password in Blossom.'
+        _fk_step signin fail 'The hub refused the user name or password.' 'Reset the login with scripts/rotate-secrets.sh --hub-user. A paired computer hands the new password to Blossom by itself; otherwise enter it there.'
         return 0
     fi
     if [ -z "$token" ]; then
@@ -1652,7 +1652,7 @@ invoke_farm_self_test() {
     if [ "$HTTP_STATUS" -eq 0 ]; then
         _fk_step restart fail "The restart service could not be reached: $HTTP_ERROR" 'Check the tunnel and restart services (scripts/status.sh).'
     elif [ "$HTTP_STATUS" -eq 401 ] || [ "$HTTP_STATUS" -eq 403 ]; then
-        _fk_step restart fail 'The restart service refused the secret.' 'Run scripts/rotate-secrets.sh --restart-secret and enter the new secret in Blossom.'
+        _fk_step restart fail 'The restart service refused the secret.' 'Run scripts/rotate-secrets.sh --restart-secret. A paired computer hands the new secret to Blossom by itself; otherwise enter it there.'
     elif test_looks_down "$HTTP_STATUS" "$HTTP_TEXT" || [ "$HTTP_STATUS" -ne 200 ] || ! printf '%s' "$HTTP_TEXT" | json_flatten > /dev/null 2>&1; then
         _fk_step restart fail "The restart service did not answer its status (HTTP $HTTP_STATUS)." 'Check the restart service and read /opt/farm/logs/restart-server.log.'
     else

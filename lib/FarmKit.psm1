@@ -1222,7 +1222,7 @@ function Invoke-FarmSelfTest {
         return $steps
     }
     if ($r.Status -eq 401 -or $r.Status -eq 403) {
-        & $add 'signin' 'fail' 'The hub refused the user name or password.' 'Reset the login with scripts\rotate-secrets.ps1 -HubUser and enter the new password in Blossom.'
+        & $add 'signin' 'fail' 'The hub refused the user name or password.' 'Reset the login with scripts\rotate-secrets.ps1 -HubUser. A paired computer hands the new password to Blossom by itself; otherwise enter it there.'
         return $steps
     }
     if (-not $token) {
@@ -1314,7 +1314,7 @@ function Invoke-FarmSelfTest {
     if ($r.Status -eq 0) {
         & $add 'restart' 'fail' ('The restart service could not be reached: ' + $r.Error) 'Check the Cloudflared and FarmRestart services (scripts\status.ps1).'
     } elseif ($r.Status -eq 401 -or $r.Status -eq 403) {
-        & $add 'restart' 'fail' 'The restart service refused the secret.' 'Run scripts\rotate-secrets.ps1 -RestartSecret and enter the new secret in Blossom.'
+        & $add 'restart' 'fail' 'The restart service refused the secret.' 'Run scripts\rotate-secrets.ps1 -RestartSecret. A paired computer hands the new secret to Blossom by itself; otherwise enter it there.'
     } elseif ((Test-LooksDown -Status $r.Status -Text $r.Text) -or $r.Status -ne 200 -or $null -eq $r.Json) {
         & $add 'restart' 'fail' ('The restart service did not answer its status (HTTP ' + $r.Status + ').') 'Check the FarmRestart service and read C:\farm\logs\restart-server.log.'
     } else {
