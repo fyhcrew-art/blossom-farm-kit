@@ -59,6 +59,26 @@ done
 not_ok grep -q -E '  (MANIFEST\.sha256|pairing\.json)$' "$KIT_ROOT/MANIFEST.sha256"
 ok grep -q '  install.sh$' "$KIT_ROOT/MANIFEST.sha256"
 ok grep -q '  lib/FarmKit.psm1$' "$KIT_ROOT/MANIFEST.sha256"
+# pairing.json, when a release was made: well-formed, and true for the commit it names
+if [ -f "$KIT_ROOT/pairing.json" ]; then
+    pj=$(cat "$KIT_ROOT/pairing.json")
+    kc=$(json_get "$pj" kitCommit)
+    ok test_git_commit_text "$kc"
+    matches "$(json_get "$pj" kitVersion)" '^[0-9]+\.[0-9]+\.[0-9]+$' 'pairing.json names a kit version'
+    for key in bootstrapShSha256 bootstrapPs1Sha256 manifestSha256; do
+        matches "$(json_get "$pj" "$key")" '^[0-9a-f]{64}$' "pairing.json: $key is a SHA-256 in lower case"
+    done
+    if git -C "$KIT_ROOT" cat-file -e "$kc^{commit}" 2> /dev/null; then
+        for pair in bootstrapShSha256:bootstrap.sh bootstrapPs1Sha256:bootstrap.ps1 manifestSha256:MANIFEST.sha256; do
+            git -C "$KIT_ROOT" show "$kc:${pair#*:}" > "$WORK/at-commit" 2> /dev/null
+            is "$(json_get "$pj" "${pair%%:*}")" "$(sha256_of "$WORK/at-commit")" "pairing.json: ${pair%%:*} is the SHA-256 of ${pair#*:} in the commit it names"
+        done
+        git -C "$KIT_ROOT" show "$kc:versions.json" > "$WORK/at-commit" 2> /dev/null
+        is "$(json_get "$pj" kitVersion)" "$(json_file_get "$WORK/at-commit" kit)" 'pairing.json: kitVersion is the kit version of the commit it names'
+        git -C "$KIT_ROOT" show "$kc:bootstrap.sh" > "$WORK/at-commit" 2> /dev/null
+        ok grep -q "^KIT_MANIFEST_SHA256='$(json_get "$pj" manifestSha256)'\$" "$WORK/at-commit"
+    fi
+fi
 empty=$(test_kit_tree "$KIT_ROOT/tests/no-such-folder" "$(printf '%064d' 0)")
 matches "$empty" 'no MANIFEST' 'test_kit_tree: a folder without a list is refused'
 

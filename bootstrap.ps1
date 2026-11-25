@@ -39,7 +39,7 @@
 $ErrorActionPreference = 'Stop'
 $KitRepository = 'fyhcrew-art/blossom-farm-kit'
 $KitArchiveUrl = 'https://github.com/fyhcrew-art/blossom-farm-kit/archive'
-$KitManifestSha256 = 'b2152573c7d552e39db0b31e6983c3d596dcd15b9f26409109b5c3faeab1c547'
+$KitManifestSha256 = '3a7ce77a92d75b00ffe6d3a05b19005fd7516a06d6073347bf13efa9ca28764c'
 
 # No param() block on purpose: every option except the three below belongs to
 # install.ps1 and is passed on exactly as it was written.

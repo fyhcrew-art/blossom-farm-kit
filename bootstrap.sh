@@ -38,7 +38,7 @@
 set -u
 KIT_REPOSITORY='fyhcrew-art/blossom-farm-kit'
 KIT_ARCHIVE_URL='https://github.com/fyhcrew-art/blossom-farm-kit/archive'
-KIT_MANIFEST_SHA256='b2152573c7d552e39db0b31e6983c3d596dcd15b9f26409109b5c3faeab1c547'
+KIT_MANIFEST_SHA256='3a7ce77a92d75b00ffe6d3a05b19005fd7516a06d6073347bf13efa9ca28764c'
 
 fail() {
     printf '\nPROBLEM:    %s\n' "$1" >&2

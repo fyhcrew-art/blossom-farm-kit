@@ -210,6 +210,15 @@ That commit changes `pairing.json` and nothing else (the script checks).
 `pairing.json` is not on the list of files, so K's `MANIFEST.sha256` stays
 true for the commit after it.
 
+**K must be a commit of `main`, under the name it has.** If the two commits
+were made on another branch, bring them to `main` with a fast-forward
+(`git checkout main && git merge --ff-only <branch> && git push origin
+main`) or with a merge commit. **Never squash or rebase them:** that makes
+new commits with new names, `pairing.json` would name a commit that is not
+on `main`, and once the branch is deleted GitHub removes that commit and
+every command stops with a download error. For the same reason, do not
+delete a branch that holds a released commit before `main` holds it too.
+
 **Step 3: prove it from the outside.**
 
 ```sh
