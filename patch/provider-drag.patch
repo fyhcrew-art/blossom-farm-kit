@@ -1,0 +1,182 @@
+diff --git a/provider/router/control.go b/provider/router/control.go
+index 22c0264..89d29f6 100644
+--- a/provider/router/control.go
++++ b/provider/router/control.go
+@@ -275,6 +275,152 @@ func devicePinch(dev devices.PlatformDevice, x, y, scale float64) (*http.Respons
+ 	}
+ }
+ 
++// deviceDrag presses at the start point, holds still for holdTime seconds so
++// the app picks up what is under the finger, then moves it to the end point
++// in small steps over dragDuration seconds and lifts. Apps such as Instagram
++// read a plain swipe (or a one-jump drag) as a flick or move the sticker only
++// part of the way; a held, gradual drag moves it like a finger does.
++//
++// On iOS it goes through WebDriverAgent's W3C actions endpoint, which needs a
++// WDA session; one is reused if open, else created (no app is launched).
++// Android falls back to a swipe.
++func deviceDrag(dev devices.PlatformDevice, x, y, endX, endY, holdTime, dragDuration float64) (*http.Response, error) {
++	if dev.GetOS() != "ios" {
++		return deviceSwipe(dev, x, y, endX, endY)
++	}
++
++	const steps = 15
++	holdMs := int(holdTime * 1000)
++	stepMs := int(dragDuration * 1000 / steps)
++	if stepMs < 10 {
++		stepMs = 10
++	}
++	actions := []map[string]any{
++		{"type": "pointerMove", "duration": 0, "x": x, "y": y},
++		{"type": "pointerDown", "button": 0},
++		// A move to the same point rather than a pause, so the finger
++		// stays put for the whole hold.
++		{"type": "pointerMove", "duration": holdMs, "x": x, "y": y},
++	}
++	for i := 1; i <= steps; i++ {
++		f := float64(i) / steps
++		actions = append(actions, map[string]any{
++			"type": "pointerMove", "duration": stepMs,
++			"x": x + (endX-x)*f, "y": y + (endY-y)*f,
++		})
++	}
++	actions = append(actions,
++		map[string]any{"type": "pointerMove", "duration": 100, "x": endX, "y": endY},
++		map[string]any{"type": "pointerUp", "button": 0},
++	)
++	payload, err := json.Marshal(map[string]any{
++		"actions": []map[string]any{{
++			"type":       "pointer",
++			"id":         "finger1",
++			"parameters": map[string]any{"pointerType": "touch"},
++			"actions":    actions,
++		}},
++	})
++	if err != nil {
++		return nil, err
++	}
++
++	sessionID, err := wdaSessionID(dev, false)
++	if err != nil {
++		return nil, err
++	}
++	resp, err := wdaRequest(dev, http.MethodPost, "session/"+sessionID+"/actions", bytes.NewReader(payload))
++	if err != nil {
++		return nil, err
++	}
++	if resp.StatusCode == http.StatusNotFound {
++		// The session went away (WDA restarted); open a new one and retry once.
++		resp.Body.Close()
++		if sessionID, err = wdaSessionID(dev, true); err != nil {
++			return nil, err
++		}
++		return wdaRequest(dev, http.MethodPost, "session/"+sessionID+"/actions", bytes.NewReader(payload))
++	}
++	return resp, nil
++}
++
++// wdaSessionID returns WebDriverAgent's open session, creating one when there
++// is none or when fresh is set. Creating it without a bundle ID attaches to
++// whatever app is in front and launches nothing.
++func wdaSessionID(dev devices.PlatformDevice, fresh bool) (string, error) {
++	if !fresh {
++		resp, err := wdaRequest(dev, http.MethodGet, "status", nil)
++		if err != nil {
++			return "", err
++		}
++		var status struct {
++			SessionID string `json:"sessionId"`
++		}
++		err = json.NewDecoder(resp.Body).Decode(&status)
++		resp.Body.Close()
++		if err == nil && status.SessionID != "" {
++			return status.SessionID, nil
++		}
++	}
++
++	body := []byte(`{"capabilities":{"alwaysMatch":{},"firstMatch":[{}]}}`)
++	resp, err := wdaRequest(dev, http.MethodPost, "session", bytes.NewReader(body))
++	if err != nil {
++		return "", err
++	}
++	defer resp.Body.Close()
++	var created struct {
++		SessionID string `json:"sessionId"`
++		Value     struct {
++			SessionID string `json:"sessionId"`
++		} `json:"value"`
++	}
++	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
++		return "", fmt.Errorf("creating WDA session: %w", err)
++	}
++	if created.SessionID != "" {
++		return created.SessionID, nil
++	}
++	if created.Value.SessionID != "" {
++		return created.Value.SessionID, nil
++	}
++	return "", fmt.Errorf("creating WDA session: no session id in response (HTTP %d)", resp.StatusCode)
++}
++
++// deviceOpenURL opens a URL on the phone the way a tapped link would: a
++// deep link (googledrive://, instagram://, shortcuts://) lands in its app, a
++// plain https:// in Safari. WebDriverAgent only serves it inside a session,
++// so one is reused or opened like deviceDrag does.
++func deviceOpenURL(dev devices.PlatformDevice, rawURL string) (*http.Response, error) {
++	if dev.GetOS() != "ios" {
++		return nil, fmt.Errorf("open_url is only available for iOS devices")
++	}
++	if rawURL == "" {
++		return nil, fmt.Errorf("url is required")
++	}
++	payload, err := json.Marshal(map[string]string{"url": rawURL})
++	if err != nil {
++		return nil, err
++	}
++
++	sessionID, err := wdaSessionID(dev, false)
++	if err != nil {
++		return nil, err
++	}
++	resp, err := wdaRequest(dev, http.MethodPost, "session/"+sessionID+"/url", bytes.NewReader(payload))
++	if err != nil {
++		return nil, err
++	}
++	if resp.StatusCode == http.StatusNotFound {
++		resp.Body.Close()
++		if sessionID, err = wdaSessionID(dev, true); err != nil {
++			return nil, err
++		}
++		return wdaRequest(dev, http.MethodPost, "session/"+sessionID+"/url", bytes.NewReader(payload))
++	}
++	return resp, nil
++}
++
+ func deviceDoubleTap(dev devices.PlatformDevice, x, y float64) (*http.Response, error) {
+ 	requestBody := struct {
+ 		X float64 `json:"x"`
+@@ -489,6 +635,24 @@ func executeCustomAction(dev devices.PlatformDevice, actionType string, params m
+ 	case "unlock":
+ 		return deviceLock(dev, "unlock")
+ 
++	case "drag":
++		x := utils.GetFloat(params, "x", 0)
++		y := utils.GetFloat(params, "y", 0)
++		endX := utils.GetFloat(params, "endX", 0)
++		endY := utils.GetFloat(params, "endY", 0)
++		holdTime := utils.GetFloat(params, "holdTime", 0.5)
++		dragDuration := utils.GetFloat(params, "dragDuration", 0.8)
++		return deviceDrag(dev, x, y, endX, endY, holdTime, dragDuration)
++
++	case "source":
++		// The screen's element tree (types, labels, frames) as WebDriverAgent
++		// sees it, without a session: what the dashboard's phone assistant
++		// reads instead of guessing from a screenshot.
++		return wdaRequest(dev, http.MethodGet, "source?format=json", nil)
++
++	case "open_url":
++		return deviceOpenURL(dev, utils.GetString(params, "url", ""))
++
+ 	case "pinch_in":
+ 		x := utils.GetFloat(params, "x", 250)
+ 		y := utils.GetFloat(params, "y", 500)

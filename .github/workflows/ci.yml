@@ -1,0 +1,111 @@
+# Tests of the kit itself. Nothing here touches a real farm, a phone or Cloudflare.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Restart service and provider gate (Node ${{ matrix.node }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        node: ['22', '26']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Tests
+        run: node --test --test-timeout=20000 tests/restart-server.test.js tests/provider-gate.test.js
+
+  powershell:
+    name: PowerShell scripts on Windows PowerShell 5.1
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Every script parses, is ASCII only, and uses no PowerShell 7 syntax
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          "Windows PowerShell " + $PSVersionTable.PSVersion
+          $failed = 0
+          Get-ChildItem -Recurse -Include *.ps1, *.psm1 -File | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            foreach ($e in $errors) { $failed++; Write-Host ("::error file=" + $_.FullName + ",line=" + $e.Extent.StartLineNumber + "::" + $e.Message) }
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            if ($bytes | Where-Object { $_ -gt 127 } | Select-Object -First 1) { $failed++; Write-Host ("::error file=" + $_.FullName + "::contains non-ASCII characters (Windows PowerShell 5.1 would misread them)") }
+            "parsed " + $_.FullName
+          }
+          if ($failed) { throw "$failed problem(s)" }
+
+      - name: Install the pinned test tools
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+          Install-Module -Name Pester -RequiredVersion 5.7.1 -Force -SkipPublisherCheck -Scope CurrentUser
+          Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.24.0 -Force -Scope CurrentUser
+
+      - name: PSScriptAnalyzer
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.24.0
+          $found = Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
+          $found | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message | Out-String -Width 250
+          if ($found | Where-Object { $_.Severity -eq 'Error' -or $_.Severity -eq 'ParseError' }) { throw 'PSScriptAnalyzer reported errors' }
+
+      - name: Pester
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module Pester -RequiredVersion 5.7.1
+          $config = New-PesterConfiguration
+          $config.Run.Path = '.\tests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
+
+  patch:
+    name: The patch applies to the pinned upstream commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: git apply --check
+        run: |
+          set -euo pipefail
+          COMMIT="$(jq -er .gads.commit versions.json)"
+          git init -q /tmp/gads
+          git -C /tmp/gads fetch -q --depth 1 --no-tags https://github.com/shamanec/GADS.git "$COMMIT"
+          git -C /tmp/gads -c advice.detachedHead=false checkout -q FETCH_HEAD
+          git -C /tmp/gads apply --check "$GITHUB_WORKSPACE/patch/provider-drag.patch"
+          echo "The patch applies to $COMMIT."

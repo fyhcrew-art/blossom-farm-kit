@@ -1,0 +1,26 @@
+{
+  "kit": "1.0.0",
+  "gads": {
+    "version": "v6.0.0",
+    "commit": "2cf741ce93173a38c3e8ef4a57f8ecbdd03b13ca",
+    "hubZipUrl": "https://github.com/shamanec/GADS/releases/download/v6.0.0/gads-win.zip",
+    "hubZipSha256": "ddb070f4dd1883ba79034cca1638a1041420fc472092be1e2dac71a77df38933",
+    "hubExeSha256": "43c75eeedaf49ba0fcd7a0e754d5f1e84da2d73587b7d5ddbf4f63b052bf625a"
+  },
+  "gadsDrag": {
+    "releaseTag": "gads-v6.0.0-drag.1",
+    "version": "v6.0.0-drag.1",
+    "url": "https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/gads-v6.0.0-drag.1/GADS-drag.exe",
+    "sha256": "73b003277a6e202617541e61bf2a9683265ccc212a1927a44dfadd724957f14a",
+    "goVersion": "1.26.0",
+    "swagVersion": "v1.16.4"
+  },
+  "winget": {
+    "nssm": { "id": "NSSM.NSSM", "version": "2.24-101-g897c7ad" },
+    "mongodb": { "id": "MongoDB.Server", "version": "8.3.11" },
+    "mongodbTools": { "id": "MongoDB.DatabaseTools", "version": "100.20.1" },
+    "node": { "id": "OpenJS.NodeJS.LTS", "version": "26.13.1" },
+    "ffmpeg": { "id": "Gyan.FFmpeg", "version": "9.1" },
+    "cloudflared": { "id": "Cloudflare.cloudflared", "version": "2026.11.2" }
+  }
+}
