@@ -466,7 +466,7 @@ try {
     }
 
     # ------------------------------------------------------------------
-    Write-Step '4/12  GADS (hub from its publisher, patched provider from this kit''s release)'
+    Write-Step '4/12  GADS (hub from its publisher, patched provider from this kit''s repository)'
     # ------------------------------------------------------------------
     $hubZip = Join-Path $paths.Downloads 'gads-win.zip'
     $hubHash = ([string]$versions.gads.hubExeSha256).ToLowerInvariant()

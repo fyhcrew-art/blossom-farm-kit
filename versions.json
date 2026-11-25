@@ -10,8 +10,8 @@
   "gadsDrag": {
     "releaseTag": "gads-v6.0.0-drag.1",
     "version": "v6.0.0-drag.1",
-    "url": "https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/gads-v6.0.0-drag.1/GADS-drag.exe",
-    "sha256": "1426a0c7a89376f9151975351d75971a2a1c9c3978822c1771fdb6f572bfcf17",
+    "url": "https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/e894f84b804459d223f29615eca3f79696423c4b/gads-v6.0.0-drag.1/GADS-drag.exe",
+    "sha256": "4a8bc06eea45030ad69cf27bda6c8aacffc5e8e33c1ec15f39b2d524bc58f975",
     "redistributeEmbeddedResources": true,
     "goVersion": "1.26.0",
     "swagVersion": "v1.16.4"
@@ -41,8 +41,8 @@
         "exeSha256": "486e99c270df54b05394f01083dca613136e4c3bcd0900dcac21cfc9d7d71d08"
       },
       "provider": {
-        "url": "https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/gads-v6.0.0-drag.1/GADS-drag-darwin-arm64",
-        "sha256": "382554b57497c238265cf95ef579952a34b0ba12ae9e7aec95d46dd2c1ded51f"
+        "url": "https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/e894f84b804459d223f29615eca3f79696423c4b/gads-v6.0.0-drag.1/GADS-drag-darwin-arm64",
+        "sha256": "654b386ab2c2258bfa17798ee549ba99266053ec5e46fe6a41f0dd1a6ecfa124"
       },
       "node": {
         "url": "https://nodejs.org/dist/v26.13.1/node-v26.13.1-darwin-arm64.tar.gz",
@@ -70,8 +70,8 @@
         "exeSha256": "5bfb028f520e69f8d4ebfad1f1e5fb00bb76ac2e06eeb850a00311a3f8c10e49"
       },
       "provider": {
-        "url": "https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/gads-v6.0.0-drag.1/GADS-drag-darwin-amd64",
-        "sha256": "40222d309cc3a9608aee4252413eeea55f178180dbd1c84e400a090be9af1104"
+        "url": "https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/e894f84b804459d223f29615eca3f79696423c4b/gads-v6.0.0-drag.1/GADS-drag-darwin-amd64",
+        "sha256": "3abe26e56118c1ba18947c7c733520a202fd2c1c024a227940123c024c46bbb0"
       },
       "node": {
         "url": "https://nodejs.org/dist/v26.13.1/node-v26.13.1-darwin-x64.tar.gz",

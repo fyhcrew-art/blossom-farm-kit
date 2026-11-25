@@ -11,6 +11,8 @@ farm.json
 restart-secret.txt
 keep-available.json
 pairing.json
+# ...except the file of that name at the top of the kit: it names the released commit (docs/RELEASING.md)
+!/pairing.json
 pairing.new.json
 tunnel-credentials.json
 node_modules/

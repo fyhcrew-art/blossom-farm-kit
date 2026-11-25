@@ -1,21 +1,37 @@
 <#
 .SYNOPSIS
-    Moves an installed farm to the versions of THIS kit folder.
+    Moves an installed farm to the versions of THIS kit folder, or first
+    fetches the newest kit and then does that.
 .DESCRIPTION
-    Download the newer kit, unpack it, and from inside the new folder run:
+    From an Administrator PowerShell, inside the kit folder:
 
-        powershell -ExecutionPolicy Bypass -File .\scripts\update.ps1
+        powershell -ExecutionPolicy Bypass -File .\scripts\update.ps1 -Check     (is there a newer kit? changes nothing)
+        powershell -ExecutionPolicy Bypass -File .\scripts\update.ps1 -Latest    (fetch the newest kit, check it, update the farm with it)
+        powershell -ExecutionPolicy Bypass -File .\scripts\update.ps1            (update the farm with the kit this script is in)
 
-    It downloads the GADS programs pinned in this kit's versions.json (and
-    verifies their SHA-256), stops the farm for about a minute, replaces the
-    programs and the service scripts, and starts everything again. The
+    The update downloads the GADS programs pinned in the kit's versions.json
+    (and verifies their SHA-256), stops the farm for about a minute, replaces
+    the programs and the service scripts, and starts everything again. The
     database, the secrets, the tunnel and the phones' pairings are not touched.
     The previous programs are kept next to the new ones; to go back:
 
         powershell -ExecutionPolicy Bypass -File .\scripts\update.ps1 -Rollback
 
+    -Latest asks the kit repository's main branch which kit is released
+    (versions.json and pairing.json there), downloads that commit's archive
+    from GitHub, checks every file against the commit's MANIFEST.sha256, and
+    refuses a kit that is not newer or that pins another file for a program
+    version this kit already pins. The kit that was here is kept as
+    <kit folder>.previous. What this does and does not protect against is in
+    docs\security.md, section 9.
+
     Programs installed with winget (MongoDB, Node.js, FFmpeg, cloudflared) are
     not changed by this script; see README, section "Updating".
+.PARAMETER Check
+    Say whether a newer kit is released. Changes nothing.
+.PARAMETER Latest
+    Fetch the newest kit, check it, put it in place of this one, and update
+    the farm with it.
 .PARAMETER Rollback
     Put back the programs and service scripts that the last update replaced.
 .PARAMETER ProviderExe
@@ -23,7 +39,7 @@
     Only accepted when its SHA-256 is the one pinned in versions.json.
 #>
 [CmdletBinding()]
-param([switch]$Rollback, [string]$ProviderExe = '')
+param([switch]$Check, [switch]$Latest, [switch]$Rollback, [string]$ProviderExe = '')
 
 $ErrorActionPreference = 'Stop'
 $KitRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -47,6 +63,92 @@ function Start-FarmPrograms {
 try {
     Assert-Administrator
     Protect-KitFolder -KitRoot $KitRoot
+    if (([int][bool]$Check + [int][bool]$Latest + [int][bool]$Rollback) -gt 1) {
+        Stop-Farm -Problem 'Use one of -Check, -Latest and -Rollback at a time.' -WhatToDo 'Run the script again with one of them.'
+    }
+
+    if ($Check -or $Latest) {
+        $thisKit = Read-KitVersions -KitRoot $KitRoot
+        Write-Step 'Looking for a newer kit'
+        $work = Join-Path ([System.IO.Path]::GetTempPath()) ('blossom-kit-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $work -Force | Out-Null
+        try { $released = Get-ReleasedKit -WorkFolder $work }
+        finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+        if (-not $released.Ok) { Stop-Farm -Problem $released.Error -WhatToDo 'Nothing was changed. Check the internet connection of this computer and run the script again.' }
+        Write-Note ('This kit:          ' + $thisKit.kit)
+        Write-Note ('The newest kit:    ' + $released.Version)
+        if ((Compare-KitVersion -Have $released.Version -Want ([string]$thisKit.kit)) -le 0) {
+            Write-Ok 'This kit is the newest one. Nothing to fetch.'
+            if ($Latest) { Write-Note 'To bring the farm to the versions of this kit, run scripts\update.ps1 without an option.' }
+            exit 0
+        }
+        if (-not $released.Commit) {
+            Write-Note ('Kit ' + $released.Version + ' is being prepared and is not released yet. Nothing to fetch; look again later.')
+            exit 0
+        }
+        if ($Check) {
+            Write-Ok ('Kit ' + $released.Version + ' is available (commit ' + $released.Commit + ').')
+            Write-Note 'To fetch it, check it and update the farm with it, run   scripts\update.ps1 -Latest'
+            exit 0
+        }
+        if (-not (Read-FarmConfig -Paths (Get-FarmPaths))) {
+            Stop-Farm -Problem 'This computer has no farm installation, so there is nothing to update.' -WhatToDo 'Nothing was changed. To set up a farm, use the command from Blossom, or download the kit and run install.ps1 (README).'
+        }
+        Write-Step ('Fetching kit ' + $released.Version + ' (the farm keeps running)')
+        $kitFolder = $KitRoot.TrimEnd('\', '/')
+        $stage = $kitFolder + '.new'
+        $previous = $kitFolder + '.previous'
+        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+        New-Item -ItemType Directory -Path $stage -Force | Out-Null
+        if ($env:OS -eq 'Windows_NT') {
+            # Administrators run these scripts: nobody else may change them. Set
+            # before anything is put into the folder.
+            $r = Invoke-Native -File 'icacls.exe' -Arguments @($stage, '/inheritance:r', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '/grant:r', '*S-1-5-18:(OI)(CI)F', '/grant:r', '*S-1-5-32-545:(OI)(CI)RX')
+            if ($r.Code -ne 0) {
+                Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+                Stop-Farm -Problem ('Could not restrict access to ' + $stage + '.') -WhatToDo 'Nothing was changed. Check that the drive is NTFS, then run the script again.'
+            }
+        }
+        $saved = Save-KitCommit -Commit $released.Commit -ManifestSha256 $released.ManifestSha256 -WorkFolder $stage
+        if (-not $saved.Ok) {
+            Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+            Stop-Farm -Problem $saved.Error -WhatToDo 'Nothing was changed. Run the script again; if it repeats, do not work around it: report it on the kit repository.'
+        }
+        $problem = $null
+        $fetched = $null
+        try { $fetched = Get-Content -LiteralPath (Join-Path $saved.Path 'versions.json') -Raw | ConvertFrom-Json } catch { $problem = 'Its versions.json cannot be read.' }
+        if (-not $problem) { $problem = Test-KitUpdateRule -Current $thisKit -New $fetched }
+        if (-not $problem -and ([string]$fetched.kit -cne $released.Version)) { $problem = 'It says it is kit ' + $fetched.kit + ', but the repository announced kit ' + $released.Version + '.' }
+        if (-not $problem -and -not (Test-Path -LiteralPath (Join-Path $saved.Path 'scripts\update.ps1'))) { $problem = 'It has no scripts\update.ps1.' }
+        if ($problem) {
+            Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+            Stop-Farm -Problem ('The kit that was fetched was refused. ' + $problem) -WhatToDo 'Nothing was changed. Do not work around it: report it on the kit repository.'
+        }
+        Write-Ok ('Kit ' + $released.Version + ' was downloaded and every file has the SHA-256 its list names.')
+        # The kit's files move up into the staging folder, which already carries
+        # the permissions; then the folder takes the place of this kit.
+        Get-ChildItem -LiteralPath $saved.Path -Force | Move-Item -Destination $stage -Force
+        Remove-Item -LiteralPath $saved.Path -Recurse -Force
+        Set-Location -LiteralPath ([System.IO.Path]::GetPathRoot($kitFolder))
+        if (Test-Path -LiteralPath $previous) { Remove-Item -LiteralPath $previous -Recurse -Force }
+        try { Move-Item -LiteralPath $kitFolder -Destination $previous -Force }
+        catch {
+            Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+            Stop-Farm -Problem ('Could not put the kit that is in ' + $kitFolder + ' aside: ' + $_.Exception.Message) -WhatToDo 'Nothing was changed. Close every other window that is open in that folder and run the script again.'
+        }
+        try { Move-Item -LiteralPath $stage -Destination $kitFolder -Force }
+        catch {
+            Move-Item -LiteralPath $previous -Destination $kitFolder -Force
+            Stop-Farm -Problem ('Could not put the new kit into ' + $kitFolder + ': ' + $_.Exception.Message) -WhatToDo 'The kit that was there is back. Run the script again.'
+        }
+        Write-Ok ('The new kit is in ' + $kitFolder + ' (the one before it: ' + $previous + '). The update continues with it.')
+        $shell = (Get-Process -Id $PID).Path
+        $passOn = @()
+        if ($ProviderExe) { $passOn = @('-ProviderExe', $ProviderExe) }
+        & $shell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $kitFolder 'scripts\update.ps1') @passOn
+        exit $LASTEXITCODE
+    }
+
     $paths = Get-FarmPaths
     $farm = Read-FarmConfig -Paths $paths
     if (-not $farm) { Stop-Farm -Problem 'This computer has no farm installation.' -WhatToDo 'Run install.ps1 instead.' }
@@ -145,7 +247,7 @@ try {
         if ($told.Ok) { Write-Ok ('Blossom (' + $pairing.AppOrigin + ') was told the versions this computer runs now.') }
         else { Write-Note ('Blossom could not be told the new versions (' + $told.Message + '). Nothing depends on it; scripts\status.ps1 shows the pairing.') }
     }
-    Write-Note 'If this kit changed the tunnel configuration or the services (see its release notes), run install.ps1 once as well.'
+    Write-Note 'If this kit changed the tunnel configuration or the services (the README says so under "Updating"), run install.ps1 once as well.'
     exit 0
 }
 catch { Write-FarmFailure -ErrorRecord $_; exit 1 }

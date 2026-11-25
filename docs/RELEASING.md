@@ -1,138 +1,290 @@
 # Releasing (for maintainers of this repository)
 
-Two kinds of release live in this repository:
+This repository has no build service. Nothing is built or published by a
+machine that somebody else runs: **a maintainer builds on their own
+computer, and git carries the result.** What makes that safe to rely on is
+not where a file was built, but that everything a customer's computer
+downloads is fetched **by commit** and checked against a **pinned SHA-256**,
+and that the build of the provider can be repeated by anybody, bit for bit.
 
-| Tag | What | Made by |
+| What | Where it lives | Made with |
 |---|---|---|
-| `gads-v<upstream>-drag.<n>` | the patched provider, three times from the same source (`GADS-drag.exe` for Windows x64, `GADS-drag-darwin-arm64` and `GADS-drag-darwin-amd64` for macOS), `SHA256SUMS`, the source archive, `THIRD-PARTY-NOTICES.txt`, `LICENSE-AGPL-3.0.txt`. Never marked "Latest". | `.github/workflows/build-gads.yml` |
-| `kit-v<x.y.z>` | the kit itself: `blossom-farm-kit-<x.y.z>.zip`, `SHA256SUMS`, `bootstrap.ps1` and `bootstrap.sh` (the first file of the command Blossom CRM shows), `bootstrap-hashes.json`. Published as a pre-release; marked "Latest" by hand once it has passed the checklists. | `.github/workflows/release-kit.yml` |
+| the patched provider: `GADS-drag.exe` (Windows x64), `GADS-drag-darwin-arm64`, `GADS-drag-darwin-amd64` (macOS), with `SHA256SUMS`, the source archive, `THIRD-PARTY-NOTICES.txt`, `LICENSE-AGPL-3.0.txt`, `BUILD.md`, `MODIFICATIONS.md` | the branch **`dist`**, one folder per provider version (`gads-v6.0.0-drag.1/`). An orphan branch: it shares no history with the kit and holds nothing else | `tools/build-provider.sh`, `tools/publish-dist.sh` |
+| the kit | a commit on **`main`**. `versions.json` names each provider program by the address of one commit of `dist` and by its SHA-256 | `tools/release.sh kit` |
+| which kit is the released one | `pairing.json` on `main`, in the commit after the kit's: the kit version, the kit commit, the SHA-256 of its two bootstrap files and of its `MANIFEST.sha256` | `tools/release.sh pairing` |
 
-`install.ps1` downloads `GADS-drag.exe`, and `install.sh` the
-`GADS-drag-darwin-…` file for its processor, from the addresses in
-`versions.json`. **Until the `gads-…` release named there exists and carries
-all three files, the installers stop at step 4 with a download error.**
-Publish it before the first `kit-…` release. The three files belong to one
-release: tag only a commit whose workflow builds all three (a release made
-from an older commit has the Windows file alone, and a published release is
-never changed afterwards, so macOS would then need a new `…-drag.<n+1>`).
+There are no tags and no GitHub Releases in this flow, and no Git LFS: every
+published file is an ordinary file in a git commit, below GitHub's limit of
+100 MB per file (the provider programs are about 80 MB each; the tools
+refuse a larger file).
 
-## Before the first gads release: a decision only you can take
+Who downloads what:
+
+* the installers fetch the provider from
+  `https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/<commit of dist>/<folder>/<file>`
+  and compare its SHA-256 with `versions.json`;
+* the command Blossom CRM shows fetches `bootstrap.ps1` or `bootstrap.sh`
+  from `https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/<kit commit>/`
+  and compares its SHA-256 with the value in the command; the bootstrap file
+  fetches `https://github.com/fyhcrew-art/blossom-farm-kit/archive/<kit commit>.zip`
+  (`.tar.gz` on macOS) and checks every file against `MANIFEST.sha256`;
+* a customer without the command presses **Code → Download ZIP** on `main`;
+* `update -Latest` reads `versions.json` and `pairing.json` from `main` and
+  then fetches the archive of the commit `pairing.json` names.
+
+An address with a commit in it cannot start giving other bytes: a commit
+does not change. **Never delete the branch `dist`, never rewrite it (no
+force-push), and never rewrite `main`:** a commit that no branch reaches any
+more is removed by GitHub after a while, and every kit and every command
+that names it would stop with a download error. Only ever add commits.
+
+## Before the first provider publication: a decision only you can take
 
 Every `GADS-drag` program embeds upstream's `resources` folder, as every GADS binary
 does: Apple's developer disk image for iOS 17+, and pre-built helper files
 (`NOTICE`, section 2b). Publishing the binary makes this repository a
 distributor of those files. Upstream publishes the same files; that does not
-settle whether you may. The workflow therefore **builds on every tag but
-publishes nothing** until the commit you tag contains
+settle whether you may. `tools/publish-dist.sh` therefore **publishes
+nothing** until `versions.json` contains
 
 ```json
 "redistributeEmbeddedResources": true
 ```
 
-under `gadsDrag` in `versions.json`. Setting it is the record of your
-decision (who set it and when is in the git history). The value does not
-change the binary or its checksum. If you decide against publishing, the
-alternative is in `patch/README.md`: build the provider on the farm computer
-and install it with `install.ps1 -ProviderExe <path>` or
-`install.sh --provider-binary <path>`.
+under `gadsDrag`. Setting it is the record of your decision (who set it and
+when is in the git history). The value does not change the binary or its
+checksum. If you decide against publishing, the alternative is in
+`patch/README.md`: build the provider on the farm computer and install it
+with `install.ps1 -ProviderExe <path>` or `install.sh --provider-binary
+<path>`.
 
-If a published `GADS-drag` file ever has to be taken down: running farms are
-not affected (they have the file), and new installs and updates stop at step
-4 with "is not at its download address (HTTP 404)" until a kit points
-somewhere else or the customer passes `-ProviderExe` / `--provider-binary`.
+If a published `GADS-drag` file ever has to be taken down (the branch `dist`
+removed): running farms are not affected (they have the file), and new
+installs and updates stop at step 4 with "is not at its download address
+(HTTP 404)" until a kit points somewhere else or the customer passes
+`-ProviderExe` / `--provider-binary`.
 
-## First release
+## Checking the kit: `tools/check.sh`
 
-1. Push `main`. Wait for the CI workflow to be green. What it runs:
-   * Windows: every `.ps1` parsed with Windows PowerShell 5.1,
-     PSScriptAnalyzer, the Pester tests;
-   * Linux: shellcheck on every `.sh`, the bash tests (`tests/farmkit.test.sh`,
-     also in POSIX mode), the JSON reader with several awks, the launchd
-     property lists against Apple's DTD;
-   * macOS (`macos-15`, the job named "macOS scripts on macOS"): the same
-     bash tests with the bash 3.2, awk and sed that macOS ships, `plutil
-     -lint` on the property lists, `pfctl -n` on the packet filter rule;
-   * the Node tests on Windows, Linux and macOS;
-   * on all three: the pairing client and the bootstrap files against
-     `tests/fake-blossom.js`, a stand-in for Blossom's pairing API served
-     over https with a certificate made for the run (`tests/pairing.test.sh`,
-     `tests/bootstrap.test.sh`, `tests/Pairing.Tests.ps1`,
-     `tests/Bootstrap.Tests.ps1`). These prove the client against the
-     contract, not against Blossom itself: the checklists below do that.
+```sh
+bash tools/check.sh                # everything this computer has the tools for
+bash tools/check.sh --require-all  # a check that cannot run counts as failed
+bash tools/check.sh --upstream     # also: the patch applies to the pinned upstream commit (network)
+```
 
-   Read the log of the macOS job, not only its result: it is where the shell
-   scripts meet the tools of macOS before a Mac does.
-2. Run the *Build GADS-drag* workflow by hand (Actions → Build GADS-drag →
-   Run workflow, "publish" off). It must end with "Reproduced the three
-   pinned SHA-256 values". If it reports a different hash, do not publish:
-   find out why (the usual cause is a different Go patch version;
-   `versions.json` pins `goVersion`).
-   The pinned SHA-256 values in `versions.json` were produced on a developer
-   machine with the commands of `patch/README.md` (each twice, in different
-   folders, same result); the workflow run is what proves it for the
-   published build.
-3. Take the decision of the previous section and, if it is yes, commit
-   `"redistributeEmbeddedResources": true`. Then tag that commit:
-   `git tag gads-v6.0.0-drag.1 && git push origin gads-v6.0.0-drag.1`.
-   The workflow builds again and creates the release with the seven files. It
-   is created with `--latest=false`: check on the releases page that it does
-   **not** carry the "Latest" badge.
-4. Check that the three addresses in `versions.json` (`gadsDrag.url`,
-   `macos.arm64.provider.url`, `macos.x86_64.provider.url`) answer 200.
-5. Tag the commit `kit-v1.0.0` (`versions.json` must say `"kit": "1.0.0"`)
-   and push the tag. The *Release the kit* workflow checks that the provider
-   files are published, makes the kit archive from the tagged commit, and
-   creates the release as a **pre-release** with five files (the table
-   above). A pre-release is downloadable at its final address but is not
-   "Latest", so customers do not get it yet.
-6. Run both acceptance checklists below, on a Windows PC and on a Mac, each
-   with a phone, following the README as a customer would. For the pairing
-   points you need a Blossom that knows this release ("A kit release and
-   Blossom CRM" below): a staging deployment, never production.
-7. When both lists have passed: `gh release edit kit-v1.0.0 --prerelease=false
-   --latest`. The README sends customers to `/releases/latest`. This changes
-   no file of the release.
-8. Hand `bootstrap-hashes.json` of the release to the maintainers of Blossom
-   CRM. Until they put its three values into Blossom, the command Blossom
-   shows keeps naming the previous kit release.
+It runs, where the tool is installed: the check that `MANIFEST.sha256` is up
+to date; `bash -n` and shellcheck on every `.sh`; the bash tests
+(`tests/farmkit.test.sh`, `tests/pairing.test.sh`, `tests/bootstrap.test.sh`,
+the first two also in POSIX mode); the JSON reader with every awk at hand;
+the Node tests; the rendered launchd property lists; on a Mac `pfctl -n` on
+the packet filter rule; with `powershell` or `pwsh`, the parse and ASCII
+check of every PowerShell file, PSScriptAnalyzer and the Pester tests. The
+pairing, bootstrap and update tests talk https to `tests/fake-blossom.js`, a
+stand-in for Blossom's pairing API and for the places a kit is fetched from;
+they prove the client against the contract, not against Blossom itself (the
+checklists below do that).
+
+One computer does not have every tool. Before a kit release, run it on:
+
+* **Linux**, with shellcheck 0.11.0, node, and PowerShell 7 with Pester
+  5.7.1 and PSScriptAnalyzer 1.24.0 (`--require-all`);
+* **a Mac**: `bash tools/check.sh`. This is where the shell scripts meet the
+  bash 3.2, awk, sed, curl and tar of macOS before a farm does. Read the
+  output, not only the last line;
+* **Windows**, in an Administrator *Windows PowerShell* (5.1) window, for the
+  PowerShell half. Either `bash tools/check.sh` from Git Bash, or by hand:
+
+  ```powershell
+  Install-Module Pester -RequiredVersion 5.7.1 -Force -SkipPublisherCheck -Scope CurrentUser
+  Install-Module PSScriptAnalyzer -RequiredVersion 1.24.0 -Force -Scope CurrentUser
+  Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
+  $env:FARMKIT_REQUIRE_STAND_IN = '1'; Invoke-Pester .\tests
+  node --test tests\restart-server.test.js tests\provider-gate.test.js tests\fake-blossom.test.js
+  ```
+
+## Publishing the provider programs
+
+Do this once per provider version: the first time, and whenever the patch,
+the upstream commit or the Go version changes ("A new patched provider"
+below). On Linux x64, with git and Go installed (any recent Go: the pinned
+version is downloaded by Go itself, and the script checks which one runs).
+
+1. **Build.**
+
+   ```sh
+   bash tools/build-provider.sh --out /tmp/gads-drag
+   ```
+
+   It checks out upstream GADS at the commit pinned in `versions.json`
+   (without the `hub-ui` submodule), applies `patch/provider-drag.patch`,
+   generates the docs package with the pinned `swag`, builds the three
+   programs with `CGO_ENABLED=0 -trimpath -buildvcs=false`, runs `go vet`
+   and the provider's tests, makes the source archive, the notices and the
+   licence text (`tools/make-source-archive.sh`), writes `SHA256SUMS`, and
+   compares the three programs with the SHA-256 values pinned in
+   `versions.json`. It must end with **"Reproduced the three pinned SHA-256
+   values"**. If it reports a different value and nothing was changed on
+   purpose, do not publish: find out why (the usual cause is another Go
+   version; `versions.json` pins `goVersion`).
+2. **Build again, somewhere else,** to see for yourself that the result does
+   not depend on the folder or on what was cached: another `--out`, another
+   `--work` folder, `GOCACHE` pointing at an empty folder. The two output
+   folders must hold identical programs (`sha256sum` of both). The pinned
+   values in `versions.json` were produced this way.
+3. **Publish.**
+
+   ```sh
+   bash tools/publish-dist.sh --from /tmp/gads-drag --push
+   ```
+
+   It refuses anything that does not match `versions.json` or its own
+   `SHA256SUMS`, any file of 100 MB or more, and any change to a folder that
+   is already on `dist`. It adds one commit to the local branch `dist`
+   (created as an orphan branch the first time), never touches the working
+   tree, pushes with `git push origin dist`, and prints the commit and the
+   three addresses. If the push is refused for its size, run it again with
+   `--one-file-per-commit` on a fresh `dist` (`git branch -D dist` first, if
+   nothing was pushed).
+4. **Put the three addresses into `versions.json`** (`gadsDrag.url`,
+   `macos.arm64.provider.url`, `macos.x86_64.provider.url`). They all name
+   the same commit of `dist`.
+5. `bash tools/release.sh kit` (next section) downloads the three files from
+   those addresses and compares them with the pinned values before it lets a
+   kit be committed.
+
+What is being claimed, and what is not: the programs are built on a
+maintainer's computer, not on a neutral build service, so the fact that they
+were built from the published source rests on that maintainer **unless
+somebody checks**. Anybody can: the build is reproducible, the recipe
+(`tools/build-provider.sh`, `BUILD.md` next to the programs) and the
+checksums are public, and a rebuild that gives other checksums would show
+that something is wrong. `patch/README.md` tells an outsider how.
+
+## A kit release: two commits
+
+A release is the commit that holds the kit, and one more commit that says
+"that one is the released kit". They cannot be the same commit: a commit's
+name is a checksum over its content, so a file cannot contain the name of
+the commit it is in.
+
+**Step 1: the kit commit.** Set `"kit"` in `versions.json` to the new version
+(it must be higher than the last released one: installed kits refuse
+anything else), then:
+
+```sh
+bash tools/release.sh kit
+git add -A && git status        # look: nothing from a real farm, no binary
+git commit -m 'Kit 1.0.0'
+git push origin main
+```
+
+`release.sh kit` regenerates `MANIFEST.sha256` and writes its SHA-256 into
+`bootstrap.sh` and `bootstrap.ps1` (`tools/make-manifest.sh`), downloads the
+three provider programs from the addresses in `versions.json` and compares
+them with the pinned SHA-256 values, and runs `tools/check.sh`. Call the
+commit you pushed **K**.
+
+**Step 2: `pairing.json`.** With K checked out, clean and pushed:
+
+```sh
+bash tools/release.sh pairing
+git push origin main
+```
+
+It fetches `bootstrap.sh` and `bootstrap.ps1` of K from GitHub and compares
+them with the files of the commit, runs the fetched `bootstrap.sh` with
+`--verify-only` (the whole chain against GitHub: archive of K, list, every
+file), and then writes and commits `pairing.json`:
+
+```json
+{
+  "kitVersion": "1.0.0",
+  "kitCommit": "<K>",
+  "bootstrapShSha256": "<SHA-256 of bootstrap.sh in K>",
+  "bootstrapPs1Sha256": "<SHA-256 of bootstrap.ps1 in K>",
+  "manifestSha256": "<SHA-256 of MANIFEST.sha256 in K>"
+}
+```
+
+That commit changes `pairing.json` and nothing else (the script checks).
+`pairing.json` is not on the list of files, so K's `MANIFEST.sha256` stays
+true for the commit after it.
+
+**Step 3: prove it from the outside.**
+
+```sh
+bash tools/release.sh verify
+```
+
+downloads the three provider programs and checks their SHA-256, fetches the
+bootstrap files of K and runs the chain with `--verify-only`, checks that a
+kit with one changed line is refused, and says whether `main` on GitHub
+already shows this release.
+
+**Step 4: the acceptance checklists** below, on a Windows PC and on a Mac,
+each with a phone, following the README as a customer would. For the pairing
+points you need a Blossom that shows this release ("A kit release and
+Blossom CRM"): a staging deployment, never production. The checklists come
+after the push because the command needs the commit to be on GitHub. If a
+checklist fails, fix the kit and make a new release with a higher version;
+until then, set `pairing.json` on `main` back to the last good release
+(a new commit with the previous content of the file), so that Blossom and
+`update -Latest` stop offering the kit that failed.
+
+### `MANIFEST.sha256` in daily work
+
+Every commit to `main` that changes a file of the kit must carry an
+up-to-date list: run `bash tools/make-manifest.sh` before committing.
+`tools/check.sh` and `tests/bootstrap.test.sh` fail when it was forgotten
+("MANIFEST.sha256 does not describe the files of the kit"). The list
+describes the files as GitHub's archive of the commit holds them (tracked
+files, line ends as `.gitattributes` gives them), which is why it is made
+from git and not from the folder. `bootstrap.ps1` is kept with LF line ends
+on purpose: it is fetched by itself and pinned by its SHA-256, and must be
+the same bytes everywhere.
+
+Commits to `main` between two releases are harmless to customers who use the
+command: `pairing.json` keeps naming K until the next release. They are
+**not** invisible to customers who press "Download ZIP": those get `main` as
+it is that day. Keep `main` in a state you would hand to a customer, and do
+unfinished work on a branch.
 
 ## A kit release and Blossom CRM
 
-The command Blossom shows under *Connect a computer* names one kit release
-and carries the SHA-256 of that release's bootstrap file. Three values per
-release go into Blossom, all from `bootstrap-hashes.json`: `release` (the
-tag), `bootstrapPs1Sha256` and `bootstrapShSha256`. They are copied by a
-person, in a commit to Blossom that somebody reviews; Blossom never fetches
-them. That is the point of the chain: the value a download is checked
-against never comes from the place the download comes from.
+The command Blossom shows under *Connect a computer* carries the kit commit
+and the SHA-256 of that commit's bootstrap file. Blossom's server reads both
+from `pairing.json` on `main`
+(`https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/main/pairing.json`)
+and keeps them; nothing has to be handed over by hand, and a release reaches
+Blossom when its cache of that file is next refreshed.
 
 What follows from that:
 
-* **Never replace a file of a published `kit-…` release, and never move its
-  tag.** Every command Blossom has shown for it would stop with "The
-  downloaded file is not the one Blossom expects". A fix is a new release.
-* **Never delete a `kit-…` release that Blossom still names.** Check with
-  the maintainers of Blossom first.
-* The bootstrap files in the repository are templates and refuse to run. The
-  workflow writes four values into the copies it publishes: the tag, the
-  download address of the release, the name of the archive, and the SHA-256
-  of `SHA256SUMS`. `SHA256SUMS` holds the SHA-256 of the archive.
-* To try a release before Blossom knows it, write the command by hand, with
-  the values of its `bootstrap-hashes.json`. Windows (in an Administrator
-  PowerShell):
+* **`pairing.json` on `main` is the switch.** Pushing the second commit
+  makes the release the one Blossom offers and `update -Latest` fetches.
+  Until it is pushed, nothing changes for anybody.
+* **Whoever can push to `main` can release.** Protect the account
+  (two-factor sign-in) and the branch (in the repository's settings: no
+  force-push to `main`, no deletion). `docs/security.md`, section 9, says
+  this to customers in plain words; do not let the documentation claim more.
+* **Never rewrite `main` or `dist`.** Every command Blossom has shown names
+  a commit, and every installed kit names a commit of `dist`.
+* To try a release before Blossom shows it, write the command by hand, with
+  the values of `pairing.json`. Windows (in an Administrator PowerShell):
 
   ```powershell
-  $f = "$env:TEMP\blossom-bootstrap.ps1"; [Net.ServicePointManager]::SecurityProtocol = 'Tls12'; Invoke-WebRequest -UseBasicParsing 'https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/kit-v1.0.0/bootstrap.ps1' -OutFile $f; if ((Get-FileHash $f -Algorithm SHA256).Hash -ne '<bootstrapPs1Sha256>') { Remove-Item $f; throw 'The downloaded file is not the one Blossom expects. Nothing was run.' }; powershell -NoProfile -ExecutionPolicy Bypass -File $f -AppOrigin 'https://<staging Blossom>' -PairingCode '<code>'
+  $f = "$env:TEMP\blossom-bootstrap.ps1"; [Net.ServicePointManager]::SecurityProtocol = 'Tls12'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/<kitCommit>/bootstrap.ps1' -OutFile $f; if ((Get-FileHash $f -Algorithm SHA256).Hash -ne '<bootstrapPs1Sha256>') { Remove-Item $f; throw 'The downloaded file is not the one Blossom expects. Nothing was run.' }; powershell -NoProfile -ExecutionPolicy Bypass -File $f -KitCommit '<kitCommit>' -AppOrigin 'https://<staging Blossom>' -PairingCode '<code>'
   ```
 
   macOS (in Terminal):
 
   ```sh
-  cd ~ && curl -fsSL --proto '=https' --tlsv1.2 -o blossom-bootstrap.sh 'https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/kit-v1.0.0/bootstrap.sh' && echo '<bootstrapShSha256>  blossom-bootstrap.sh' | shasum -a 256 -c - && sudo bash blossom-bootstrap.sh --app-origin 'https://<staging Blossom>' --pairing-code '<code>'
+  cd ~ && curl -fsSL --proto '=https' --tlsv1.2 -o blossom-bootstrap.sh 'https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/<kitCommit>/bootstrap.sh' && echo '<bootstrapShSha256>  blossom-bootstrap.sh' | shasum -a 256 -c - && sudo bash blossom-bootstrap.sh --kit-commit '<kitCommit>' --app-origin 'https://<staging Blossom>' --pairing-code '<code>'
   ```
 
   Without `-AppOrigin`/`-PairingCode` (`--app-origin`/`--pairing-code`) the
-  same command installs without pairing.
+  same command installs without pairing; with `-VerifyOnly` /
+  `--verify-only` appended (and without `sudo`) it only fetches and checks.
 * The pairing tests run against a stand-in. The pairing points of the two
   checklists below are run against a real Blossom deployment (staging)
   before every kit release; when something differs there, correct the kit,
@@ -193,7 +345,14 @@ the points in this order.
    restarts the hub, `GadsProvider` and `KeepAvailable`, as the README says.
 8. `rotate-secrets.ps1 -All`; `update.ps1` and `update.ps1 -Rollback`;
    `export-farm.ps1`, then `import-farm.ps1` and `install.ps1` on a second
-   machine; `uninstall.ps1 -RemoveData`.
+   machine; `uninstall.ps1 -RemoveData`. **Fetching a newer kit:**
+   `update.ps1 -Check` says that this kit is the newest one. To see a fetch
+   happen, lower `"kit"` in `C:\blossom-farm-kit\versions.json` by hand (for
+   example to `0.0.1`), then `update.ps1 -Check` names the released kit and
+   `update.ps1 -Latest` fetches it, reports every file checked, keeps the
+   old folder as `C:\blossom-farm-kit.previous` (`icacls` on the new folder
+   as in point 1), and continues into the update. With the network cable
+   pulled, `-Latest` stops with "could not be read" and changes nothing.
 9. With `install.ps1 -WithAppium`: the provider starts, and an Appium session
    opens through the provider host name. In the registry,
    `HKLM:\SYSTEM\CurrentControlSet\Services\GadsProvider\Parameters`,
@@ -203,8 +362,12 @@ the points in this order.
 10. As a standard (non-administrator) user create `C:\farm\bin` with a file in
     it on a clean PC, then run `install.ps1` as Administrator: it must stop at
     step 2 with "already exists and cannot be used".
-11. **Pairing** (against a staging Blossom, with the command written as in "A
-    kit release and Blossom CRM"):
+11. **Pairing** (against a staging Blossom; if it does not show this release
+    yet, with the command written by hand as in "A kit release and Blossom
+    CRM"):
+    * the command with `-VerifyOnly` appended, in a PowerShell window that
+      is *not* Administrator: it reports every file checked and "nothing was
+      installed", and `C:\blossom-farm-kit` does not exist afterwards;
     * on a clean PC the one command, pasted into an Administrator
       PowerShell, ends with "Blossom sees your farm"; the kit is in
       `C:\blossom-farm-kit`, and `icacls C:\blossom-farm-kit` shows
@@ -217,6 +380,8 @@ the points in this order.
       nothing is asked of Blossom twice, the site stays as it is;
     * change one character of the hash in the command: it stops with "not
       the one Blossom expects" and `C:\blossom-farm-kit` is untouched;
+      change one character of the commit instead: it stops because GitHub
+      has no such commit, and nothing is touched either;
     * a command with an expired code: the installation completes and prints
       the values for manual entry;
     * `rotate-secrets.ps1 -HubUser -RestartSecret` shows no value and Blossom
@@ -270,8 +435,9 @@ On a spare Mac with Apple Silicon and the macOS version named in
 14. Most points need a real iPhone. Do the points in this order, and write
 down every command that had to be changed.
 
-Before anything else, the CI job "macOS scripts on macOS" is green (it
-covers bash 3.2, awk, sed, `plutil` and `pfctl -n`; nothing below).
+Before anything else, `bash tools/check.sh` was run on this Mac, from a
+checkout of the commit, and passed (it covers the scripts with the bash 3.2,
+awk and sed of macOS, `plutil` and `pfctl -n`; nothing below).
 
 1. **The kit folder and the installer, first run.** Homebrew installed as
    the normal user. Unpack the kit to `~/blossom-farm-kit` and run `sudo
@@ -377,8 +543,15 @@ covers bash 3.2, awk, sed, `plutil` and `pfctl -n`; nothing below).
     hub answers on port 10000, and neither `hub.log` nor `log show --last 5m
     --predicate 'eventMessage CONTAINS "Code Signature Invalid"'` shows a
     killed program. The same after `sudo bash scripts/update.sh --rollback`.
-    With the provider program downloaded **in a browser** from the `gads-…`
-    release: delete `/opt/farm/bin/GADS-drag`, run `sudo bash install.sh
+    **Fetching a newer kit:** `sudo bash scripts/update.sh --check` says
+    that this kit is the newest one; with `"kit"` in
+    `/opt/blossom-farm-kit/versions.json` lowered by hand (for example to
+    `0.0.1`), `--check` names the released kit and `--latest` fetches it,
+    reports every file checked, keeps the old folder as
+    `/opt/blossom-farm-kit.previous`, leaves the new one owned by root and
+    not writable by anybody else, and continues into the update.
+    With the provider program downloaded **in a browser** from its address in
+    `versions.json` (`macos.arm64.provider.url`): delete `/opt/farm/bin/GADS-drag`, run `sudo bash install.sh
     --provider-binary ~/Downloads/GADS-drag-darwin-arm64`; `xattr
     /opt/farm/bin/GADS-drag` lists no `com.apple.quarantine`, and the
     provider starts.
@@ -407,9 +580,10 @@ covers bash 3.2, awk, sed, `plutil` and `pfctl -n`; nothing below).
     `com.apple.quarantine`), the installer says "FFmpeg with the libx264
     encoder", Control shows a picture, and a later `sudo bash install.sh`
     without the option keeps that file and asks Homebrew for nothing.
-15. **Pairing** (against a staging Blossom, with the command written as in "A
-    kit release and Blossom CRM"): the same points as numbers 11, 12 and 13
-    of the Windows list, with these differences. The command is pasted into
+15. **Pairing** (against a staging Blossom; if it does not show this release
+    yet, with the command written by hand as in "A kit release and Blossom
+    CRM"): the same points as numbers 11, 12 and 13 of the Windows list, with
+    these differences. `--verify-only` is tried without `sudo`. The command is pasted into
     Terminal; `shasum -a 256 -c` prints "OK" before `sudo` asks for the
     password. The kit is in `/opt/blossom-farm-kit`, owned by root and not
     writable by anybody else (`ls -ld`). `/opt/farm/config/pairing.json` is
@@ -439,22 +613,28 @@ covers bash 3.2, awk, sed, `plutil` and `pfctl -n`; nothing below).
    the signing helper inside them decides what `docs/phones.md` says about
    signing in the hub page (in v6.0.0 `resources/zsign-mac` is for Apple
    Silicon only and loads Homebrew's `openssl@3`).
-2. Set `gadsDrag.releaseTag`, `gadsDrag.version`, `gadsDrag.url` and the two
-   `macos.*.provider.url` to the new tag. Take `goVersion` from the `go` line
-   of upstream's `go.mod`.
-3. Build locally with the commands in `patch/README.md` and put the three
-   SHA-256 values into `gadsDrag.sha256`, `macos.arm64.provider.sha256` and
-   `macos.x86_64.provider.sha256`. (Or run the workflow by hand once: it
-   prints the hashes it built before failing the comparison.)
-4. Commit, wait for CI, tag `gads-…`, check the release, then test on a farm
-   with `scripts\update.ps1` before a `kit-…` release. The `gads-…` release
-   is not marked "Latest", so customers who follow the README keep getting
-   the last tested kit in the meantime. A newer GADS can also expect another
-   version of its Appium plugin (`targetAppiumPluginVersion` in
-   `provider/provider.go`): put it into `versions.json` → `npm.gadsPlugin`.
+2. Give the provider a **new version**: `gadsDrag.version` (for example
+   `v6.0.0-drag.2`) and `gadsDrag.releaseTag` (`gads-v6.0.0-drag.2`, the name
+   of its folder on `dist`). A program that changed never keeps its version:
+   installed kits refuse a kit that pins another file under a version they
+   know, and `tools/publish-dist.sh` refuses to change a published folder.
+   Take `goVersion` from the `go` line of upstream's `go.mod`.
+3. Build once with `bash tools/build-provider.sh --out <folder>
+   --no-pin-check`: it prints the three SHA-256 values. Put them into
+   `gadsDrag.sha256`, `macos.arm64.provider.sha256` and
+   `macos.x86_64.provider.sha256`.
+4. Go on as in "Publishing the provider programs": build again without the
+   option, in another folder (it must reproduce the values), publish, put
+   the three new addresses into `versions.json`. Do all of this on a branch,
+   and test on a farm with the kit of that branch (`scripts\update.ps1`
+   without an option, from a folder you unpacked) before a kit release:
+   customers get nothing of it until `main` moves. A newer GADS can also
+   expect another version of its Appium plugin (`targetAppiumPluginVersion`
+   in `provider/provider.go`): put it into `versions.json` →
+   `npm.gadsPlugin`.
 
-Never move or re-create a published `gads-…` tag or replace its files:
-installed kits pin its checksum.
+Never change or remove a folder that is on `dist`: installed kits pin the
+checksum of its files and the commit they are fetched from.
 
 ## Pinned versions of the other programs
 
@@ -480,12 +660,15 @@ them on a farm first (MongoDB and cloudflared are the ones that matter).
 
 ## What must never be committed
 
-No binary, no `.ipa`, no certificate or key, nothing copied from a real farm:
+On `main` and on every branch of the kit: no binary, no `.ipa`, no
+certificate or key, nothing copied from a real farm:
 no real host name, tunnel id, UDID, password, secret, pairing code or farm
 token, and no address of a real Blossom deployment. Examples use
 `yourdomain.com` and zero UUIDs; the tests make their certificate at run
 time instead of carrying one. `.gitignore` blocks the usual file types;
-it does not replace looking at the diff.
+it does not replace looking at the diff. The branch `dist` is the one
+place for binaries, and it holds nothing but what `tools/publish-dist.sh`
+puts there.
 
 ## Licence duties when publishing the `GADS-drag` programs
 
@@ -493,11 +676,13 @@ Read `NOTICE`, section 2. In short: the programs are AGPL-3.0, so every
 release that carries them carries the licence text, their source archive
 (with the module sources, the build instructions and the statement of
 modifications) and the licence notices of the libraries compiled into them
-(the union over the three programs); the workflow makes and attaches all of
-them. The programs must stay free of `hub-ui` (the workflow
+(the union over the three programs); `tools/build-provider.sh` makes all of
+them and `tools/publish-dist.sh` refuses to publish without them. The
+programs must stay free of `hub-ui` (the build script
 builds without the `ui` tag and checks that the submodule folder is empty).
 The patch marks the files it changes as modified and makes the provider
-announce where its source is (`X-Source-Code`); keep both when the patch
-changes. The question of the files embedded from upstream's `resources/`
-directory is yours to decide, and the workflow waits for that decision
-("Before the first gads release" above).
+announce where its source is (`X-Source-Code`, the address of the branch
+`dist`); keep both when the patch changes. The question of the files
+embedded from upstream's `resources/` directory is yours to decide, and
+`tools/publish-dist.sh` waits for that decision ("Before the first provider
+publication" above).

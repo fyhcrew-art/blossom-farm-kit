@@ -3,7 +3,7 @@
 # Blossom CRM that serves the pairing API over https with a certificate made
 # for the run.
 #   Invoke-Pester .\tests
-# Runs on Windows PowerShell 5.1 (CI) and on PowerShell 7. The tests against
+# Runs on Windows PowerShell 5.1 and on PowerShell 7. The tests against
 # the stand-in need node and openssl, and on Windows an Administrator window
 # (the certificate of the run is added to the machine's trusted roots and
 # removed again afterwards). Nothing leaves this computer.
@@ -13,7 +13,7 @@
 #   node tests/fake-blossom.js --make-cert /tmp/fake-blossom-cert
 #   SSL_CERT_FILE=/tmp/fake-blossom-cert/cert.pem pwsh -Command "Invoke-Pester ./tests"
 # Without that, the tests against the stand-in are skipped there. With
-# FARMKIT_REQUIRE_STAND_IN set (as in CI) a skip is a failure.
+# FARMKIT_REQUIRE_STAND_IN set a skip is a failure.
 
 BeforeAll {
     Import-Module (Join-Path $PSScriptRoot '..\lib\FarmKit.psm1') -Force -DisableNameChecking

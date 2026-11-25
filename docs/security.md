@@ -417,8 +417,10 @@ leaked.
   identity that macOS requires of every program, which says nothing about
   who made them). Their integrity rests on the SHA-256 values pinned in
   `versions.json`, which the installer and the status script check. The
-  provider is rebuilt by this repository's workflow from public source and
-  must reproduce the pinned value bit for bit. On macOS the same goes for
+  provider is built on a maintainer's computer from public source, with a
+  build that gives the same file bit for bit every time; the recipe
+  (`tools/build-provider.sh`) and the checksums are published, so anybody
+  can build it again and compare (`patch/README.md`). On macOS the same goes for
   Node.js, MongoDB and cloudflared, which the installer downloads from their
   publishers and checks against pinned SHA-256 values; a file fetched by the
   installer carries no "quarantine" mark, so Gatekeeper is not asked about
@@ -441,7 +443,9 @@ leaked.
   or of another version, GADS installs it at start (`provider/provider.go`).
   Appium is off by default for these reasons; add it only if you use it.
 * **Updates are manual.** Nothing here updates itself: you decide when to move
-  to a newer kit. Watch this repository's releases.
+  to a newer kit. The `update` script with `-Check` / `--check` says whether
+  one is released; "A newer kit" in section 9 says what a fetched kit is
+  checked against, and whom you trust when you take it.
 
 ## 9. Pairing with Blossom
 
@@ -455,10 +459,10 @@ says what is sent, what each party can do, and what can go wrong.
 1. An admin of your workspace opens *Connect a computer* in Blossom. Blossom
    makes a **pairing code** and shows a command that contains it, together
    with Blossom's own https address.
-2. The command downloads a small bootstrap file from a release of this
-   repository and compares its SHA-256 with the value in the command; the
-   bootstrap file checks the kit it downloads the same way (below, "The
-   command").
+2. The command downloads a small bootstrap file from this repository, at
+   one exact commit, and compares its SHA-256 with the value in the command;
+   the bootstrap file downloads the kit of the same commit and checks every
+   file of it (below, "The command").
 3. At its start the installer makes a random **farm token** on the farm
    computer, stores it in the protected farm folder, and sends Blossom the
    pairing code, the token, the computer's name, its system and the kit
@@ -608,32 +612,160 @@ says what is sent, what each party can do, and what can go wrong.
 
 ### The command
 
-The command Blossom shows does not pipe a download into a shell. It:
+The command Blossom shows does not pipe a download into a shell. It carries
+four things: the address of your Blossom, the pairing code, a **commit** of
+this repository (40 digits and letters, the exact state of the kit that is
+released), and the **SHA-256 of the bootstrap file** of that commit. It:
 
-1. downloads `bootstrap.ps1` (Windows) or `bootstrap.sh` (macOS) from a
-   named release of this repository into a file;
+1. downloads `bootstrap.ps1` (Windows) or `bootstrap.sh` (macOS) into a
+   file, from `raw.githubusercontent.com`, by that commit. An address that
+   names a commit always gives the same file; an address that names a
+   branch would give whatever the branch holds that day, and is not used;
 2. computes the file's SHA-256 and compares it with the value written in the
-   command itself. Blossom's maintainers copy that value from the kit release
-   into Blossom when they adopt a release, so it does not come from the same
-   place as the file;
-3. runs the file only if the two are equal.
+   command itself;
+3. runs the file only if the two are equal, and hands it the commit.
 
-The bootstrap file carries the SHA-256 of the release's `SHA256SUMS`, and
-`SHA256SUMS` carries the SHA-256 of the kit archive. So each download is
-checked against a value that was fixed before it: the command pins the
-bootstrap file, the bootstrap file pins the list, the list pins the kit. A
-file that fails is deleted; nothing of it is unpacked or run. The kit then
-checks every program it downloads against `versions.json`, as before.
+The bootstrap file then fetches the kit:
 
-The kit is unpacked to `C:\blossom-farm-kit` or `/opt/blossom-farm-kit`,
-writable by Administrators or root only: these scripts run with full rights
-later, so nobody else may change them. A kit you download and unpack by hand
-ends up protected in the same way: the installer and every script check the
-kit folder before they do anything else (section 6).
+4. It downloads the archive GitHub makes of the repository at that same
+   commit (`github.com/…/archive/<commit>.zip` on Windows, `.tar.gz` on
+   macOS). GitHub makes these archives when they are asked for and does not
+   promise that the same commit gives the same bytes every time, so the
+   archive has **no pinned checksum**. What is inside it has.
+5. Before unpacking it reads the list of what the archive holds: every entry
+   must lie inside the one folder that belongs to the commit, and on macOS
+   every entry must be a plain file or a folder (on Windows the script
+   writes each file itself, to a path it has checked). Then it unpacks into
+   a new folder that only Administrators or root can change.
+6. The kit holds `MANIFEST.sha256`: one line per file with its SHA-256. The
+   bootstrap file carries the SHA-256 of that list. It compares the list
+   with that value, then every unpacked file with the list. A file that is
+   changed, a file that is missing, a file the list does not name: each one
+   stops everything, the folder is deleted, and nothing was run.
+7. Only then is the kit moved to `C:\blossom-farm-kit` or
+   `/opt/blossom-farm-kit` and its installer started.
 
-What this chain does not do: it does not prove that the release itself is
-good. That rests on this repository, as it does for a kit you download by
-hand. Read the scripts; they are plain text.
+So each step is checked against a value that was fixed before it: **the
+command pins the bootstrap file; the bootstrap file pins the list; the list
+pins every file of the kit.** The commit in the command says *where* to
+fetch; it is the checksums that say *what* must arrive. If the archive of
+another commit were served, complete and with its own correct list, it
+would fail at step 6, because its list is not the one the bootstrap file
+carries. The kit then checks every program it downloads against
+`versions.json`, as before.
+
+Four files cannot be on the list: the list itself; the two bootstrap files,
+because they contain the list's checksum (each is pinned by its own SHA-256
+in the command instead); and `pairing.json`, which is written after the
+commit it names. The bootstrap file removes the two bootstrap files and
+`pairing.json` from the kit it installs, so that nothing stays in the kit
+folder that was not checked.
+
+`-VerifyOnly` / `--verify-only` after the bootstrap file's name does steps 4
+to 6 in a temporary folder, says what it found and stops: nothing is
+installed and no administrator rights are needed.
+
+The kit folder is writable by Administrators or root only: these scripts run
+with full rights later, so nobody else may change them. A kit you download
+and unpack by hand ends up protected in the same way: the installer and
+every script check the kit folder before they do anything else (section 6).
+
+### Where the values in the command come from, and whom you trust
+
+A release of the kit is a commit on the branch `main` of this repository.
+Next to it, `main` carries a small file, `pairing.json`, which names that
+commit and the SHA-256 of its two bootstrap files. Blossom's **server**
+reads that file from GitHub from time to time, keeps it, and builds the
+command from it. Your browser never fetches it, and the farm computer never
+asks GitHub "which kit is current": it is told by the command, and checks.
+
+What that protects against:
+
+* **A download that is changed on the way to the farm computer**, or served
+  wrongly: the bootstrap file would not have the SHA-256 in the command, or
+  a file of the kit would not have the SHA-256 in the list. Nothing runs.
+* **A repository that is changed after Blossom read `pairing.json`**: the
+  command names a commit, and a commit cannot be changed. If the commit were
+  removed from GitHub the download would fail; it could not become
+  something else.
+* **A download that is cut short**: the archive does not open, or a file is
+  missing from it. Nothing runs.
+
+What it does not protect against, said plainly:
+
+* **Whoever can write to the branch `main` of this repository decides what a
+  release is.** That is the owner of the repository (and GitHub, which
+  hosts it). If that account were taken over, the attacker could put a
+  changed kit on `main` together with a `pairing.json` that names it, and
+  Blossom would show a command for it. The checks above would all pass,
+  because they compare with values that come from the same repository. No
+  checksum can prove that the people who publish are the people you think.
+  This is the same trust as for a kit you download by hand, and for any
+  program you install from its publisher.
+* The checks prove that you got the kit that was published. They do not
+  prove that the kit is good. Read the scripts; they are plain text.
+
+### A kit downloaded by hand
+
+"Code → Download ZIP" on GitHub gives the kit as it is on `main` that day,
+protected by the https connection to GitHub and by nothing else: there is no
+command that carries a checksum for it. `MANIFEST.sha256` is in the folder,
+and `shasum -a 256 -c MANIFEST.sha256` (macOS, inside the folder) compares
+the files with it, which finds a damaged download; it proves nothing about
+where the folder came from, since the list arrived with the files.
+
+### A newer kit (`update -Check`, `update -Latest`)
+
+`scripts/update.ps1 -Latest` and `scripts/update.sh --latest` fetch the
+released kit and update the farm with it. They read two files from the
+branch `main` of this repository, over https: `versions.json` (which kit
+version `main` holds) and `pairing.json` (which commit is that release, and
+the SHA-256 of that commit's `MANIFEST.sha256`). Then they download the
+archive of exactly that commit and check it as the bootstrap file does:
+the list against the announced SHA-256, every file against the list.
+
+Before the new kit replaces the one on the disk, the **old** kit applies
+three rules to it, whoever published it:
+
+1. **The version goes up.** A kit with the same or a lower version is
+   refused, so nobody can use this path to put an old kit back.
+2. **A program keeps its checksum as long as it keeps its version.** If the
+   new kit names the provider (or the hub) by the version the installed kit
+   names, it must pin the same SHA-256 for it, for every system. A different
+   file under the same version is refused. A changed program has to come
+   with a new version number, and the update prints the old and the new
+   versions before it replaces anything.
+3. **Every download address is https.**
+
+Then the new kit downloads its programs and checks each against its own
+`versions.json`, as every kit does.
+
+What this protects against: a download changed on the way, a download cut
+short, a kit put back to an older one, and a program silently exchanged
+under a version you already run. What it does not: as above, **whoever can
+write to `main` can publish a new kit with a new version**, with other
+scripts and other programs in it, and `-Latest` would take it. The rules
+make such a change visible (a new kit version, a new program version); they
+cannot make it impossible. If you want to look before you take a kit, use
+`-Check` / `--check`, read what changed in the repository between the two
+commits, and run `-Latest` afterwards; or download the kit by hand and run
+its `update` script without an option. Nothing updates by itself.
+
+### The published provider programs
+
+The patched provider is not built by a build service. A maintainer builds
+the three programs on their own computer with `tools/build-provider.sh` and
+puts them on the branch `dist` of this repository. Two things stand in for
+a build service you could inspect:
+
+* `versions.json` names each program by the address of one exact commit of
+  `dist` and by its SHA-256. The installer downloads from that address and
+  checks the SHA-256; a file with another checksum is deleted.
+* The build gives the same files bit for bit every time. The recipe, the
+  patch, the pinned upstream commit and the Go version are in this
+  repository, and the checksums are published next to the programs. Anybody
+  can run the build and compare (`patch/README.md`). You do not have to
+  believe the maintainer's computer; you can check its result.
 
 ## 10. Reporting a problem
 

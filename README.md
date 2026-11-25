@@ -115,12 +115,14 @@ works for a normal user.
 What the command does before anything is installed
 ([`docs/security.md`](docs/security.md), section 9, has the details):
 
-1. It downloads one small file, `bootstrap.ps1` or `bootstrap.sh`, from a
-   release of this repository, and compares its SHA-256 with the value that
-   is written in the command. If they differ it stops and runs nothing.
-2. That file downloads the kit of the same release and checks it against the
-   release's `SHA256SUMS`, whose own SHA-256 the file carries.
-3. The kit is unpacked to `C:\blossom-farm-kit` (Windows) or
+1. It downloads one small file, `bootstrap.ps1` or `bootstrap.sh`, from this
+   repository at one exact commit, and compares its SHA-256 with the value
+   that is written in the command. If they differ it stops and runs nothing.
+2. That file downloads the kit at the same commit, as the archive GitHub
+   makes of it, and checks every file in it against the kit's list of
+   checksums (`MANIFEST.sha256`), whose own SHA-256 the file carries. One
+   file that is changed, missing or too many, and it stops and runs nothing.
+3. The kit is put into `C:\blossom-farm-kit` (Windows) or
    `/opt/blossom-farm-kit` (macOS), and its installer starts, with the
    address of your Blossom and the pairing code.
 
@@ -141,7 +143,7 @@ What the installer does, in order (it prints each step):
 | | On both, when started with a pairing code: tells Blossom about this computer (its name, its system, the kit version; no address and no secret yet). Blossom shows "Computer connected". A code that is wrong, used or expired is reported here, and the installation continues without pairing. | |
 | 3 Programs | Installs, with `winget` and at pinned versions: NSSM, MongoDB, Node.js, FFmpeg, cloudflared. Checks for Apple's USB support (iTunes from Apple's installer, see `docs/phones.md`). | Downloads Node.js, MongoDB and cloudflared from their publishers at pinned versions into `/opt/farm/bin` and checks the SHA-256 of each. Installs FFmpeg (and OpenSSL on Apple Silicon) with Homebrew. Apple's USB support is part of macOS. |
 | | On both: programs that are already installed are kept as they are. | |
-| 4 GADS | On both: downloads the GADS hub from its publisher's release and the patched provider from this repository's release, and checks the SHA-256 of both against `versions.json`. A file with a wrong checksum is deleted, not used. | |
+| 4 GADS | On both: downloads the GADS hub from its publisher's release and the patched provider from this repository (its branch `dist`, at the commit `versions.json` names), and checks the SHA-256 of both against `versions.json`. A file with a wrong checksum is deleted, not used. | |
 | 5 MongoDB | On both: starts it and checks that it listens on this computer only. | On macOS it is the kit's own MongoDB, with its data in `/opt/farm/data`. |
 | 6 Hub + password | On both: starts the hub (on this computer only). GADS creates its administrator `admin` with a default password that anybody can look up; **the installer makes you replace it before anything is reachable from outside.** You choose it (14+ characters), typing is hidden. | |
 | 7 Users + provider | On both: creates the hub user `blossom` (random password, for Blossom CRM), the internal user `farm-keepalive`, and the provider record (`Provider1` unless you name another). | |
@@ -219,12 +221,14 @@ A new command from the same workspace needs no question.
 
 The kit also works without pairing:
 
-1. On the farm computer, download the kit from
-   <https://github.com/fyhcrew-art/blossom-farm-kit/releases/latest>: the file
-   `blossom-farm-kit-<version>.zip` of the release whose name starts with
-   `kit-v`. (Releases named `GADS-drag …` on the same page are a program the
-   installer fetches by itself, not the kit.) Its SHA-256 is in the release's
-   `SHA256SUMS`. Where to unpack it:
+1. On the farm computer, download the kit: open
+   <https://github.com/fyhcrew-art/blossom-farm-kit>, press the green
+   **Code** button and choose **Download ZIP** (the direct address is
+   <https://github.com/fyhcrew-art/blossom-farm-kit/archive/refs/heads/main.zip>).
+   The archive holds one folder, `blossom-farm-kit-main`; rename it to
+   `blossom-farm-kit`. This download is protected by the https connection to
+   GitHub and by nothing else; the command from Blossom checks more
+   (`docs/security.md`, section 9). Where to put the folder:
    * *Windows:* to `C:\blossom-farm-kit`, directly on the drive. The scripts
      run as Administrator, so the installer locks this folder
      (Administrators and SYSTEM may change it, others may read it), and it
@@ -312,7 +316,7 @@ Options are written `-Logs` on Windows and `--logs` on macOS.
 | `status` | The pairing with Blossom, services, ports, the firewall, program checksums, disk. With `-Logs` / `--logs` it adds the last lines of every log with session tokens and your host names masked: copy **this output** when you ask for help, never a log file itself (`docs/security.md`, section 4). Changes nothing. |
 | `self-test` | The connection test against the public addresses. It asks for the password of one hub user. On a paired computer that is the hub administrator `admin`, whose password you chose: the password of `blossom` went to Blossom and nobody else has it. On a computer that is not paired it is `blossom`, with the password the installer showed. `-HubUser <name>` / `--hub-user <name>` names another. |
 | `rotate-secrets` | New restart secret (`-RestartSecret` / `--restart-secret`), new password for `blossom` (`-HubUser` / `--hub-user`), for `admin` (`-AdminPassword` / `--admin-password`), or all (`-All` / `--all`). Use it whenever somebody with Phone Farm access leaves. On a paired computer the new hub password and restart secret go to Blossom by themselves and are not shown; otherwise they are shown once, to be entered in Blossom. |
-| `update` | Moves the farm to the versions of a newer kit; `-Rollback` / `--rollback` goes back. On a paired computer it tells Blossom the new versions. |
+| `update` | Moves the farm to the versions of a newer kit: `-Check` / `--check` says whether one is released, `-Latest` / `--latest` fetches it, checks it and updates the farm; without an option it updates the farm with the kit it is in. `-Rollback` / `--rollback` goes back. On a paired computer it tells Blossom the new versions. |
 | `export-farm`, `import-farm` | Move the farm to another computer without changing anything in Blossom. An archive made on Windows can be imported on a Mac, and the other way round (see below). |
 | `uninstall` | Removes the services and the kit's firewall rules; with `-RemoveData` / `--remove-data` also the tunnel, the database and the farm folder. `-Unpair` / `--unpair` also gives up the pairing with Blossom (with `-RemoveData` the script asks). |
 
@@ -341,11 +345,29 @@ Computer?" once on the new computer.
 
 ## Updating
 
-* **GADS and the kit's services**: download the newer kit
-  (`blossom-farm-kit-<version>.zip` from the releases page; its SHA-256 is in
-  the release's `SHA256SUMS`), unpack it and run its `update` script. Only versions that a kit pins are installed: the hub
-  and the patched provider must match each other, and the patch is made
-  against a specific GADS version. Do not replace the GADS programs by hand.
+* **GADS and the kit's services**: in the kit folder
+  (`C:\blossom-farm-kit`, `/opt/blossom-farm-kit`) run the `update` script
+  with `-Check` / `--check` to see whether a newer kit is released, and with
+  `-Latest` / `--latest` to fetch it and update the farm with it:
+
+  ```
+  powershell -ExecutionPolicy Bypass -File .\scripts\update.ps1 -Latest     (Windows, in an Administrator PowerShell)
+  sudo bash scripts/update.sh --latest                                       (macOS, in Terminal)
+  ```
+
+  The script asks this repository which kit is released, downloads exactly
+  that commit from GitHub, checks every file against the kit's list of
+  checksums, and refuses a kit that is not newer than the one you have or
+  that names another file for a program version you already have
+  (`docs/security.md`, section 9, says what this protects against and what
+  it does not). The kit that was in the folder is kept next to it, as
+  `blossom-farm-kit.previous`. A kit you downloaded and unpacked yourself works too: run
+  its `update` script without an option. Only versions that a kit pins are
+  installed: the hub and the patched provider must match each other, and the
+  patch is made against a specific GADS version. Do not replace the GADS
+  programs by hand. If a kit changed the tunnel configuration or the
+  services, the README of that kit says so here, and the installer has to be
+  run once as well; this kit needs nothing of the kind.
 * **The other programs**: `update` leaves them alone.
   * *Windows* (MongoDB, Node.js, FFmpeg, cloudflared, installed with winget):
     stop the farm services first
@@ -379,7 +401,7 @@ follow the table):
 
 | What you see | Likely cause | What to do |
 |---|---|---|
-| The command from Blossom stops with "The downloaded file is not the one Blossom expects", or with a checksum that "is wrong" | The download was changed on the way, or the kit release was changed after Blossom was told about it | Nothing was run. Copy the command from Blossom again and retry on another network if you can. If it repeats, do not work around it: report it. |
+| The command from Blossom stops with "The downloaded file is not the one Blossom expects", or with a file or a list of files that "is not the one" expected, or that the kit "holds a file that its list does not name" | The download was changed on the way, or it is not the kit this command was made for | Nothing was run. Copy the command from Blossom again and retry on another network if you can. If it repeats, do not work around it: report it. |
 | "The pairing of this computer was not changed … stays paired with …" | The command belongs to another workspace (or another Blossom) than the one this computer is paired with, and nobody typed `replace` | Nothing was changed. If you meant to move the farm to that workspace, run the command again and type `replace` when asked, or add `-ReplacePairing` / `--replace-pairing` at its end. If the command was sent to you by somebody else, do not run it. |
 | "The kit folder … is not in a protected place" (Windows) | The kit was unpacked inside a user's folder (Downloads, Documents, Desktop) | Move the whole folder to `C:\blossom-farm-kit` and run the script from there. |
 | "Pairing with Blossom did not work: This pairing code has expired" (or "was already used", or "does not know this pairing code") | A code works once and for 30 minutes | The installation went on without pairing. Get a new command in Blossom and run it on the farm computer; it keeps what is set up. If the code "was already used" and it was not you, decline the unknown computer in Blossom. |
@@ -389,7 +411,7 @@ follow the table):
 | The status script: "nobody has confirmed this computer in Blossom yet" | Step 4 was not done | Open Phone Farm → Farm setup in Blossom and confirm (or decline) the computer. |
 | The status script or `rotate-secrets`: "Blossom no longer accepts this computer" | The computer was unpaired in Blossom, or its site was removed there | New values are shown for manual entry. To pair again, get a new command in Blossom. |
 | The farm folder "already exists and cannot be used" | A folder of that name exists, has content, and was not created and locked by this kit | Rename it (`Rename-Item C:\farm C:\farm-old`; `sudo mv /opt/farm /opt/farm-old`) and run the installer again. If you do not know where the folder comes from, have the computer checked. |
-| "… is not at its download address (HTTP 404)" | The file the kit pins was not published yet or was withdrawn | Use the newest kit from the releases page. If you have the exact provider program from elsewhere: `install.ps1 -ProviderExe <path>` / `install.sh --provider-binary <path>` (its SHA-256 must be the pinned one). |
+| "… is not at its download address (HTTP 404)" | The file the kit pins was not published yet or was withdrawn | Look for a newer kit (`update.ps1 -Check`, `update.sh --check`) and use that. If you have the exact provider program from elsewhere: `install.ps1 -ProviderExe <path>` / `install.sh --provider-binary <path>` (its SHA-256 must be the pinned one). |
 | "…its SHA-256 is wrong … The file was deleted" | Damaged or altered download | Run again. If it repeats, do not work around it: report it. |
 | "The GADS hub does not start" | Port 10000 in use, or MongoDB down | The hub log (`hub.log` in the logs folder); the status script. |
 | Hub administrator password refused five times | Wrong password | See "Lost hub administrator password" below. |
@@ -491,17 +513,19 @@ each.
 | Path | |
 |---|---|
 | `install.ps1`, `install.sh` | the installer, for Windows and for macOS |
-| `bootstrap.ps1`, `bootstrap.sh` | the template of the small file the command from Blossom downloads first; a kit release carries it with the release's checksum written in |
+| `bootstrap.ps1`, `bootstrap.sh` | the small file the command from Blossom downloads first; it fetches the kit and checks every file of it |
+| `MANIFEST.sha256` | the SHA-256 of every file of the kit; the bootstrap files carry the SHA-256 of this list |
+| `pairing.json` | which commit is the released kit, and the SHA-256 of its bootstrap files: what Blossom CRM puts into the command it shows, and what the update script reads |
 | `versions.json` | every pinned version and checksum, for both systems |
 | `lib/` | functions shared by the scripts: `FarmKit.psm1` (Windows), `farmkit.sh` and `json.awk` (macOS) |
 | `services/` | `restart-server.js` and `provider-gate.js` (both systems); `keep-available.ps1` (Windows); `keep-available.sh`, `farm-run.sh`, `farm-firewall.sh` (macOS) |
 | `launchd/` | macOS: the service descriptions the installer fills in, and the packet filter rule |
 | `scripts/` | status, self-test, update, rotate-secrets, export, import, uninstall: each as `.ps1` and as `.sh` |
 | `patch/` | the provider patch and what it does |
-| `.github/` | `workflows/build-gads.yml` builds the patched provider for Windows and macOS and publishes it with its source and licence files (`scripts/make-source-archive.sh`); `workflows/release-kit.yml` makes a kit release with its archive, checksums and bootstrap files (`scripts/make-kit-release.sh`); `workflows/ci.yml` tests the kit |
+| `tools/` | for maintainers, run on their own computer: `build-provider.sh` builds the patched provider for Windows and macOS with its source and licence files; `publish-dist.sh` puts them on the branch `dist`; `make-manifest.sh` writes `MANIFEST.sha256`; `check.sh` runs every test; `release.sh` makes a kit release |
 | `LICENSE`, `LICENSE-AGPL-3.0`, `NOTICE` | the licences, and what applies to which part |
 | `docs/` | [`phones.md`](docs/phones.md), [`network.md`](docs/network.md), [`security.md`](docs/security.md), [`RELEASING.md`](docs/RELEASING.md) |
-| `tests/` | tests of the services (Node), of the PowerShell functions (Pester) and of the shell functions and scripts (bash); `fake-blossom.js` is a stand-in for Blossom's pairing API that the pairing and bootstrap tests of both systems run against |
+| `tests/` | tests of the services (Node), of the PowerShell functions (Pester) and of the shell functions and scripts (bash); `fake-blossom.js` is a stand-in for Blossom's pairing API and for the places a kit is fetched from, which the pairing, bootstrap and update tests of both systems run against |
 
 ## Licences, in short
 
@@ -511,8 +535,8 @@ each.
   ([`LICENSE-AGPL-3.0`](LICENSE-AGPL-3.0) is the text).
 * GADS is not part of this repository. Its source is AGPL-3.0; its web
   interface (`hub-ui`) is proprietary. The installer downloads the hub from
-  the GADS publisher's own release page, and the provider from this
-  repository's release, where it is published together with its source
+  the GADS publisher's own release page, and the provider from the branch
+  `dist` of this repository, where it is published together with its source
   archive, its build instructions and the licence notices of the libraries
   compiled into it.
 * Details and the third-party programs the installer fetches:

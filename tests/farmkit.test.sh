@@ -338,8 +338,8 @@ for arch in arm64 x86_64; do
         ok test_sha256_text "$(json_get "$v" "macos.$arch.$key")"
     done
     matches "$(json_get "$v" "macos.$arch.hub.zipUrl")" '^https://github\.com/shamanec/GADS/releases/download/' 'the hub comes from its publisher'
-    matches "$(json_get "$v" "macos.$arch.provider.url")" '^https://github\.com/fyhcrew-art/blossom-farm-kit/releases/download/' 'the provider comes from this repository'
-    matches "$(json_get "$v" "macos.$arch.provider.url")" "$(json_get "$v" gadsDrag.releaseTag)" 'and from the pinned release'
+    matches "$(json_get "$v" "macos.$arch.provider.url")" "^https://raw\\.githubusercontent\\.com/fyhcrew-art/blossom-farm-kit/[0-9a-f]{40}/$(json_get "$v" gadsDrag.releaseTag)/GADS-drag-darwin-(arm64|amd64)\$" 'the provider comes from this repository, by commit, from the folder of its version'
+    is "$(json_get "$v" "macos.$arch.provider.url" | cut -d/ -f6)" "$(json_get "$v" gadsDrag.url | cut -d/ -f6)" 'and from the same commit as the Windows one'
     matches "$(json_get "$v" "macos.$arch.node.url")" '^https://nodejs\.org/dist/v' 'Node.js comes from nodejs.org'
     matches "$(json_get "$v" "macos.$arch.mongodb.url")" '^https://fastdl\.mongodb\.org/osx/' 'MongoDB comes from mongodb.org'
     matches "$(json_get "$v" "macos.$arch.mongodbTools.url")" '^https://fastdl\.mongodb\.org/tools/db/' 'the database tools come from mongodb.org'
@@ -527,7 +527,7 @@ not_matches "$src" 'curl[^|]*(-u |--user |-d |--data|-H )' 'no credential is eve
 
 # ---------------------------------------------------------------------------
 describe 'the scripts'
-for f in "$KIT_ROOT"/install.sh "$KIT_ROOT"/bootstrap.sh "$KIT_ROOT"/lib/farmkit.sh "$KIT_ROOT"/scripts/*.sh "$KIT_ROOT"/services/*.sh "$KIT_ROOT"/tests/*.sh; do
+for f in "$KIT_ROOT"/install.sh "$KIT_ROOT"/bootstrap.sh "$KIT_ROOT"/lib/farmkit.sh "$KIT_ROOT"/scripts/*.sh "$KIT_ROOT"/services/*.sh "$KIT_ROOT"/tests/*.sh "$KIT_ROOT"/tools/*.sh; do
     ok bash -n "$f"
     if LC_ALL=C grep -q '[^[:print:][:space:]]' "$f"; then fail "$f contains non-ASCII characters"; else pass; fi
     # What the bash 3.2 of macOS does not have.

@@ -7,7 +7,7 @@
 #     plutil -lint /tmp/rendered/*.plist
 #     sudo pfctl -n -f /tmp/rendered/pf.rules
 #
-# Used by .github/workflows/ci.yml. Changes nothing on the computer.
+# Used by tools/check.sh. Changes nothing on the computer.
 
 set -u
 KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

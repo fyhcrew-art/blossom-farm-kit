@@ -45,22 +45,25 @@ a) The hub. The installer downloads the publisher's own release file
    (of v6.0.0: gads-win.zip with install.ps1; gads-mac-arm64.zip or
    gads-mac-amd64.zip with install.sh) directly from the publisher's GitHub
    release page to the farm computer, and verifies its SHA-256. This repository and its
-   releases do not contain, mirror or modify that file. The person running a
+   branches do not contain, mirror or modify that file. The person running a
    farm uses it on their own computer for their own business; whether that
    use fits the proprietary licence of the embedded hub-ui is for that person
    to judge from the licence text quoted above.
 
-b) The provider. The release assets of this repository include the patched
+b) The provider. The branch "dist" of this repository holds the patched
    provider as three programs built from the same source: GADS-drag.exe
-   (Windows x64), GADS-drag-darwin-arm64 and GADS-drag-darwin-amd64 (macOS).
-   They are built by .github/workflows/build-gads.yml from the AGPL-3.0
-   source of GADS at the pinned commit plus patch/provider-drag.patch. What
-   follows is true of each of them.
+   (Windows x64), GADS-drag-darwin-arm64 and GADS-drag-darwin-amd64 (macOS),
+   in one folder per provider version. They are built on a maintainer's
+   computer with tools/build-provider.sh, from the AGPL-3.0 source of GADS at
+   the pinned commit plus patch/provider-drag.patch; the build is
+   reproducible, and the folder carries the checksums and the build
+   instructions, so that anybody can build the programs again and compare.
+   What follows is true of each of them.
    - It is built WITHOUT the "ui" build tag, so it contains no hub-ui code.
      (In GADS, embed_ui.go embeds hub-ui/build only under that tag;
      no_embed_ui.go is used otherwise.)
-   - It is distributed under AGPL-3.0. The same release carries, next to
-     the binary:
+   - It is distributed under AGPL-3.0. The same folder of the branch
+     carries, next to the binary:
        LICENSE-AGPL-3.0.txt      the licence;
        GADS-drag-<version>-source.tar.gz
                                  the patched GADS tree, the generated docs
@@ -69,6 +72,9 @@ b) The provider. The release assets of this repository include the patched
                                  BUILD.md (Go version, tools and the exact
                                  build command) and MODIFICATIONS.md (what
                                  was changed, by whom, and the date);
+       BUILD.md, MODIFICATIONS.md
+                                 the same two files, for reading without
+                                 unpacking the archive;
        THIRD-PARTY-NOTICES.txt   the licence, notice and copyright files of
                                  the Go modules that are compiled into the
                                  three programs (MIT, BSD, Apache-2.0 and
@@ -95,8 +101,8 @@ b) The provider. The release assets of this repository include the patched
      them, without their source.
    - Publishing these programs therefore makes this repository a distributor
      of those embedded files, as upstream's own releases are. That is a
-     decision for the people who publish, and the build workflow does not
-     take it for them: it publishes nothing until versions.json says
+     decision for the people who publish, and the tools do not take it for
+     them: tools/publish-dist.sh publishes nothing until versions.json says
      "redistributeEmbeddedResources": true (docs/RELEASING.md). If the file
      is ever withdrawn, a farm that has it keeps working, and the install and
      update scripts accept a local copy (-ProviderExe on Windows,
@@ -108,9 +114,9 @@ c) AGPL-3.0, section 13 (remote network interaction). Section 13 asks that
    a modified version which people use over a network must itself offer
    those people its source. The patch does that in the program: every answer
    of the modified provider carries the HTTP header
-       X-Source-Code: https://github.com/fyhcrew-art/blossom-farm-kit/releases
-   (provider/router/handler.go in the patch), and the releases there carry
-   the source archive described under b). The provider gate passes the header
+       X-Source-Code: https://github.com/fyhcrew-art/blossom-farm-kit/tree/dist
+   (provider/router/handler.go in the patch), and each folder of that branch
+   carries the source archive described under b). The provider gate passes the header
    on unchanged. A farm operator who runs the provider as this kit installs
    it has nothing more to do. An operator who changes the provider further
    and lets others use it over a network must publish that source and point

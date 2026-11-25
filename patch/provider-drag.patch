@@ -216,10 +216,10 @@ index fcf97e7..a3f226c 100644
  
 +// sourceOffer is sent with every answer of this modified provider, so that
 +// whoever uses it over a network is told where to get its complete source
-+// (GNU AGPL v3.0, section 13). Each release there carries the source archive
-+// of the binary published with it. If you change this program further and
++// (GNU AGPL v3.0, section 13). Each folder there carries the source archive
++// of the programs published in it. If you change this program further and
 +// let others use it over a network, point this at YOUR source.
-+const sourceOffer = "https://github.com/fyhcrew-art/blossom-farm-kit/releases"
++const sourceOffer = "https://github.com/fyhcrew-art/blossom-farm-kit/tree/dist"
 +
  func HandleRequests() *gin.Engine {
  	r := gin.Default()

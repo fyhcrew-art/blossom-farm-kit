@@ -1,17 +1,28 @@
 #!/bin/bash
-# Blossom farm kit - moves an installed farm to the versions of THIS kit folder.
+# Blossom farm kit - moves an installed farm to the versions of THIS kit folder,
+# or first fetches the newest kit and then does that.
 #
-# Download the newer kit, unpack it, and from inside the new folder run:
+#     sudo bash scripts/update.sh --check     Is there a newer kit? Changes nothing.
+#     sudo bash scripts/update.sh --latest    Fetch the newest kit, check it, put it
+#                                             in place of this one, and update the farm with it.
+#     sudo bash scripts/update.sh             Update the farm with the kit this script is in
+#                                             (for a kit you downloaded and unpacked yourself).
 #
-#     sudo bash scripts/update.sh
-#
-# It downloads the GADS programs pinned in this kit's versions.json (and
-# verifies their SHA-256), stops the farm for about a minute, replaces the
-# programs and the service scripts, and starts everything again. The
+# The update downloads the GADS programs pinned in the kit's versions.json
+# (and verifies their SHA-256), stops the farm for about a minute, replaces
+# the programs and the service scripts, and starts everything again. The
 # database, the secrets, the tunnel and the phones' pairings are not touched.
 # The previous programs are kept next to the new ones; to go back:
 #
 #     sudo bash scripts/update.sh --rollback
+#
+# --latest asks the kit repository's main branch which kit is released
+# (versions.json and pairing.json there), downloads that commit's archive
+# from GitHub, checks every file against the commit's MANIFEST.sha256, and
+# refuses a kit that is not newer or that pins another file for a program
+# version this kit already pins. The kit that was here is kept as
+# /opt/blossom-farm-kit.previous. What this does and does not protect
+# against is in docs/security.md, section 9.
 #
 # Node.js, MongoDB, cloudflared and FFmpeg are not changed by this script; see
 # README, section "Updating".
@@ -26,14 +37,16 @@ KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SCRIPT_ARGS=("$@")
 trap farm_http_cleanup EXIT
 
-ROLLBACK=0; PROVIDER_BINARY=''
+ROLLBACK=0; PROVIDER_BINARY=''; CHECK=0; LATEST=0; PASS_ON=()
 while [ $# -gt 0 ]; do
     case $1 in
         --rollback) ROLLBACK=1 ;;
-        --provider-binary=*) PROVIDER_BINARY=${1#*=} ;;
-        --provider-binary) [ $# -ge 2 ] || stop_farm '--provider-binary needs a path.' 'Give the full path of the GADS-drag program.'; PROVIDER_BINARY=$2; shift ;;
+        --check) CHECK=1 ;;
+        --latest) LATEST=1 ;;
+        --provider-binary=*) PROVIDER_BINARY=${1#*=}; PASS_ON=(${PASS_ON[@]+"${PASS_ON[@]}"} "$1") ;;
+        --provider-binary) [ $# -ge 2 ] || stop_farm '--provider-binary needs a path.' 'Give the full path of the GADS-drag program.'; PROVIDER_BINARY=$2; PASS_ON=(${PASS_ON[@]+"${PASS_ON[@]}"} "$1" "$2"); shift ;;
         -h | --help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
-        *) stop_farm "Unknown option: $1" 'Use --rollback, --provider-binary PATH, or no option.' ;;
+        *) stop_farm "Unknown option: $1" 'Use --check, --latest, --rollback, --provider-binary PATH, or no option.' ;;
     esac
     shift
 done
@@ -62,6 +75,71 @@ start_farm_programs() {
 
 assert_macos_root
 use_protected_kit_folder "scripts/update.sh" ${SCRIPT_ARGS[@]+"${SCRIPT_ARGS[@]}"}
+if [ $((CHECK + LATEST + ROLLBACK)) -gt 1 ]; then stop_farm 'Use one of --check, --latest and --rollback at a time.' 'Run the script again with one of them.'; fi
+
+if [ "$CHECK" = 1 ] || [ "$LATEST" = 1 ]; then
+    read_kit_versions "$KIT_ROOT"
+    this_kit=$(kit_version kit)
+    write_step 'Looking for a newer kit'
+    _fk_http_dir
+    if ! get_released_kit "$FK_HTTP_DIR"; then
+        stop_farm "$RELEASED_KIT_ERROR" 'Nothing was changed. Check the internet connection of this Mac and run the script again.'
+    fi
+    write_note "This kit:          $this_kit"
+    write_note "The newest kit:    $RELEASED_KIT_VERSION"
+    if [ "$RELEASED_KIT_VERSION" = "$this_kit" ] || ! version_at_least "$RELEASED_KIT_VERSION" "$this_kit"; then
+        write_ok 'This kit is the newest one. Nothing to fetch.'
+        [ "$LATEST" = 1 ] && write_note 'To bring the farm to the versions of this kit, run   sudo bash scripts/update.sh   without an option.'
+        exit 0
+    fi
+    if [ -z "$RELEASED_KIT_COMMIT" ]; then
+        write_note "Kit $RELEASED_KIT_VERSION is being prepared and is not released yet. Nothing to fetch; look again later."
+        exit 0
+    fi
+    if [ "$CHECK" = 1 ]; then
+        write_ok "Kit $RELEASED_KIT_VERSION is available (commit $RELEASED_KIT_COMMIT)."
+        write_note 'To fetch it, check it and update the farm with it, run   sudo bash scripts/update.sh --latest'
+        exit 0
+    fi
+    get_farm_paths /opt/farm
+    read_farm_config
+    [ "$FARM_HAS_CONFIG" = 1 ] || stop_farm 'This Mac has no farm installation, so there is nothing to update.' 'Nothing was changed. To set up a farm, use the command from Blossom, or download the kit and run install.sh (README).'
+    write_step "Fetching kit $RELEASED_KIT_VERSION (the farm keeps running)"
+    stage=$(umask 077 && mktemp -d "$(dirname "$FARM_KIT_HOME")/.blossom-kit.XXXXXX" 2> /dev/null) || stop_farm "Could not write to $(dirname "$FARM_KIT_HOME")." 'Check the free space on the disk.'
+    if ! fetch_kit_commit "$RELEASED_KIT_COMMIT" "$RELEASED_KIT_MANIFEST" "$stage"; then
+        rm -rf "$stage"
+        stop_farm "$FETCHED_KIT_ERROR" 'Nothing was changed. Run the script again; if it repeats, do not work around it: report it on the kit repository.'
+    fi
+    problem=$(test_kit_update_rules "$KIT_VERSIONS" "$(cat "$stage/kit/versions.json" 2> /dev/null)")
+    if [ -z "$problem" ] && [ "$(json_file_get "$stage/kit/versions.json" kit)" != "$RELEASED_KIT_VERSION" ]; then
+        problem="It says it is kit $(json_file_get "$stage/kit/versions.json" kit), but the repository announced kit $RELEASED_KIT_VERSION."
+    fi
+    if [ -z "$problem" ] && [ ! -f "$stage/kit/scripts/update.sh" ]; then problem='It has no scripts/update.sh.'; fi
+    if [ -n "$problem" ]; then
+        rm -rf "$stage"
+        stop_farm "The kit that was fetched was refused. $problem" 'Nothing was changed. Do not work around it: report it on the kit repository.'
+    fi
+    write_ok "Kit $RELEASED_KIT_VERSION was downloaded and every file has the SHA-256 its list names."
+    if ! { chown -R 0:0 "$stage/kit" && chmod -R u=rwX,go=rX "$stage/kit"; }; then
+        rm -rf "$stage"
+        stop_farm 'Could not set the permissions of the new kit folder.' 'Nothing was changed. Run the script again.'
+    fi
+    rm -rf "$FARM_KIT_HOME.previous"
+    if ! mv "$FARM_KIT_HOME" "$FARM_KIT_HOME.previous"; then
+        rm -rf "$stage"
+        stop_farm "Could not put the kit that is in $FARM_KIT_HOME aside." 'Nothing was changed. Run the script again.'
+    fi
+    if ! mv "$stage/kit" "$FARM_KIT_HOME"; then
+        mv "$FARM_KIT_HOME.previous" "$FARM_KIT_HOME"
+        rm -rf "$stage"
+        stop_farm "Could not put the new kit into $FARM_KIT_HOME." 'The kit that was there is back. Run the script again.'
+    fi
+    rm -rf "$stage"
+    farm_http_cleanup
+    write_ok "The new kit is in $FARM_KIT_HOME (the one before it: $FARM_KIT_HOME.previous). The update continues with it."
+    cd "$FARM_KIT_HOME" || exit 1
+    exec /bin/bash "$FARM_KIT_HOME/scripts/update.sh" ${PASS_ON[@]+"${PASS_ON[@]}"}
+fi
 get_farm_arch
 get_farm_paths /opt/farm
 read_farm_config
@@ -167,5 +245,5 @@ if [ "$FARM_IS_PAIRED" = 1 ]; then
     if pair_send_computer; then write_ok "Blossom ($PAIR_ORIGIN) was told the versions this computer runs now."
     else write_note "Blossom could not be told the new versions ($APP_MESSAGE). Nothing depends on it; scripts/status.sh shows the pairing."; fi
 fi
-write_note 'If this kit changed the tunnel configuration or the services (see its release notes), run install.sh once as well.'
+write_note 'If this kit changed the tunnel configuration or the services (the README says so under "Updating"), run install.sh once as well.'
 exit 0

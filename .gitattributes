@@ -15,3 +15,7 @@ LICENSE-AGPL-3.0 text eol=lf
 *.awk     text eol=lf
 *.plist   text eol=lf
 *.template text eol=lf
+# The first file of the one-command setup is fetched by itself from
+# raw.githubusercontent.com and pinned by its SHA-256: the same bytes everywhere.
+bootstrap.ps1 text eol=lf
+*.sha256  text eol=lf

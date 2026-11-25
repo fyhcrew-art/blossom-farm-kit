@@ -1,27 +1,32 @@
 #!/usr/bin/env bash
 # Builds what is published next to the GADS-drag programs (GADS-drag.exe,
 # GADS-drag-darwin-arm64, GADS-drag-darwin-amd64):
-#   dist/THIRD-PARTY-NOTICES.txt       licence texts of the Go modules compiled into them
-#   dist/LICENSE-AGPL-3.0.txt          their licence (upstream's LICENSE file)
-#   dist/GADS-drag-<version>-source.tar.gz
+#   <out>/THIRD-PARTY-NOTICES.txt      licence texts of the Go modules compiled into them
+#   <out>/LICENSE-AGPL-3.0.txt         their licence (upstream's LICENSE file)
+#   <out>/BUILD.md, MODIFICATIONS.md   how they were built, what was changed
+#   <out>/GADS-drag-<version>-source.tar.gz
 #       the patched GADS tree + the generated docs package + the module sources
 #       (vendor/) + the patch + BUILD.md + MODIFICATIONS.md, WITHOUT Apple's
 #       developer disk image (resources/ios-ddi), which is listed with
 #       checksums and fetched from upstream by whoever rebuilds.
 #
-# Run from the folder that holds  kit/  gads/  dist/  after the build and its
-# tests (vendor/ must not exist while the programs are built: the published
-# ones are built in module mode). Used by .github/workflows/build-gads.yml.
+# Called by tools/build-provider.sh after the build and its tests (vendor/
+# must not exist while the programs are built: the published ones are built
+# in module mode), with these variables:
+#   KIT   the kit folder            SRC   the patched GADS tree (named "gads")
+#   DIST  the folder with the three programs; the files above are added to it
+#   VERSION UPSTREAM_COMMIT UPSTREAM_TAG GO_VERSION SWAG_VERSION   the pins
+#   BUILD_DATE   optional; the date written into MODIFICATIONS.md (default: today, UTC)
+# Needs GNU tar, xargs and find (Linux).
 set -euo pipefail
 
+: "${KIT:?}" "${SRC:?}" "${DIST:?}"
 : "${VERSION:?}" "${UPSTREAM_COMMIT:?}" "${UPSTREAM_TAG:?}" "${GO_VERSION:?}" "${SWAG_VERSION:?}"
-KIT=kit
-SRC=gads
-DIST=dist
+[ "$(basename "$SRC")" = gads ] || { echo 'SRC must be a folder named "gads".' >&2; exit 1; }
 PROGRAMS="GADS-drag.exe GADS-drag-darwin-arm64 GADS-drag-darwin-amd64"
 for PROGRAM in $PROGRAMS; do test -f "$DIST/$PROGRAM"; done
 test -f "$SRC/LICENSE"
-BUILD_DATE="$(date -u +%Y-%m-%d)"
+BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%d)}"
 
 # 1. The sources of every module the program is built from.
 (cd "$SRC" && go mod vendor)
@@ -77,7 +82,7 @@ MISSING=0
 } > "$NOTICES"
 echo "Third-party notices: $(echo "$MODULES" | wc -l) modules, $MISSING without a licence file."
 if [ "$MISSING" -gt 0 ]; then
-  echo "::warning::$MISSING module(s) have no licence file in their source; they are named in THIRD-PARTY-NOTICES.txt. Look at them before publishing."
+  echo "WARNING: $MISSING module(s) have no licence file in their source; they are named in THIRD-PARTY-NOTICES.txt. Look at them before publishing." >&2
 fi
 
 cp "$SRC/LICENSE" "$DIST/LICENSE-AGPL-3.0.txt"
@@ -141,7 +146,9 @@ TEXT
 cat > "$SRC/BUILD.md" <<TEXT
 # How the GADS-drag programs $VERSION were built
 
-On Linux x64, with Go $GO_VERSION, from this tree:
+On Linux x64, with Go $GO_VERSION, on a maintainer's computer, with the kit's
+\`tools/build-provider.sh\` (the commands below are what it runs). From this
+tree:
 
 1. Put Apple's developer disk image back (\`resources/ios-ddi/NOT-INCLUDED.txt\`
    says where to get the files and gives their checksums). The program embeds
@@ -159,8 +166,8 @@ build darwin  amd64 GADS-drag-darwin-amd64   # macOS, Intel
 No C compiler is involved (\`CGO_ENABLED=0\`), so the macOS programs are built
 on Linux as well. \`-mod=mod\` makes Go take the modules from the module cache
 (downloading them, checked against \`go.sum\`), which is how the published
-files were built; their SHA-256 values are in \`SHA256SUMS\` on the release and
-in the kit's \`versions.json\`. Without \`-mod=mod\` Go uses \`vendor/\` (no
+files were built; their SHA-256 values are in \`SHA256SUMS\` next to them
+(branch \`dist\` of the kit repository) and in the kit's \`versions.json\`. Without \`-mod=mod\` Go uses \`vendor/\` (no
 download needed); the programs are the same, but the files are not identical
 byte for byte, because source paths are recorded differently.
 
@@ -186,19 +193,20 @@ mkdir -p "$STAGE/gads/resources/ios-ddi"
 cp "$DIST/.ddi-not-included.txt" "$STAGE/gads/resources/ios-ddi/NOT-INCLUDED.txt"
 rm -f "$DIST/.ddi-not-included.txt"
 TAR_OPTS=(--sort=name --owner=0 --group=0 --numeric-owner --mtime='2020-01-01 00:00:00Z')
-tar "${TAR_OPTS[@]}" --exclude=.git --exclude='gads/resources/ios-ddi/*' -cf "$DIST/source.tar" gads
+tar "${TAR_OPTS[@]}" -C "$(dirname "$SRC")" --exclude=.git --exclude='gads/resources/ios-ddi/*' -cf "$DIST/source.tar" gads
 tar "${TAR_OPTS[@]}" -C "$STAGE" -rf "$DIST/source.tar" gads/resources/ios-ddi/NOT-INCLUDED.txt
 gzip -n -9 "$DIST/source.tar"
 mv "$DIST/source.tar.gz" "$DIST/GADS-drag-${VERSION}-source.tar.gz"
 rm -rf "$STAGE"
+cp "$SRC/BUILD.md" "$SRC/MODIFICATIONS.md" "$DIST/"
 
 # The archive must not carry Apple's image, and must carry what it promises.
 LIST="$(tar -tzf "$DIST/GADS-drag-${VERSION}-source.tar.gz")"
 LEFT="$(grep -E '^gads/resources/ios-ddi/.*[^/]$' <<< "$LIST" | grep -v 'NOT-INCLUDED.txt$' || true)"
 if [ -n "$LEFT" ]; then
-  echo "::error::The source archive still contains files of resources/ios-ddi."; exit 1
+  echo "ERROR: The source archive still contains files of resources/ios-ddi." >&2; exit 1
 fi
 for NEEDED in gads/LICENSE gads/MODIFICATIONS.md gads/BUILD.md gads/provider-drag.patch gads/THIRD-PARTY-NOTICES.txt gads/vendor/modules.txt gads/docs/docs.go gads/resources/ios-ddi/NOT-INCLUDED.txt gads/go.sum; do
-  grep -qx "$NEEDED" <<< "$LIST" || { echo "::error::The source archive lacks $NEEDED."; exit 1; }
+  grep -qx "$NEEDED" <<< "$LIST" || { echo "ERROR: The source archive lacks $NEEDED." >&2; exit 1; }
 done
 ls -l "$DIST"

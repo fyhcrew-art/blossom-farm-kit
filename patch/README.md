@@ -19,7 +19,8 @@ The patch changes two files:
 
 * `provider/router/control.go`: the three actions.
 * `provider/router/handler.go`: every answer of the provider carries the
-  header `X-Source-Code: https://github.com/fyhcrew-art/blossom-farm-kit/releases`.
+  header `X-Source-Code: https://github.com/fyhcrew-art/blossom-farm-kit/tree/dist`,
+  the branch where the programs are published with their source archive.
   This is the offer of source that the AGPL (section 13) asks a modified
   program to make to the people who use it over a network.
 
@@ -34,14 +35,17 @@ when, as the AGPL (section 5a) asks.
 * The kit builds it on **`v6.0.0`** (commit
   `2cf741ce93173a38c3e8ef4a57f8ecbdd03b13ca`), the version the reference farm
   runs and the version of the hub the installer downloads. `git apply --check`
-  passes on `v6.0.0` and on `v6.1.0` without offsets or fuzz; CI repeats the
-  check on every change (`.github/workflows/ci.yml`).
+  passes on `v6.0.0` and on `v6.1.0` without offsets or fuzz;
+  `bash tools/check.sh --upstream` repeats the check for the pinned commit.
 * It needs the GADS author's WebDriverAgent fork on the phones, as GADS itself
   does.
 
 ## How the published binary is built
 
-`.github/workflows/build-gads.yml` does this, and nothing else:
+There is no build service behind this repository. A maintainer runs
+`tools/build-provider.sh` on their own computer (Linux x64), and
+`tools/publish-dist.sh` puts the result on the branch `dist`
+(`docs/RELEASING.md`). The build script does this, and nothing else:
 
 ```sh
 git fetch --depth 1 https://github.com/shamanec/GADS.git 2cf741ce93173a38c3e8ef4a57f8ecbdd03b13ca
@@ -58,7 +62,7 @@ build darwin  amd64 GADS-drag-darwin-amd64    # macOS, Intel
 
 The three programs come from the same patched tree. GADS and the modules it
 uses need no C compiler on any of the three systems (`CGO_ENABLED=0`), so the
-macOS programs are built on Linux as well, by the same job, and are
+macOS programs are built on Linux as well, by the same script, and are
 reproducible in the same way.
 
 Differences from upstream's own release build
@@ -73,7 +77,7 @@ Differences from upstream's own release build
 * **The macOS programs are built on Linux, without cgo.** Upstream builds its
   macOS programs on a Mac, where Go links the Apple Silicon one with the
   system's C library through cgo; this build sets `CGO_ENABLED=0` for all
-  three targets, which is what lets one Linux job build and reproduce them.
+  three targets, which is what lets one Linux computer build and reproduce them.
   `docs/RELEASING.md` lists what is confirmed on a Mac before a kit release.
 * **`swag init` is needed**, exactly as in upstream's workflow: the hub
   package imports `GADS/docs`, which is generated and not committed. Upstream
@@ -82,22 +86,35 @@ Differences from upstream's own release build
   **reproducible**: the same inputs give the same file, bit for bit. The
   three SHA-256 values are pinned in `versions.json` (`gadsDrag.sha256`,
   `macos.arm64.provider.sha256`, `macos.x86_64.provider.sha256`), and the
-  workflow fails if what it built differs.
+  script fails if what it built differs.
 
-To check a published file yourself, run the commands above with Go 1.26.0
-on Linux and compare its `sha256sum` with `versions.json`.
+**To check a published file yourself**, you do not have to trust the
+computer it was built on. Either run the commands above with Go 1.26.0 on
+Linux, or simply
 
-After the build and its tests the workflow runs
-`.github/scripts/make-source-archive.sh`, which makes the files published
-next to the binary: the source archive (with `vendor/`, `BUILD.md` and
-`MODIFICATIONS.md`), `THIRD-PARTY-NOTICES.txt` and the AGPL text.
+```sh
+bash tools/build-provider.sh --out /tmp/gads-drag
+```
+
+in a checkout of this repository (it fetches upstream, lets Go download the
+pinned Go version, builds, and ends with "Reproduced the three pinned
+SHA-256 values" or names the file that differs). Then compare with what is
+published: `SHA256SUMS` in the folder of the version on the branch `dist`,
+and the files the addresses in `versions.json` serve.
+
+After the build and its tests the script runs
+`tools/make-source-archive.sh`, which makes the files published next to the
+binary: the source archive (with `vendor/`, `BUILD.md` and
+`MODIFICATIONS.md`), `THIRD-PARTY-NOTICES.txt`, the AGPL text, and
+`BUILD.md` and `MODIFICATIONS.md` once more as plain files.
 
 ## Licence
 
 The patch modifies files of GADS that are licensed under the GNU Affero
 General Public License v3.0, and is distributed under the same licence (text:
 `../LICENSE-AGPL-3.0`; details: `../NOTICE`). The binary built from it is
-published on the same release as `GADS-drag-<version>-source.tar.gz`: the
+published in the same folder of the branch `dist` as
+`GADS-drag-<version>-source.tar.gz`: the
 patched tree, the sources of the Go modules it is built from, the build
 instructions and a statement of what was modified. Apple's developer disk
 image, which the build embeds, is not in that archive; the archive says where

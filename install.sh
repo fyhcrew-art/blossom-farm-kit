@@ -367,7 +367,7 @@ read_kit_versions "$KIT_ROOT"
 MACOS_VERSION=$(sw_vers -productVersion 2> /dev/null)
 MIN_MACOS=$(kit_version "macos.$FARM_ARCH.minimumMacOS")
 if [ -z "$MIN_MACOS" ]; then
-    stop_farm 'versions.json of the kit has no macOS entries.' 'Download the newest kit from its releases page.'
+    stop_farm 'versions.json of the kit has no macOS entries.' 'Download the newest kit from its repository.'
 fi
 if ! version_at_least "$MACOS_VERSION" "$MIN_MACOS"; then
     stop_farm "macOS $MACOS_VERSION is too old." "The farm programs this kit installs on this kind of Mac need macOS $MIN_MACOS or later. Update macOS (System Settings > General > Software Update), then run install.sh again."
@@ -581,7 +581,7 @@ else
 fi
 
 # ----------------------------------------------------------------------
-write_step '4/12  GADS (hub from its publisher, patched provider from this kit'"'"'s release)'
+write_step '4/12  GADS (hub from its publisher, patched provider from this kit'"'"'s repository)'
 # ----------------------------------------------------------------------
 GADS_VERSION=$(kit_version gads.version)
 DRAG_VERSION=$(kit_version gadsDrag.version)

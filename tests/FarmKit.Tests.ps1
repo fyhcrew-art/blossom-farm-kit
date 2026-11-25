@@ -1,6 +1,6 @@
 # Pester 5 tests for the pure functions of lib\FarmKit.psm1.
 #   Invoke-Pester .\tests
-# Runs on Windows PowerShell 5.1 (CI) and on PowerShell 7.
+# Runs on Windows PowerShell 5.1 and on PowerShell 7.
 
 BeforeAll {
     Import-Module (Join-Path $PSScriptRoot '..\lib\FarmKit.psm1') -Force -DisableNameChecking
@@ -475,8 +475,10 @@ Describe 'versions.json' {
     }
     It 'downloads over https from the two expected places only' {
         $script:v.gads.hubZipUrl | Should -Match '^https://github\.com/shamanec/GADS/releases/download/'
-        $script:v.gadsDrag.url | Should -Match '^https://github\.com/fyhcrew-art/blossom-farm-kit/releases/download/'
-        $script:v.gadsDrag.url | Should -Match ([regex]::Escape($script:v.gadsDrag.releaseTag))
+        # the provider: this repository's branch of published programs, by commit, in the folder of its version
+        $script:v.gadsDrag.url | Should -Match ('^https://raw\.githubusercontent\.com/fyhcrew-art/blossom-farm-kit/[0-9a-f]{40}/' + [regex]::Escape($script:v.gadsDrag.releaseTag) + '/GADS-drag\.exe$')
+        ($script:v.macos.arm64.provider.url -split '/')[5] | Should -BeExactly (($script:v.gadsDrag.url -split '/')[5])
+        ($script:v.macos.x86_64.provider.url -split '/')[5] | Should -BeExactly (($script:v.gadsDrag.url -split '/')[5])
     }
     It 'pins exact versions for the three npm packages of -WithAppium' {
         foreach ($name in @('appium', 'xcuitestDriver', 'gadsPlugin')) { [string]$script:v.npm.$name | Should -Match '^\d+\.\d+\.\d+$' }

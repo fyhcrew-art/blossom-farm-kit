@@ -934,7 +934,7 @@ use_protected_kit_folder() {
     problem=$(list_kit_folder "$FARM_KIT_HOME.new" | test_kit_folder_trust)
     if [ -n "$problem" ]; then
         rm -rf "$FARM_KIT_HOME.new"
-        stop_farm "The kit could not be put into a protected folder: $problem" 'Download the kit again from its releases page, unpack it, and run the script from the new folder. A kit folder contains no links.'
+        stop_farm "The kit could not be put into a protected folder: $problem" 'Download the kit again from its repository, unpack it, and run the script from the new folder. A kit folder contains no links.'
     fi
     if [ -e "$FARM_KIT_HOME" ] || [ -L "$FARM_KIT_HOME" ]; then
         rm -rf "$FARM_KIT_HOME.previous"
@@ -1045,9 +1045,9 @@ get_verified_download() {
     # kept. Nothing with a wrong hash is ever left at <out file>.
     local url=$1 want=$2 out=$3 what=$4 tmp got code
     if ! test_sha256_text "$want"; then
-        stop_farm "No valid pinned SHA-256 for $what in versions.json." 'Download the kit again from its releases page; versions.json must not be edited by hand.'
+        stop_farm "No valid pinned SHA-256 for $what in versions.json." 'Download the kit again from its repository; versions.json must not be edited by hand.'
     fi
-    case $url in https://*) ;; *) stop_farm "The download address for $what is not https." 'Download the kit again from its releases page.' ;; esac
+    case $url in https://*) ;; *) stop_farm "The download address for $what is not https." 'Download the kit again from its repository.' ;; esac
     want=$(to_lower "$want")
     if [ -f "$out" ] && [ "$(get_file_sha256 "$out")" = "$want" ]; then return 0; fi
     tmp=$out.download
@@ -1057,7 +1057,7 @@ get_verified_download() {
         got=$(tr '\n' ' ' < "$tmp.err" 2> /dev/null)
         rm -f "$tmp" "$tmp.err"
         if [ "$code" = 404 ]; then
-            stop_farm "$what is not at its download address (HTTP 404): $url" "The file was not published yet, or it was withdrawn. Check the kit's releases page for a newer kit and use that. If there is none, report it on the kit repository. This is not a fault of your Mac or your connection."
+            stop_farm "$what is not at its download address (HTTP 404): $url" "The file was not published yet, or it was withdrawn. Look for a newer kit (the update script with --check) and use that. If there is none, report it on the kit repository. This is not a fault of your Mac or your connection."
         fi
         stop_farm "Downloading $what failed (HTTP $code) $got" "Check the internet connection of this Mac and run the script again. Address: $url"
     fi
@@ -2379,4 +2379,204 @@ pair_unpair() {
     if invoke_blossom "$PAIR_ORIGIN" DELETE /api/farm/pair/token --bearer "$PAIR_TOKEN" --tries 2; then forget_farm_pairing; return 0; fi
     if [ "$APP_KIND" = refused ] && [ "$APP_STATUS" -eq 401 ]; then forget_farm_pairing; return 0; fi
     return 1
+}
+
+# ---------------------------------------------------------------------------
+# A newer kit: where it is looked for, and how it is checked before use
+# (scripts/update.sh --check and --latest; docs/security.md, section 9).
+# ---------------------------------------------------------------------------
+
+# The branch "main" of the kit repository says which kit is the released one:
+# versions.json carries its version, pairing.json the commit it was made from
+# and the SHA-256 of that commit's MANIFEST.sha256.
+FARM_KIT_REPOSITORY='fyhcrew-art/blossom-farm-kit'
+FARM_KIT_RAW_URL='https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit'
+FARM_KIT_ARCHIVE_URL='https://github.com/fyhcrew-art/blossom-farm-kit/archive'
+
+test_git_commit_text() {
+    local LC_ALL=C
+    local re='^[0-9a-f]{40}$'
+    [[ $1 =~ $re ]]
+}
+
+test_kit_tree() {
+    # test_kit_tree <folder> <SHA-256 of its MANIFEST.sha256>
+    # Prints what is wrong with an unpacked kit, or nothing when every file is
+    # the one its list names: the list has the SHA-256 given; every file on
+    # the list is there with its SHA-256; nothing is there that the list does
+    # not name, except the four files that cannot be on it (MANIFEST.sha256
+    # itself, bootstrap.sh, bootstrap.ps1, pairing.json); nothing is a link.
+    local dir=$1 want_list=$2 got want name extra allowed
+    if [ ! -f "$dir/MANIFEST.sha256" ]; then echo 'It has no MANIFEST.sha256.'; return 0; fi
+    got=$(get_file_sha256 "$dir/MANIFEST.sha256")
+    if [ "$got" != "$(to_lower "$want_list")" ]; then
+        echo "Its list of files is not the expected one (expected SHA-256 $want_list, got $got)."
+        return 0
+    fi
+    if LC_ALL=C grep -q -v -E '^[0-9a-f]{64}  [A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$' "$dir/MANIFEST.sha256" || LC_ALL=C grep -q -E '(^|[ /])\.\.?(/|$)' "$dir/MANIFEST.sha256"; then
+        echo 'Its list of files has a line that is not a checksum and a file name.'
+        return 0
+    fi
+    if [ -n "$(cd "$dir" && find . ! -type f ! -type d -print | head -n 1)" ]; then
+        echo 'It holds something that is neither a file nor a folder.'
+        return 0
+    fi
+    while read -r want name; do
+        if [ ! -f "$dir/$name" ]; then echo "The file $name is missing."; return 0; fi
+        got=$(get_file_sha256 "$dir/$name")
+        if [ "$got" != "$want" ]; then
+            echo "The file $name is not the one the list names (expected SHA-256 $want, got $got)."
+            return 0
+        fi
+    done < "$dir/MANIFEST.sha256"
+    allowed=$( { awk '{ print $2 }' "$dir/MANIFEST.sha256"; printf 'MANIFEST.sha256\nbootstrap.sh\nbootstrap.ps1\npairing.json\n'; } | LC_ALL=C sort -u)
+    extra=$( (cd "$dir" && find . -type f -print) | sed 's|^\./||' | LC_ALL=C sort | awk -v allowed="$allowed" '
+        BEGIN { n = split(allowed, a, "\n"); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
+        !($0 in ok) { print; exit }')
+    if [ -n "$extra" ]; then echo "It holds a file that its list does not name: $extra"; fi
+    return 0
+}
+
+test_kit_update_rules() {
+    # test_kit_update_rules <text of this kit's versions.json> <text of the fetched kit's versions.json>
+    # Prints why a kit that was fetched may not replace this one, or nothing.
+    # The rules a kit enforces on its successor, whoever published it:
+    #   * the version goes up, never back or sideways;
+    #   * a program keeps its checksum as long as it keeps its version: a kit
+    #     that names the provider (or the hub) by the version this kit names
+    #     must pin the same SHA-256 for it, on every system. Another file
+    #     under the same version is refused; a changed program has to come
+    #     with a new version, which the update shows before it replaces
+    #     anything;
+    #   * every download address is https.
+    local old=$1 new=$2 a b key
+    a=$(json_get "$old" kit); b=$(json_get "$new" kit)
+    case $b in '' | *[!0-9.]*) echo 'It names no usable kit version.'; return 0 ;; esac
+    if [ "$a" = "$b" ] || ! version_at_least "$b" "$a"; then
+        echo "It is kit $b, which is not newer than this kit ($a)."
+        return 0
+    fi
+    if [ "$(json_get "$old" gadsDrag.version)" = "$(json_get "$new" gadsDrag.version)" ]; then
+        for key in gadsDrag.sha256 macos.arm64.provider.sha256 macos.x86_64.provider.sha256; do
+            a=$(to_lower "$(json_get "$old" "$key")"); b=$(to_lower "$(json_get "$new" "$key")")
+            if [ -n "$a" ] && [ "$a" != "$b" ]; then
+                echo "It pins another file for the provider $(json_get "$new" gadsDrag.version) than this kit does ($key: $b instead of $a). A changed program must carry a new version."
+                return 0
+            fi
+        done
+    fi
+    if [ "$(json_get "$old" gads.version)" = "$(json_get "$new" gads.version)" ]; then
+        for key in gads.hubZipSha256 gads.hubExeSha256 macos.arm64.hub.zipSha256 macos.arm64.hub.exeSha256 macos.x86_64.hub.zipSha256 macos.x86_64.hub.exeSha256; do
+            a=$(to_lower "$(json_get "$old" "$key")"); b=$(to_lower "$(json_get "$new" "$key")")
+            if [ -n "$a" ] && [ "$a" != "$b" ]; then
+                echo "It pins another file for GADS $(json_get "$new" gads.version) than this kit does ($key: $b instead of $a). A changed program must carry a new version."
+                return 0
+            fi
+        done
+    fi
+    b=$(printf '%s' "$new" | json_flatten 2> /dev/null | LC_ALL=C awk -F '\t' '$1 ~ /(^|\.)([a-zA-Z]*[uU]rl)$/ && $2 !~ /^https:\/\// { print $1; exit }')
+    if [ -n "$b" ]; then echo "Its download address $b is not https."; fi
+    return 0
+}
+
+kit_fetch_file() {
+    # kit_fetch_file <address> <out file> [seconds]
+    # One https download, redirects followed to https only. Sets KIT_FETCH_STATUS
+    # (the HTTP status; 0 when there was no answer or the transfer broke off)
+    # and KIT_FETCH_ERROR. Status 0 only for a complete answer 200.
+    local url=$1 out=$2 max=${3:-120} code rc err
+    KIT_FETCH_STATUS=0; KIT_FETCH_ERROR=''
+    case $url in https://*) ;; *) KIT_FETCH_ERROR='the address is not https'; return 1 ;; esac
+    err=$out.err
+    code=$(curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 -sS -L --max-redirs 5 --connect-timeout 30 --max-time "$max" -o "$out" -w '%{http_code}' "$url" 2> "$err")
+    rc=$?
+    KIT_FETCH_ERROR=$(tr '\n' ' ' < "$err" 2> /dev/null)
+    rm -f "$err"
+    if [ "$rc" -ne 0 ]; then rm -f "$out"; [ -n "$KIT_FETCH_ERROR" ] || KIT_FETCH_ERROR="curl ended with status $rc"; return 1; fi
+    KIT_FETCH_STATUS=$code
+    if [ "$code" != 200 ]; then rm -f "$out"; KIT_FETCH_ERROR="HTTP $code"; return 1; fi
+    return 0
+}
+
+get_released_kit() {
+    # get_released_kit <work folder>
+    # Asks the branch "main" of the kit repository which kit is released.
+    # Sets RELEASED_KIT_VERSION, and RELEASED_KIT_COMMIT and
+    # RELEASED_KIT_MANIFEST when pairing.json there names that same version
+    # (otherwise both are empty: main already carries a newer kit that is not
+    # released yet). Status 1 with RELEASED_KIT_ERROR when main cannot be read.
+    local work=$1 text
+    RELEASED_KIT_VERSION=''; RELEASED_KIT_COMMIT=''; RELEASED_KIT_MANIFEST=''; RELEASED_KIT_ERROR=''
+    if ! kit_fetch_file "$FARM_KIT_RAW_URL/main/versions.json" "$work/main-versions.json" 60; then
+        RELEASED_KIT_ERROR="versions.json of the kit repository could not be read ($KIT_FETCH_ERROR)."
+        return 1
+    fi
+    RELEASED_KIT_VERSION=$(json_file_get "$work/main-versions.json" kit)
+    case $RELEASED_KIT_VERSION in
+        '' | *[!0-9.]*) RELEASED_KIT_VERSION=''; RELEASED_KIT_ERROR='versions.json of the kit repository names no kit version.'; return 1 ;;
+    esac
+    if ! kit_fetch_file "$FARM_KIT_RAW_URL/main/pairing.json" "$work/main-pairing.json" 60; then
+        if [ "$KIT_FETCH_STATUS" = 404 ]; then return 0; fi
+        RELEASED_KIT_ERROR="pairing.json of the kit repository could not be read ($KIT_FETCH_ERROR)."
+        return 1
+    fi
+    text=$(cat "$work/main-pairing.json")
+    if [ "$(json_get "$text" kitVersion)" != "$RELEASED_KIT_VERSION" ]; then return 0; fi
+    RELEASED_KIT_COMMIT=$(json_get "$text" kitCommit)
+    RELEASED_KIT_MANIFEST=$(to_lower "$(json_get "$text" manifestSha256)")
+    if ! test_git_commit_text "$RELEASED_KIT_COMMIT" || ! test_sha256_text "$RELEASED_KIT_MANIFEST"; then
+        RELEASED_KIT_COMMIT=''; RELEASED_KIT_MANIFEST=''
+        RELEASED_KIT_ERROR='pairing.json of the kit repository does not name a commit and the SHA-256 of its list of files.'
+        return 1
+    fi
+    return 0
+}
+
+fetch_kit_commit() {
+    # fetch_kit_commit <commit> <SHA-256 of its MANIFEST.sha256> <empty work folder>
+    # Downloads the archive GitHub makes of the kit at that commit, looks at
+    # its list before unpacking (everything inside the one folder of the
+    # commit, files and folders only), unpacks it and checks every file
+    # (test_kit_tree). On success the kit is in <work folder>/kit, without
+    # the files that are not on its list, and the status is 0. Otherwise
+    # FETCHED_KIT_ERROR says why and nothing usable is left.
+    local commit=$1 manifest=$2 work=$3 top bad problem
+    FETCHED_KIT_ERROR=''
+    if ! test_git_commit_text "$commit"; then FETCHED_KIT_ERROR='That is not a commit.'; return 1; fi
+    top="${FARM_KIT_REPOSITORY##*/}-$commit"
+    if ! kit_fetch_file "$FARM_KIT_ARCHIVE_URL/$commit.tar.gz" "$work/kit.tar.gz" 900; then
+        FETCHED_KIT_ERROR="The kit could not be downloaded ($KIT_FETCH_ERROR). Address: $FARM_KIT_ARCHIVE_URL/$commit.tar.gz"
+        return 1
+    fi
+    if ! tar -tzf "$work/kit.tar.gz" > "$work/names" 2> /dev/null || ! tar -tvzf "$work/kit.tar.gz" > "$work/listing" 2> /dev/null || [ ! -s "$work/names" ]; then
+        rm -f "$work/kit.tar.gz"
+        FETCHED_KIT_ERROR='The kit archive is incomplete or damaged (the download was cut short?).'
+        return 1
+    fi
+    bad=$(awk -v top="$top" '
+        $0 == top || $0 == top "/" { next }
+        index($0, top "/") != 1 { print; exit }
+        /(^|\/)\.\.(\/|$)/ { print; exit }' "$work/names")
+    [ -n "$bad" ] || bad=$(awk '{ t = substr($0, 1, 1); if (t != "-" && t != "d") { print "a link or a device"; exit } }' "$work/listing")
+    if [ -n "$bad" ]; then
+        rm -f "$work/kit.tar.gz"
+        FETCHED_KIT_ERROR="The kit archive holds something that does not belong to the kit ($bad)."
+        return 1
+    fi
+    mkdir "$work/unpacked" || { FETCHED_KIT_ERROR="Could not write to $work."; return 1; }
+    if ! tar -xzf "$work/kit.tar.gz" -o -C "$work/unpacked" 2> /dev/null || [ ! -d "$work/unpacked/$top" ]; then
+        rm -rf "$work/unpacked" "$work/kit.tar.gz"
+        FETCHED_KIT_ERROR='The kit archive could not be unpacked.'
+        return 1
+    fi
+    rm -f "$work/kit.tar.gz" "$work/names" "$work/listing"
+    problem=$(test_kit_tree "$work/unpacked/$top" "$manifest")
+    if [ -n "$problem" ]; then
+        rm -rf "$work/unpacked"
+        FETCHED_KIT_ERROR="The kit that was downloaded did not pass its check. $problem"
+        return 1
+    fi
+    rm -f "$work/unpacked/$top/bootstrap.sh" "$work/unpacked/$top/bootstrap.ps1" "$work/unpacked/$top/pairing.json"
+    if ! mv "$work/unpacked/$top" "$work/kit" || ! rmdir "$work/unpacked"; then FETCHED_KIT_ERROR="Could not write to $work."; return 1; fi
+    return 0
 }

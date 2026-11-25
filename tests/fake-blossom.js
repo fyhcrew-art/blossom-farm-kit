@@ -29,8 +29,11 @@
 //   node tests/fake-blossom.js --dir <folder> [--static <folder>] [--cert-dir <folder>]
 //       (bash and Pester tests) writes <folder>/cert.pem and <folder>/ports.json,
 //       then serves until killed. With --static, files of that folder are
-//       served under /releases/. With --cert-dir, the certificate of that
-//       folder is used instead of a new one.
+//       served under /static/ (a stand-in for the places the kit is fetched
+//       from). A file "<name>.cut" next to a file, holding a number, makes
+//       the answer for <name> announce the whole length and break off after
+//       that many bytes. With --cert-dir, the certificate of that folder is
+//       used instead of a new one.
 //   node tests/fake-blossom.js --make-cert <folder>
 //       only makes key.pem and cert.pem there (for a program that must be told
 //       which certificate to trust before it starts).
@@ -437,11 +440,11 @@ function handleTest(state, req, res, body) {
   }
 }
 
-const MIME = { '.zip': 'application/zip', '.sh': 'text/x-shellscript', '.ps1': 'text/plain', '.json': 'application/json' }
+const MIME = { '.zip': 'application/zip', '.gz': 'application/gzip', '.sh': 'text/x-shellscript', '.ps1': 'text/plain', '.json': 'application/json' }
 
 /**
  * Starts the stand-in. Options: dir (where the certificate is made; a
- * temporary folder when left out), staticDir (served under /releases/).
+ * temporary folder when left out), staticDir (served under /static/).
  * Resolves to { origin, controlUrl, certFile, state, close() }.
  */
 async function startFakeBlossom(options = {}) {
@@ -463,14 +466,23 @@ async function startFakeBlossom(options = {}) {
     req.on('end', () => then(size > 65536 ? '{"too":"large"' : body))
   }
   const serveStatic = (req, res) => {
-    const rel = decodeURIComponent(new URL(req.url, 'https://fake').pathname.slice('/releases/'.length))
-    const file = path.join(options.staticDir, rel)
+    const rel = decodeURIComponent(new URL(req.url, 'https://fake').pathname.slice('/static/'.length))
+    const file = path.join(options.staticDir || '', rel)
     if (!options.staticDir || rel.includes('..') || !fs.existsSync(file) || !fs.statSync(file).isFile()) { res.writeHead(404); return res.end('not found') }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' })
+    const type = MIME[path.extname(file)] || 'application/octet-stream'
+    if (fs.existsSync(file + '.cut')) {
+      // a download that is cut short: the whole length is announced, part of it is sent
+      const body = fs.readFileSync(file)
+      const keep = Math.min(body.length, Number(fs.readFileSync(file + '.cut', 'utf8')) || 0)
+      res.writeHead(200, { 'Content-Type': type, 'Content-Length': body.length })
+      res.write(body.subarray(0, keep), () => res.socket.destroy())
+      return
+    }
+    res.writeHead(200, { 'Content-Type': type })
     fs.createReadStream(file).pipe(res)
   }
   const secure = https.createServer({ key, cert }, (req, res) => {
-    if (req.url.startsWith('/releases/')) return serveStatic(req, res)
+    if (req.url.startsWith('/static/')) return serveStatic(req, res)
     collect(req, body => handleApi(state, req, res, body, true))
   })
   const plain = http.createServer((req, res) => {

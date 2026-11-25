@@ -8,8 +8,8 @@
 #
 # Plain bash, no test framework. Needs node, curl and openssl (without them
 # the tests against the stand-in are skipped, unless FARMKIT_REQUIRE_STAND_IN
-# is set, as it is in CI); nothing here needs a Mac or root, and nothing
-# leaves this computer. Exit status 0 when every test passed.
+# is set, as tools/check.sh --require-all does); nothing here needs a Mac or
+# root, and nothing leaves this computer. Exit status 0 when every test passed.
 
 # The test data is single-quoted on purpose, and one function of the library
 # is replaced by a stand-in further down.

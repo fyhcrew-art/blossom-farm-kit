@@ -1,4 +1,4 @@
-# Settings for PSScriptAnalyzer (used by .github/workflows/ci.yml).
+# Settings for PSScriptAnalyzer (used by tools/check.sh).
 @{
     Severity     = @('Error', 'Warning')
     ExcludeRules = @(

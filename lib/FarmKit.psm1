@@ -708,10 +708,10 @@ function Get-VerifiedDownload {
         [Parameter(Mandatory = $true)][string]$What
     )
     if (-not (Test-Sha256Text -Text $Sha256)) {
-        Stop-Farm -Problem ('No valid pinned SHA-256 for ' + $What + ' in versions.json.') -WhatToDo 'Download the kit again from its releases page; versions.json must not be edited by hand.'
+        Stop-Farm -Problem ('No valid pinned SHA-256 for ' + $What + ' in versions.json.') -WhatToDo 'Download the kit again from its repository; versions.json must not be edited by hand.'
     }
     if ($Url -notmatch '^https://') {
-        Stop-Farm -Problem ('The download address for ' + $What + ' is not https.') -WhatToDo 'Download the kit again from its releases page.'
+        Stop-Farm -Problem ('The download address for ' + $What + ' is not https.') -WhatToDo 'Download the kit again from its repository.'
     }
     $want = $Sha256.ToLowerInvariant()
     if ((Test-Path -LiteralPath $OutFile) -and ((Get-FileSha256 -Path $OutFile) -eq $want)) { return }
@@ -727,7 +727,7 @@ function Get-VerifiedDownload {
         $status = 0
         try { if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode } } catch { $status = 0 }
         if ($status -eq 404) {
-            Stop-Farm -Problem ($What + ' is not at its download address (HTTP 404): ' + $Url) -WhatToDo 'The file was not published yet, or it was withdrawn. Check the kit''s releases page for a newer kit and use that. If there is none, report it on the kit repository. This is not a fault of your computer or your connection.'
+            Stop-Farm -Problem ($What + ' is not at its download address (HTTP 404): ' + $Url) -WhatToDo 'The file was not published yet, or it was withdrawn. Look for a newer kit (scripts\update.ps1 -Check) and use that. If there is none, report it on the kit repository. This is not a fault of your computer or your connection.'
         }
         Stop-Farm -Problem ('Downloading ' + $What + ' failed: ' + $_.Exception.Message) -WhatToDo ('Check the internet connection of this computer and run the script again. Address: ' + $Url)
     } finally {
@@ -1937,6 +1937,249 @@ function Remove-FarmPairing {
         Remove-FarmPairingFile -Paths $Paths
         $out.Ok = $true
     }
+    return $out
+}
+
+# ---------------------------------------------------------------------------
+# A newer kit: where it is looked for, and how it is checked before use
+# (scripts\update.ps1 -Check and -Latest; docs\security.md, section 9).
+# ---------------------------------------------------------------------------
+
+# The branch "main" of the kit repository says which kit is the released one:
+# versions.json carries its version, pairing.json the commit it was made from
+# and the SHA-256 of that commit's MANIFEST.sha256.
+$script:KitSource = @{
+    Repository = 'fyhcrew-art/blossom-farm-kit'
+    RawUrl     = 'https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit'
+    ArchiveUrl = 'https://github.com/fyhcrew-art/blossom-farm-kit/archive'
+}
+
+function Get-KitSource { return $script:KitSource }
+
+function Set-KitSource {
+    # For the tests only: another place to look for the kit.
+    param([string]$RawUrl, [string]$ArchiveUrl)
+    if ($RawUrl) { $script:KitSource.RawUrl = $RawUrl }
+    if ($ArchiveUrl) { $script:KitSource.ArchiveUrl = $ArchiveUrl }
+}
+
+function Test-GitCommitText {
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    return ([string]$Text -cmatch '^[0-9a-f]{40}$')
+}
+
+function Compare-KitVersion {
+    # Dotted numbers. Returns 1 when $Have is newer than $Want, 0 when they
+    # are the same, -1 when it is older.
+    param([AllowEmptyString()][string]$Have, [AllowEmptyString()][string]$Want)
+    $a = @(([string]$Have) -split '\.'); $b = @(([string]$Want) -split '\.')
+    for ($i = 0; $i -lt 4; $i++) {
+        $x = 0; $y = 0
+        if ($i -lt $a.Count -and $a[$i] -match '^\d+$') { $x = [int]$a[$i] }
+        if ($i -lt $b.Count -and $b[$i] -match '^\d+$') { $y = [int]$b[$i] }
+        if ($x -gt $y) { return 1 }
+        if ($x -lt $y) { return -1 }
+    }
+    return 0
+}
+
+function Test-KitTree {
+    # Returns what is wrong with an unpacked kit, or $null when every file is
+    # the one its list names: the list has the SHA-256 given; every file on
+    # the list is there with its SHA-256; nothing is there that the list does
+    # not name, except the four files that cannot be on it (MANIFEST.sha256
+    # itself, bootstrap.sh, bootstrap.ps1, pairing.json).
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$ManifestSha256)
+    $manifest = Join-Path $Path 'MANIFEST.sha256'
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { return 'It has no MANIFEST.sha256.' }
+    $got = Get-FileSha256 -Path $manifest
+    if ($got -cne $ManifestSha256.ToLowerInvariant()) {
+        return ('Its list of files is not the expected one (expected SHA-256 ' + $ManifestSha256 + ', got ' + $got + ').')
+    }
+    $listed = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($line in [System.IO.File]::ReadAllLines($manifest)) {
+        if ($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*)$' -or $line -match '(^|[ /])\.\.?(/|$)') {
+            return 'Its list of files has a line that is not a checksum and a file name.'
+        }
+        $want = $Matches[1]; $name = $Matches[2]
+        $file = Join-Path $Path ($name -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return ('The file ' + $name + ' is missing.') }
+        $got = Get-FileSha256 -Path $file
+        if ($got -cne $want) { return ('The file ' + $name + ' is not the one the list names (expected SHA-256 ' + $want + ', got ' + $got + ').') }
+        [void]$listed.Add($name)
+    }
+    $unlisted = @('MANIFEST.sha256', 'bootstrap.sh', 'bootstrap.ps1', 'pairing.json')
+    $full = (Get-Item -LiteralPath $Path).FullName.TrimEnd('\', '/')
+    foreach ($item in (Get-ChildItem -LiteralPath $Path -Recurse -Force -File)) {
+        $name = $item.FullName.Substring($full.Length + 1) -replace '\\', '/'
+        if (-not $listed.Contains($name) -and $unlisted -cnotcontains $name) { return ('It holds a file that its list does not name: ' + $name) }
+    }
+    return $null
+}
+
+function Test-KitUpdateRule {
+    # Returns why a kit that was fetched may not replace this one, or $null.
+    # The rules a kit enforces on its successor, whoever published it:
+    #   * the version goes up, never back or sideways;
+    #   * a program keeps its checksum as long as it keeps its version: a kit
+    #     that names the provider (or the hub) by the version this kit names
+    #     must pin the same SHA-256 for it, on every system. Another file
+    #     under the same version is refused; a changed program has to come
+    #     with a new version, which the update shows before it replaces
+    #     anything;
+    #   * every download address is https.
+    param([Parameter(Mandatory = $true)]$Current, [Parameter(Mandatory = $true)]$New)
+    $get = {
+        param($Object, [string]$KeyPath)
+        $value = $Object
+        foreach ($part in ($KeyPath -split '\.')) {
+            if ($null -eq $value) { return '' }
+            $value = Get-JsonProperty -Object $value -Name $part
+        }
+        if ($null -eq $value) { return '' }
+        return ([string]$value)
+    }
+    $a = & $get $Current 'kit'; $b = & $get $New 'kit'
+    if ($b -notmatch '^[0-9.]+$') { return 'It names no usable kit version.' }
+    if ((Compare-KitVersion -Have $b -Want $a) -le 0) { return ('It is kit ' + $b + ', which is not newer than this kit (' + $a + ').') }
+    $groups = @(
+        @{ Version = 'gadsDrag.version'; What = 'the provider'; Keys = @('gadsDrag.sha256', 'macos.arm64.provider.sha256', 'macos.x86_64.provider.sha256') },
+        @{ Version = 'gads.version'; What = 'GADS'; Keys = @('gads.hubZipSha256', 'gads.hubExeSha256', 'macos.arm64.hub.zipSha256', 'macos.arm64.hub.exeSha256', 'macos.x86_64.hub.zipSha256', 'macos.x86_64.hub.exeSha256') }
+    )
+    foreach ($group in $groups) {
+        if ((& $get $Current $group.Version) -cne (& $get $New $group.Version)) { continue }
+        foreach ($key in $group.Keys) {
+            $a = (& $get $Current $key).ToLowerInvariant(); $b = (& $get $New $key).ToLowerInvariant()
+            if ($a -and $a -cne $b) {
+                return ('It pins another file for ' + $group.What + ' ' + (& $get $New $group.Version) + ' than this kit does (' + $key + ': ' + $b + ' instead of ' + $a + '). A changed program must carry a new version.')
+            }
+        }
+    }
+    $pending = New-Object System.Collections.Stack
+    $pending.Push(@('', $New))
+    while ($pending.Count -gt 0) {
+        $pair = $pending.Pop()
+        if ($null -eq $pair[1] -or $pair[1] -is [string] -or $pair[1] -is [ValueType]) { continue }
+        foreach ($property in $pair[1].PSObject.Properties) {
+            $name = ($pair[0] + '.' + $property.Name).TrimStart('.')
+            if ($property.Value -is [string]) {
+                if ($property.Name -match '[uU]rl$' -and $property.Value -notmatch '^https://') { return ('Its download address ' + $name + ' is not https.') }
+            } elseif ($property.Value -is [System.Management.Automation.PSCustomObject]) { $pending.Push(@($name, $property.Value)) }
+        }
+    }
+    return $null
+}
+
+function Get-KitFile {
+    # One https download. Returns Ok, Status (0 when there was no HTTP
+    # answer) and Error; never throws.
+    param([Parameter(Mandatory = $true)][string]$Url, [Parameter(Mandatory = $true)][string]$OutFile, [int]$TimeoutSec = 120)
+    $out = New-Object PSObject -Property @{ Ok = $false; Status = 0; Error = '' }
+    if ($Url -notmatch '^https://') { $out.Error = 'the address is not https'; return $out }
+    Enable-Tls12
+    $oldProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec $TimeoutSec
+        $out.Ok = $true; $out.Status = 200
+    } catch {
+        if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
+        try { if ($_.Exception.Response) { $out.Status = [int]$_.Exception.Response.StatusCode } } catch { $out.Status = 0 }
+        $out.Error = $_.Exception.Message
+    } finally { $ProgressPreference = $oldProgress }
+    return $out
+}
+
+function Get-ReleasedKit {
+    # Asks the branch "main" of the kit repository which kit is released.
+    # Returns Ok, Error, Version, and Commit and ManifestSha256 when
+    # pairing.json there names that same version (otherwise both are empty:
+    # main already carries a newer kit that is not released yet).
+    param([Parameter(Mandatory = $true)][string]$WorkFolder)
+    $out = New-Object PSObject -Property @{ Ok = $false; Error = ''; Version = ''; Commit = ''; ManifestSha256 = '' }
+    $file = Join-Path $WorkFolder 'main-versions.json'
+    $r = Get-KitFile -Url ($script:KitSource.RawUrl + '/main/versions.json') -OutFile $file -TimeoutSec 60
+    if (-not $r.Ok) { $out.Error = 'versions.json of the kit repository could not be read (' + $r.Error + ').'; return $out }
+    try { $out.Version = [string](Get-Content -LiteralPath $file -Raw | ConvertFrom-Json).kit } catch { $out.Version = '' }
+    if ($out.Version -notmatch '^[0-9.]+$') { $out.Version = ''; $out.Error = 'versions.json of the kit repository names no kit version.'; return $out }
+    $file = Join-Path $WorkFolder 'main-pairing.json'
+    $r = Get-KitFile -Url ($script:KitSource.RawUrl + '/main/pairing.json') -OutFile $file -TimeoutSec 60
+    if (-not $r.Ok) {
+        if ($r.Status -eq 404) { $out.Ok = $true; return $out }
+        $out.Error = 'pairing.json of the kit repository could not be read (' + $r.Error + ').'; return $out
+    }
+    $pairing = $null
+    try { $pairing = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { $pairing = $null }
+    if ($null -eq $pairing -or [string](Get-JsonProperty -Object $pairing -Name 'kitVersion') -cne $out.Version) { $out.Ok = $true; return $out }
+    $commit = [string](Get-JsonProperty -Object $pairing -Name 'kitCommit')
+    $manifest = ([string](Get-JsonProperty -Object $pairing -Name 'manifestSha256')).ToLowerInvariant()
+    if (-not (Test-GitCommitText -Text $commit) -or -not (Test-Sha256Text -Text $manifest)) {
+        $out.Error = 'pairing.json of the kit repository does not name a commit and the SHA-256 of its list of files.'; return $out
+    }
+    $out.Commit = $commit; $out.ManifestSha256 = $manifest; $out.Ok = $true
+    return $out
+}
+
+function Save-KitCommit {
+    # Downloads the archive GitHub makes of the kit at that commit, looks at
+    # its list before unpacking (everything inside the one folder of the
+    # commit), writes each file itself to a path it has checked, and checks
+    # every file (Test-KitTree). Returns Ok, Error and Path: on success the
+    # kit is in <WorkFolder>\kit, without the files that are not on its list.
+    param([Parameter(Mandatory = $true)][string]$Commit, [Parameter(Mandatory = $true)][string]$ManifestSha256, [Parameter(Mandatory = $true)][string]$WorkFolder)
+    $out = New-Object PSObject -Property @{ Ok = $false; Error = ''; Path = '' }
+    if (-not (Test-GitCommitText -Text $Commit)) { $out.Error = 'That is not a commit.'; return $out }
+    $top = ($script:KitSource.Repository -split '/')[-1] + '-' + $Commit
+    $url = $script:KitSource.ArchiveUrl + '/' + $Commit + '.zip'
+    $zip = Join-Path $WorkFolder 'kit.zip'
+    $r = Get-KitFile -Url $url -OutFile $zip -TimeoutSec 900
+    if (-not $r.Ok) { $out.Error = 'The kit could not be downloaded (' + $r.Error + '). Address: ' + $url; return $out }
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $unpacked = Join-Path $WorkFolder 'unpacked'
+    $archive = $null
+    try { $archive = [System.IO.Compression.ZipFile]::OpenRead($zip) }
+    catch { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue; $out.Error = 'The kit archive is incomplete or damaged (the download was cut short?).'; return $out }
+    try {
+        foreach ($entry in $archive.Entries) {
+            $name = [string]$entry.FullName
+            if ($name -ceq ($top + '/')) { continue }
+            if (-not $name.StartsWith($top + '/', [System.StringComparison]::Ordinal) -or $name -match '\\|:|(^|/)\.\.(/|$)|//') {
+                $out.Error = 'The kit archive holds something that does not belong to the kit (' + $name + ').'
+                break
+            }
+        }
+        if (-not $out.Error) {
+            New-Item -ItemType Directory -Path (Join-Path $unpacked $top) -Force | Out-Null
+            foreach ($entry in $archive.Entries) {
+                $name = [string]$entry.FullName
+                $target = Join-Path $unpacked ($name -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+                if ($name.EndsWith('/')) { New-Item -ItemType Directory -Path $target -Force | Out-Null; continue }
+                $folder = Split-Path -Parent $target
+                if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+            }
+        }
+    } catch {
+        $out.Error = 'The kit archive could not be unpacked: ' + $_.Exception.Message
+    } finally { $archive.Dispose() }
+    Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+    if (-not $out.Error) {
+        $problem = Test-KitTree -Path (Join-Path $unpacked $top) -ManifestSha256 $ManifestSha256
+        if ($problem) { $out.Error = 'The kit that was downloaded did not pass its check. ' + $problem }
+    }
+    if ($out.Error) {
+        if (Test-Path -LiteralPath $unpacked) { Remove-Item -LiteralPath $unpacked -Recurse -Force -ErrorAction SilentlyContinue }
+        return $out
+    }
+    foreach ($name in @('bootstrap.sh', 'bootstrap.ps1', 'pairing.json')) {
+        $file = Join-Path (Join-Path $unpacked $top) $name
+        if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
+    }
+    $kit = Join-Path $WorkFolder 'kit'
+    Move-Item -LiteralPath (Join-Path $unpacked $top) -Destination $kit -Force
+    Remove-Item -LiteralPath $unpacked -Recurse -Force -ErrorAction SilentlyContinue
+    $out.Ok = $true; $out.Path = $kit
     return $out
 }
 
