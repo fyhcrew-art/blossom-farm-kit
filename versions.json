@@ -12,7 +12,7 @@
     "version": "v6.0.0-drag.1",
     "url": "https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/gads-v6.0.0-drag.1/GADS-drag.exe",
     "sha256": "1426a0c7a89376f9151975351d75971a2a1c9c3978822c1771fdb6f572bfcf17",
-    "redistributeEmbeddedResources": false,
+    "redistributeEmbeddedResources": true,
     "goVersion": "1.26.0",
     "swagVersion": "v1.16.4"
   },
