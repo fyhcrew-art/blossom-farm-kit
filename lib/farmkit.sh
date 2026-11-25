@@ -586,6 +586,144 @@ farm_arch_key() {
     case $1 in arm64 | aarch64) echo arm64 ;; x86_64 | amd64) echo x86_64 ;; *) echo '' ;; esac
 }
 
+# --- pairing with Blossom CRM: the checks that need no network ---------------
+
+normalize_pairing_code() {
+    # Prints a pairing code as it is sent: upper case, without the hyphens and
+    # spaces it is shown with, and with the letters people mistype put right
+    # (O is 0, I and L are 1: the alphabet of a code has none of them).
+    local LC_ALL=C
+    printf '%s' "$1" | tr -d ' \t\r\n-' | tr '[:lower:]' '[:upper:]' | tr 'OIL' '011'
+}
+
+test_pairing_code() {
+    # Prints nothing when the text is shaped like a pairing code, otherwise
+    # the reason. A code is 20 characters of 0-9 and A-Z without I, L, O, U
+    # (100 random bits), shown in five groups of four.
+    local LC_ALL=C
+    local code re='^[0-9A-HJKMNP-TV-Z]{20}$'
+    code=$(normalize_pairing_code "$1")
+    if [ -z "$code" ]; then echo 'The pairing code is empty.'; return 0; fi
+    if ! [[ $code =~ $re ]]; then
+        echo 'A pairing code has 20 letters and digits in five groups of four, like K7QM-2XVD-9HTR-4BWN-6CPA. Copy the whole command from Blossom again.'
+    fi
+    return 0
+}
+
+normalize_app_origin() {
+    # The address of Blossom as it is stored and compared: lower case, no
+    # slash at the end.
+    local o
+    o=$(to_lower "$(trim_text "$1")")
+    while [ "$o" != "${o%/}" ]; do o=${o%/}; done
+    printf '%s' "$o"
+}
+
+test_app_origin() {
+    # Prints nothing when the text is an https origin (https://host or
+    # https://host:port, nothing else), otherwise the reason. The farm's
+    # credentials are sent to this address and to no other.
+    local LC_ALL=C
+    local o rest host port re
+    o=$(normalize_app_origin "$1")
+    if [ -z "$o" ]; then echo 'The address of Blossom is missing.'; return 0; fi
+    case $o in
+        http://*) echo 'The address of Blossom must start with https://. The passwords of the farm are never sent over a connection that is not encrypted.'; return 0 ;;
+        https://*) ;;
+        *) echo 'The address of Blossom must look like https://<the address you open Blossom at>.'; return 0 ;;
+    esac
+    rest=${o#https://}
+    case $rest in
+        '' | *[/?#@\\[:space:]]* | *'['* | *']'*) echo 'Give the address of Blossom only: https:// and the host name, with nothing after it.'; return 0 ;;
+    esac
+    host=${rest%%:*}
+    if [ "$rest" != "$host" ]; then
+        port=${rest#*:}
+        case $port in '' | *[!0-9]*) echo 'The port in the address of Blossom is not a number.'; return 0 ;; esac
+        if [ "${#port}" -gt 5 ] || [ "$((10#$port))" -lt 1 ] || [ "$((10#$port))" -gt 65535 ]; then echo 'The port in the address of Blossom is not a number.'; return 0; fi
+    fi
+    re='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+    if [ "${#host}" -gt 253 ] || ! [[ $host =~ $re ]]; then echo 'The host name in the address of Blossom is not valid.'; return 0; fi
+    case $host in *..*) echo 'The host name in the address of Blossom is not valid.' ;; esac
+    return 0
+}
+
+test_farm_token() {
+    # Status 0 when the text is shaped like a farm token: "bft_" and 32 random
+    # bytes in URL-safe base64.
+    local LC_ALL=C
+    local re='^bft_[A-Za-z0-9_-]{43}$'
+    [[ $1 =~ $re ]]
+}
+
+new_farm_token() { printf 'bft_%s' "$(new_random_secret 32 base64url)"; }
+
+test_farm_domain() {
+    # Prints nothing when the three default host names can be made under this
+    # domain, otherwise the reason.
+    local d reason
+    d=$(normalize_farm_domain "$1")
+    if [ -z "$d" ]; then echo 'The domain is empty.'; return 0; fi
+    case $d in *.*) ;; *) echo 'Enter the domain itself, for example yourdomain.com.'; return 0 ;; esac
+    reason=$(test_farm_hostname "farm-hub.$d")
+    [ -n "$reason" ] && echo "$reason"
+    return 0
+}
+
+normalize_farm_domain() {
+    # "https://YourDomain.com/" -> "yourdomain.com"
+    local d
+    d=$(to_lower "$(trim_text "$1")")
+    d=${d#https://}; d=${d#http://}
+    while [ "$d" != "${d%/}" ]; do d=${d%/}; done
+    while [ "$d" != "${d#.}" ]; do d=${d#.}; done
+    printf '%s' "$d"
+}
+
+get_default_farm_hostnames() {
+    # get_default_farm_hostnames <domain>   prints the three proposed names:
+    # hub, provider, restart service, one per line.
+    local d
+    d=$(normalize_farm_domain "$1")
+    printf 'farm-hub.%s\nfarm-provider.%s\nfarm-restart.%s\n' "$d" "$d" "$d"
+}
+
+clean_computer_label() {
+    # The name of this computer as Blossom shows it: plain ASCII, at most 64
+    # characters, never empty.
+    local LC_ALL=C
+    local t
+    t=$(printf '%s' "$1" | tr -cd 'A-Za-z0-9 ._-')
+    t=$(trim_text "${t:0:64}")
+    [ -n "$t" ] || t='farm computer'
+    printf '%s' "$t"
+}
+
+clean_remote_text() {
+    # A text that came from the network, made safe to print: one line of plain
+    # ASCII, at most 300 characters.
+    local LC_ALL=C
+    local t
+    t=$(printf '%s' "$1" | tr '\r\n\t' '   ' | tr -cd '\040-\176')
+    printf '%s' "${t:0:300}"
+}
+
+get_pairing_message() {
+    # get_pairing_message <error code of Blossom> <its text>
+    # What an answer of Blossom's pairing API means, for the person reading.
+    case $1 in
+        pairing_code_unknown) echo 'Blossom does not know this pairing code. A code works once and only as it is shown.' ;;
+        pairing_code_expired) echo 'This pairing code has expired. A code is valid for 30 minutes.' ;;
+        pairing_code_used) echo 'This pairing code was already used by another computer. If that was not you, do not confirm anything in Blossom: decline that computer there.' ;;
+        rate_limited) echo 'Blossom is receiving too many pairing attempts at the moment.' ;;
+        farm_token_invalid | farm_token_revoked) echo 'Blossom no longer accepts this computer: it was unpaired there, or its site was removed.' ;;
+        pairing_rejected) echo 'This computer was declined in Blossom.' ;;
+        pairing_expired) echo 'The pairing was not confirmed in Blossom in time.' ;;
+        credentials_required) echo 'Blossom has no hub password or restart secret for these addresses and needs them sent again.' ;;
+        *) if [ -n "$2" ]; then clean_remote_text "$2"; echo; else echo 'Blossom refused the request.'; fi ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
 # System helpers
 # ---------------------------------------------------------------------------
@@ -671,6 +809,8 @@ get_farm_paths() {
     FARM_CLOUDFLARED_EXE=$FARM_BIN/cloudflared
     FARM_TOOLS_DIR=$FARM_BIN/tools
     FARM_FINGERPRINTS=$FARM_CONFIG/services
+    FARM_PAIRING=$FARM_CONFIG/pairing.json
+    FARM_PAIRING_NEW=$FARM_CONFIG/pairing.new.json
 }
 
 protect_farm_path() {
@@ -830,10 +970,15 @@ farm_http_cleanup() {
 }
 
 invoke_farm_http() {
-    # invoke_farm_http <url> [--method M] [--body TEXT] [--bearer TOKEN] [--timeout S] [--like-blossom]
+    # invoke_farm_http <url> [--method M] [--body TEXT] [--bearer TOKEN] [--timeout S] [--like-blossom] [--https-only] [--agent TEXT]
     # One HTTP call that never fails for an HTTP status and never follows a
     # redirect. Sets HTTP_STATUS (0 = no HTTP answer), HTTP_TEXT (at most 1 MB),
-    # HTTP_ERROR and HTTP_CHALLENGE (1 when Cloudflare answered instead).
+    # HTTP_ERROR, HTTP_CHALLENGE (1 when Cloudflare answered instead),
+    # HTTP_CURL_CODE (the exit status of curl) and HTTP_RETRY_AFTER (the
+    # seconds of a Retry-After header, or nothing).
+    #
+    # --https-only refuses any address that is not https with TLS 1.2 or later
+    # (used for Blossom itself: the farm's credentials travel on that call).
     #
     # Nothing secret is put on a command line: the address, the headers and
     # the body go to curl through its standard input.
@@ -841,7 +986,7 @@ invoke_farm_http() {
     # --like-blossom sends what Blossom's servers send: no User-Agent and no
     # Accept header. Cloudflare treats a request without a User-Agent
     # differently (Browser Integrity Check), so the self-test must look the same.
-    local url=$1 method=GET body='' bearer='' timeout=15 like=0 config code
+    local url=$1 method=GET body='' bearer='' timeout=15 like=0 config code https_only=0 agent='blossom-farm-kit'
     shift
     while [ $# -gt 0 ]; do
         case $1 in
@@ -850,10 +995,12 @@ invoke_farm_http() {
             --bearer) bearer=$2; shift 2 ;;
             --timeout) timeout=$2; shift 2 ;;
             --like-blossom) like=1; shift ;;
+            --https-only) https_only=1; shift ;;
+            --agent) agent=$2; shift 2 ;;
             *) shift ;;
         esac
     done
-    HTTP_STATUS=0; HTTP_TEXT=''; HTTP_ERROR=''; HTTP_CHALLENGE=0
+    HTTP_STATUS=0; HTTP_TEXT=''; HTTP_ERROR=''; HTTP_CHALLENGE=0; HTTP_CURL_CODE=0; HTTP_RETRY_AFTER=''
     _fk_http_dir
     : > "$FK_HTTP_DIR/body"; : > "$FK_HTTP_DIR/headers"; : > "$FK_HTTP_DIR/error"
     config="url = $(curl_config_quote "$url")
@@ -863,18 +1010,26 @@ connect-timeout = $timeout
 silent
 show-error
 globoff
-proto = \"=http,https\"
 output = $(curl_config_quote "$FK_HTTP_DIR/body")
 dump-header = $(curl_config_quote "$FK_HTTP_DIR/headers")
 write-out = \"%{http_code}\"
 "
+    if [ "$https_only" = 1 ]; then
+        config="${config}proto = \"=https\"
+tlsv1.2
+max-redirs = 0
+"
+    else
+        config="${config}proto = \"=http,https\"
+"
+    fi
     if [ "$like" = 1 ]; then
         config="${config}header = \"User-Agent:\"
 header = \"Accept:\"
 header = \"Accept-Encoding: identity\"
 "
     else
-        config="${config}user-agent = \"blossom-farm-kit\"
+        config="${config}user-agent = $(curl_config_quote "$agent")
 header = \"Accept: application/json\"
 "
     fi
@@ -891,6 +1046,7 @@ data-binary = $(curl_config_quote "$body")
 "
     fi
     code=$(printf '%s' "$config" | curl -q -K - 2> "$FK_HTTP_DIR/error")
+    HTTP_CURL_CODE=$?
     case $code in '' | *[!0-9]*) code=0 ;; esac
     HTTP_STATUS=$((10#$code))
     if [ "$HTTP_STATUS" -eq 0 ]; then
@@ -899,6 +1055,7 @@ data-binary = $(curl_config_quote "$body")
         return 0
     fi
     HTTP_TEXT=$(head -c 1048576 "$FK_HTTP_DIR/body" | LC_ALL=C tr -d '\000')
+    HTTP_RETRY_AFTER=$(LC_ALL=C awk 'tolower($1) == "retry-after:" { v = $2; sub(/\r$/, "", v); if (v ~ /^[0-9]+$/) print v; exit }' "$FK_HTTP_DIR/headers")
     # Cloudflare marks an answer that is its own challenge or block page.
     if LC_ALL=C grep -qi '^cf-mitigated:' "$FK_HTTP_DIR/headers"; then HTTP_CHALLENGE=1; fi
     if [ "$HTTP_STATUS" -eq 403 ]; then
@@ -1551,4 +1708,377 @@ EOF
         case $reached in *" $id "*) ;; *) printf '%s   NOT RUN %s: an earlier step failed.%s\n' "$FK_GRAY" "$(_fk_step_title "$id")" "$FK_OFF" ;; esac
     done
     return "$all_ok"
+}
+
+# ---------------------------------------------------------------------------
+# Pairing with Blossom CRM
+# ---------------------------------------------------------------------------
+# Blossom shows a command that carries a pairing code. The installer claims
+# the code when it starts, sends the description of the farm when it has
+# finished, and from then on this computer holds a "farm token": with it the
+# scripts send new credentials to Blossom without a new code. The token is
+# made here, kept in /opt/farm/config/pairing.json (root only), and Blossom
+# stores only its SHA-256. Everything goes to the one https address the
+# pairing was made with; a redirect is refused, not followed.
+# docs/security.md, section 9, is the threat model.
+
+FK_APP_TRIES=${FK_APP_TRIES:-4}
+FK_APP_RETRY_DELAY=${FK_APP_RETRY_DELAY:-2}
+FK_PAIR_HELP='In Blossom open Phone Farm -> Farm setup -> Connect a computer, copy the new command and run it on this computer. That is safe: it keeps what is already set up.'
+
+farm_kit_version() {
+    local v=''
+    if [ -n "${KIT_VERSIONS:-}" ]; then v=$(kit_version kit)
+    elif [ -n "${FARM_CONFIG:-}" ]; then v=$(json_file_get "$FARM_CONFIG/versions.json" kit); fi
+    case $v in '' | *[!0-9A-Za-z.+-]*) v='0' ;; esac
+    printf '%s' "$v"
+}
+
+farm_computer_label() {
+    local name=''
+    if command -v scutil > /dev/null 2>&1; then name=$(scutil --get ComputerName 2> /dev/null); fi
+    [ -n "$name" ] || name=$(hostname 2> /dev/null)
+    clean_computer_label "${name%%.*}"
+}
+
+farm_os_version() {
+    local v=''
+    if command -v sw_vers > /dev/null 2>&1; then v=$(sw_vers -productVersion 2> /dev/null); fi
+    if [ -n "$v" ]; then clean_computer_label "macOS $v"; else clean_computer_label "$(uname -sr 2> /dev/null)"; fi
+}
+
+_fk_computer_json() {
+    # What this computer says about itself. No secret is in it.
+    local installed=${FARM_CONFIG:-}/versions.json
+    printf '{"label":%s,"platform":"macos","os_version":%s,"kit_version":%s,"gads_version":%s,"provider_version":%s}' \
+        "$(json_string "$(farm_computer_label)")" "$(json_string "$(farm_os_version)")" "$(json_string "$(farm_kit_version)")" \
+        "$(json_string "$(json_file_get "$installed" gads.version)")" "$(json_string "$(json_file_get "$installed" gadsDrag.version)")"
+}
+
+_fk_pair_clear() {
+    FARM_IS_PAIRED=0
+    PAIR_ORIGIN=''; PAIR_TOKEN=''; PAIR_CODE_SHA=''; PAIR_ID=''; PAIR_WORKSPACE=''; PAIR_CLAIMED_AT=''; PAIR_SITE_SENT_AT=''
+}
+
+read_farm_pairing() {
+    # Sets FARM_IS_PAIRED (0|1) and, when this computer holds a pairing,
+    # PAIR_ORIGIN, PAIR_TOKEN, PAIR_CODE_SHA, PAIR_ID, PAIR_WORKSPACE,
+    # PAIR_CLAIMED_AT and PAIR_SITE_SENT_AT (empty until Blossom has accepted
+    # the description of the farm once).
+    local text
+    _fk_pair_clear
+    [ -f "$FARM_PAIRING" ] || return 0
+    text=$(cat "$FARM_PAIRING" 2> /dev/null)
+    PAIR_ORIGIN=$(normalize_app_origin "$(json_get "$text" appOrigin)")
+    PAIR_TOKEN=$(json_get "$text" farmToken)
+    if [ -n "$(test_app_origin "$PAIR_ORIGIN")" ] || ! test_farm_token "$PAIR_TOKEN"; then _fk_pair_clear; return 0; fi
+    PAIR_CODE_SHA=$(json_get "$text" codeSha256)
+    PAIR_ID=$(json_get "$text" pairingId)
+    PAIR_WORKSPACE=$(json_get "$text" workspace)
+    PAIR_CLAIMED_AT=$(json_get "$text" claimedAt)
+    PAIR_SITE_SENT_AT=$(json_get "$text" siteSentAt)
+    FARM_IS_PAIRED=1
+}
+
+write_farm_pairing() {
+    # Writes PAIR_* to the pairing file (root only).
+    write_secret_file "$FARM_PAIRING" "{
+  \"appOrigin\": $(json_string "$PAIR_ORIGIN"),
+  \"farmToken\": $(json_string "$PAIR_TOKEN"),
+  \"codeSha256\": $(json_string "$PAIR_CODE_SHA"),
+  \"pairingId\": $(json_string "$PAIR_ID"),
+  \"workspace\": $(json_string "$PAIR_WORKSPACE"),
+  \"claimedAt\": $(json_string "$PAIR_CLAIMED_AT"),
+  \"siteSentAt\": $(json_string "$PAIR_SITE_SENT_AT")
+}
+" private
+}
+
+forget_farm_pairing() {
+    rm -f "$FARM_PAIRING" "$FARM_PAIRING_NEW"
+    _fk_pair_clear
+}
+
+invoke_blossom() {
+    # invoke_blossom <origin> <method> <path> [--body TEXT] [--bearer TOKEN] [--tries N]
+    # One call to Blossom's pairing API. Status 0 when Blossom answered 2xx
+    # with JSON; otherwise 1. Sets APP_STATUS, APP_TEXT (the JSON answer),
+    # APP_CODE (the "code" of a refusal), APP_KIND and APP_MESSAGE (a sentence
+    # for the person at the keyboard; never contains a secret).
+    #   APP_KIND   ok           Blossom accepted the request
+    #              refused      Blossom answered and said no (APP_CODE says why)
+    #              origin       the address is not an https origin: nothing was sent
+    #              tls          the certificate of the address could not be verified
+    #              redirect     the address answered with a redirect: not followed
+    #              not_blossom  the address answered, but not as Blossom's API
+    #              network      no answer, or Blossom was busy, after every try
+    # The request is repeated, with a growing pause, only when it did not
+    # arrive or Blossom said to come back later (429, 5xx).
+    local origin=$1 method=$2 path=$3 body='' bearer='' tries=$FK_APP_TRIES reason try=1 delay=$FK_APP_RETRY_DELAY wait_s
+    shift 3
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --body) body=$2; shift 2 ;;
+            --bearer) bearer=$2; shift 2 ;;
+            --tries) tries=$2; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    APP_STATUS=0; APP_TEXT=''; APP_CODE=''; APP_KIND=''; APP_MESSAGE=''
+    origin=$(normalize_app_origin "$origin")
+    reason=$(test_app_origin "$origin")
+    if [ -n "$reason" ]; then APP_KIND=origin; APP_MESSAGE="$reason Nothing was sent."; return 1; fi
+    while true; do
+        invoke_farm_http "$origin$path" --https-only --method "$method" --body "$body" --bearer "$bearer" --timeout 20 --agent "blossom-farm-kit/$(farm_kit_version)"
+        APP_STATUS=$HTTP_STATUS; APP_TEXT=''; APP_CODE=''
+        if [ "$HTTP_STATUS" -eq 0 ]; then
+            case $HTTP_CURL_CODE in
+                35 | 51 | 53 | 54 | 58 | 59 | 60 | 64 | 66 | 77 | 80 | 82 | 83 | 90 | 91)
+                    APP_KIND=tls
+                    APP_MESSAGE="The certificate of $origin could not be verified ($(clean_remote_text "$HTTP_ERROR")). Nothing was sent. Check the date and time of this computer; if they are right, something between this computer and Blossom is intercepting the connection."
+                    return 1 ;;
+            esac
+            APP_KIND=network
+            APP_MESSAGE="$origin could not be reached ($(clean_remote_text "$HTTP_ERROR")). Check the internet connection of this computer."
+        elif [ "$HTTP_STATUS" -ge 300 ] && [ "$HTTP_STATUS" -lt 400 ]; then
+            APP_KIND=redirect
+            APP_MESSAGE="$origin answered with a redirect (HTTP $HTTP_STATUS). The farm's credentials are only sent to the address the pairing was made with, so the redirect was not followed. Copy the command from Blossom again."
+            return 1
+        elif [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+            if [ -n "$HTTP_TEXT" ] && printf '%s' "$HTTP_TEXT" | json_flatten > /dev/null 2>&1; then
+                APP_KIND=ok; APP_TEXT=$HTTP_TEXT
+                return 0
+            fi
+            APP_KIND=not_blossom
+            APP_MESSAGE="$origin answered, but not the way Blossom does. Is it the address you open Blossom at? Copy the command from Blossom again."
+            return 1
+        else
+            APP_CODE=$(json_get "$HTTP_TEXT" code)
+            case $APP_CODE in *[!a-z0-9_]*) APP_CODE='' ;; esac
+            if [ "$HTTP_STATUS" -eq 429 ] || [ "$HTTP_STATUS" -ge 500 ]; then
+                APP_KIND=network
+                APP_MESSAGE="Blossom is busy or not available right now (HTTP $HTTP_STATUS)."
+            elif [ -z "$APP_CODE" ]; then
+                APP_KIND=not_blossom
+                APP_MESSAGE="$origin answered HTTP $HTTP_STATUS, but not the way Blossom does. Is it the address you open Blossom at? Is this kit current?"
+                return 1
+            else
+                APP_KIND=refused
+                APP_TEXT=$HTTP_TEXT
+                APP_MESSAGE=$(get_pairing_message "$APP_CODE" "$(json_get "$HTTP_TEXT" error)")
+                return 1
+            fi
+        fi
+        if [ "$try" -ge "$tries" ]; then return 1; fi
+        wait_s=$delay
+        case $HTTP_RETRY_AFTER in '' | *[!0-9]*) ;; *) if [ "${#HTTP_RETRY_AFTER}" -le 4 ]; then wait_s=$((10#$HTTP_RETRY_AFTER)); fi ;; esac
+        [ "$wait_s" -gt 60 ] && wait_s=60
+        sleep "$wait_s"
+        try=$((try + 1))
+        delay=$((delay * 2)); [ "$delay" -gt 30 ] && delay=30
+    done
+}
+
+_fk_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+
+pair_claim() {
+    # pair_claim <origin> <pairing code>
+    # Hands the pairing code to Blossom together with a farm token made here.
+    # Status 0: Blossom knows this computer; pairing.json holds the token.
+    # Status 1: APP_KIND and APP_MESSAGE say why; an earlier pairing of this
+    # computer is left as it was.
+    #
+    # The token is written to disk BEFORE it is sent: if the answer is lost on
+    # the way, running the same command again repeats the claim with the same
+    # token, which Blossom accepts as the same claim.
+    local origin code code_sha token='' text old_origin='' old_token='' body
+    origin=$(normalize_app_origin "$1")
+    code=$(normalize_pairing_code "$2")
+    APP_STATUS=0; APP_TEXT=''; APP_CODE=''; APP_KIND=''; APP_MESSAGE=''
+    text=$(test_app_origin "$origin")
+    if [ -n "$text" ]; then APP_KIND=origin; APP_MESSAGE="$text Nothing was sent."; return 1; fi
+    text=$(test_pairing_code "$code")
+    if [ -n "$text" ]; then APP_KIND=origin; APP_MESSAGE="$text Nothing was sent."; return 1; fi
+    code_sha=$(get_text_sha256 "$origin $code")
+
+    read_farm_pairing
+    if [ "$FARM_IS_PAIRED" = 1 ]; then
+        if [ "$PAIR_CODE_SHA" = "$code_sha" ] && [ -n "$PAIR_CLAIMED_AT" ]; then
+            APP_KIND=ok
+            return 0   # this very code was claimed by this computer before
+        fi
+        old_origin=$PAIR_ORIGIN; old_token=$PAIR_TOKEN
+    fi
+    if [ -f "$FARM_PAIRING_NEW" ]; then
+        text=$(cat "$FARM_PAIRING_NEW" 2> /dev/null)
+        if [ "$(json_get "$text" codeSha256)" = "$code_sha" ]; then token=$(json_get "$text" farmToken); fi
+    fi
+    if ! test_farm_token "$token"; then
+        token=$(new_farm_token)
+        if ! test_farm_token "$token"; then APP_KIND=origin; APP_MESSAGE='The random generator of this computer gave no token.'; return 1; fi
+        write_secret_file "$FARM_PAIRING_NEW" "{\"codeSha256\": $(json_string "$code_sha"), \"farmToken\": $(json_string "$token")}" private
+    fi
+
+    body="{\"protocol\":1,\"pairing_code\":$(json_string "$code"),\"farm_token\":$(json_string "$token"),\"computer\":$(_fk_computer_json)}"
+    if ! invoke_blossom "$origin" POST /api/farm/pair/claim --body "$body"; then
+        body=''
+        case $APP_CODE in pairing_code_unknown | pairing_code_expired | pairing_code_used | bad_request) rm -f "$FARM_PAIRING_NEW" ;; esac
+        return 1
+    fi
+    body=''
+    PAIR_ORIGIN=$origin; PAIR_TOKEN=$token; PAIR_CODE_SHA=$code_sha
+    PAIR_ID=$(clean_remote_text "$(json_get "$APP_TEXT" pairing_id)")
+    PAIR_WORKSPACE=$(clean_remote_text "$(json_get "$APP_TEXT" workspace_name)")
+    PAIR_CLAIMED_AT=$(_fk_now); PAIR_SITE_SENT_AT=''
+    write_farm_pairing
+    rm -f "$FARM_PAIRING_NEW"
+    FARM_IS_PAIRED=1
+    if [ -n "$old_token" ] && [ "$old_token" != "$token" ]; then
+        # the pairing this one replaces: tell its Blossom, without insisting
+        invoke_blossom "$old_origin" DELETE /api/farm/pair/token --bearer "$old_token" --tries 1 || true
+        APP_KIND=ok; APP_MESSAGE=''; APP_CODE=''
+    fi
+    return 0
+}
+
+_fk_pair_read_answer() {
+    # Reads the state out of an answer of Blossom (APP_TEXT).
+    local v
+    PAIR_STATE=$(json_get "$APP_TEXT" state)
+    case $PAIR_STATE in installing | checking | awaiting_confirmation | active | rejected | expired) ;; *) PAIR_STATE='' ;; esac
+    PAIR_NEEDS_CONFIRMATION=$(json_get "$APP_TEXT" needs_confirmation)
+    PAIR_SITE_LABEL=$(clean_remote_text "$(json_get "$APP_TEXT" site_label)")
+    [ "$PAIR_SITE_LABEL" = null ] && PAIR_SITE_LABEL=''
+    v=$(clean_remote_text "$(json_get "$APP_TEXT" workspace_name)")
+    [ -n "$v" ] && [ "$v" != null ] && PAIR_WORKSPACE=$v
+    PAIR_CHECK_OK=$(json_get "$APP_TEXT" check.ok)
+    PAIR_DEVICES=$(json_get "$APP_TEXT" check.devices)
+    case $PAIR_DEVICES in '' | *[!0-9]*) PAIR_DEVICES='' ;; esac
+    PAIR_CHECK_STEP=$(clean_remote_text "$(json_get "$APP_TEXT" check.failed_step)")
+    [ "$PAIR_CHECK_STEP" = null ] && PAIR_CHECK_STEP=''
+    PAIR_CHECK_DETAIL=$(clean_remote_text "$(json_get "$APP_TEXT" check.detail)")
+    [ "$PAIR_CHECK_DETAIL" = null ] && PAIR_CHECK_DETAIL=''
+    PAIR_POLL=$(json_get "$APP_TEXT" poll_after_seconds)
+    case $PAIR_POLL in '' | *[!0-9]* | ?????*) PAIR_POLL=3 ;; esac
+    [ "$PAIR_POLL" -lt 1 ] && PAIR_POLL=1
+    [ "$PAIR_POLL" -gt 30 ] && PAIR_POLL=30
+    return 0
+}
+
+pair_send_site() {
+    # pair_send_site <hub url> <provider url> <nickname> <hub user> <hub password or ''> <restart url> <restart secret or ''>
+    # Sends the description of this farm to the Blossom it is paired with, with
+    # the farm token. A password or secret that is left empty means "keep the
+    # one you have", which Blossom refuses (APP_CODE credentials_required)
+    # when it has none for these addresses. Status 0 when Blossom accepted;
+    # then PAIR_STATE and PAIR_NEEDS_CONFIRMATION say where the pairing stands.
+    local site body
+    read_farm_pairing
+    APP_STATUS=0; APP_TEXT=''; APP_CODE=''; APP_KIND=''; APP_MESSAGE=''
+    if [ "$FARM_IS_PAIRED" != 1 ]; then APP_KIND=origin; APP_MESSAGE='This computer is not paired with Blossom.'; return 1; fi
+    site="\"hub_url\":$(json_string "$1"),\"provider_url\":$(json_string "$2"),\"provider_nickname\":$(json_string "$3"),\"hub_user\":$(json_string "$4"),\"restart_url\":$(json_string "$6")"
+    [ -n "$5" ] && site="$site,\"hub_password\":$(json_string "$5")"
+    [ -n "$7" ] && site="$site,\"restart_secret\":$(json_string "$7")"
+    body="{\"protocol\":1,\"site\":{$site},\"computer\":$(_fk_computer_json)}"
+    site=''
+    if ! invoke_blossom "$PAIR_ORIGIN" PUT /api/farm/pair/site --bearer "$PAIR_TOKEN" --body "$body"; then body=''; return 1; fi
+    body=''
+    _fk_pair_read_answer
+    PAIR_SITE_SENT_AT=$(_fk_now)
+    write_farm_pairing
+    return 0
+}
+
+pair_send_computer() {
+    # Tells Blossom the versions this computer runs now (after an update).
+    read_farm_pairing
+    APP_STATUS=0; APP_TEXT=''; APP_CODE=''; APP_KIND=''; APP_MESSAGE=''
+    if [ "$FARM_IS_PAIRED" != 1 ]; then APP_KIND=origin; APP_MESSAGE='This computer is not paired with Blossom.'; return 1; fi
+    invoke_blossom "$PAIR_ORIGIN" PUT /api/farm/pair/site --bearer "$PAIR_TOKEN" --body "{\"protocol\":1,\"computer\":$(_fk_computer_json)}" --tries 2 || return 1
+    _fk_pair_read_answer
+    return 0
+}
+
+pair_get_status() {
+    # pair_get_status [tries=2]
+    # Asks Blossom where the pairing stands. Status 0: PAIR_STATE is one of
+    # installing, checking, awaiting_confirmation, active, rejected, expired;
+    # PAIR_CHECK_OK (true, false or empty), PAIR_DEVICES, PAIR_CHECK_STEP and
+    # PAIR_CHECK_DETAIL describe what Blossom found when it called the farm.
+    read_farm_pairing
+    APP_STATUS=0; APP_TEXT=''; APP_CODE=''; APP_KIND=''; APP_MESSAGE=''
+    PAIR_STATE=''; PAIR_CHECK_OK=''; PAIR_DEVICES=''; PAIR_CHECK_STEP=''; PAIR_CHECK_DETAIL=''; PAIR_SITE_LABEL=''; PAIR_POLL=3; PAIR_NEEDS_CONFIRMATION=''
+    if [ "$FARM_IS_PAIRED" != 1 ]; then APP_KIND=origin; APP_MESSAGE='This computer is not paired with Blossom.'; return 1; fi
+    invoke_blossom "$PAIR_ORIGIN" GET /api/farm/pair/status --bearer "$PAIR_TOKEN" --tries "${1:-2}" || return 1
+    _fk_pair_read_answer
+    if [ -z "$PAIR_STATE" ]; then APP_KIND=not_blossom; APP_MESSAGE="$PAIR_ORIGIN answered, but with a pairing state this kit does not know. Is this kit current?"; return 1; fi
+    return 0
+}
+
+describe_pairing_check() {
+    # One sentence about what Blossom found when it called the farm.
+    local phones
+    if [ "$PAIR_CHECK_OK" = true ]; then
+        case ${PAIR_DEVICES:-0} in
+            0) phones='no phone yet (expected until the phones are added)' ;;
+            1) phones='1 phone' ;;
+            *) phones="$PAIR_DEVICES phones" ;;
+        esac
+        echo "Blossom sees your farm: $phones."
+    elif [ "$PAIR_CHECK_OK" = false ]; then
+        echo "Blossom could not use the farm yet${PAIR_CHECK_STEP:+ (step: $PAIR_CHECK_STEP)}${PAIR_CHECK_DETAIL:+: $PAIR_CHECK_DETAIL}"
+    fi
+}
+
+pair_wait() {
+    # pair_wait [seconds to wait at most=600]
+    # Follows the pairing after the farm was sent, and says what happens.
+    # Status 0: the site is active in Blossom. 2: still waiting for somebody
+    # to confirm in Blossom (nothing is lost). 1: declined, expired, or
+    # Blossom no longer accepts this computer.
+    local max=${1:-600} waited=0 last='' said_confirm=0 line
+    while true; do
+        if pair_get_status 1; then
+            case $PAIR_STATE in
+                active)
+                    line=$(describe_pairing_check)
+                    write_ok "Confirmed in Blossom${PAIR_SITE_LABEL:+ as \"$PAIR_SITE_LABEL\"}. ${line:-The site is active.}"
+                    return 0 ;;
+                awaiting_confirmation)
+                    if [ "$said_confirm" = 0 ]; then
+                        said_confirm=1
+                        line=$(describe_pairing_check)
+                        if [ "$PAIR_CHECK_OK" = false ]; then write_warn "$line"; elif [ -n "$line" ]; then write_ok "$line"; fi
+                        write_color "$FK_YELLOW" "   Now confirm in Blossom: Phone Farm -> Farm setup shows this computer (\"$(farm_computer_label)\")"
+                        write_color "$FK_YELLOW" '   with its addresses. Check that they are yours, then press Confirm. Waiting...'
+                    fi ;;
+                checking) [ "$last" = checking ] || write_note 'Blossom is calling the farm from its servers...' ;;
+                installing) [ "$last" = installing ] || write_note 'Blossom is waiting for the description of the farm.' ;;
+                rejected) write_warn "This computer was declined in Blossom. $FK_PAIR_HELP"; return 1 ;;
+                expired) write_warn "The pairing was not confirmed in Blossom in time. $FK_PAIR_HELP"; return 1 ;;
+            esac
+            last=$PAIR_STATE
+        elif [ "$APP_KIND" = refused ]; then
+            write_warn "$APP_MESSAGE $FK_PAIR_HELP"
+            return 1
+        elif [ "$APP_KIND" != network ]; then
+            write_warn "$APP_MESSAGE"
+            return 1
+        fi
+        if [ "$waited" -ge "$max" ]; then return 2; fi
+        sleep "$PAIR_POLL"
+        waited=$((waited + PAIR_POLL))
+    done
+}
+
+pair_unpair() {
+    # Tells Blossom that this computer gives up its farm token, and deletes
+    # the pairing file. Status 0 when Blossom took note or no longer knew the
+    # token; 1 when it could not be told (the file is kept).
+    read_farm_pairing
+    APP_STATUS=0; APP_TEXT=''; APP_CODE=''; APP_KIND=''; APP_MESSAGE=''
+    if [ "$FARM_IS_PAIRED" != 1 ]; then forget_farm_pairing; return 0; fi
+    if invoke_blossom "$PAIR_ORIGIN" DELETE /api/farm/pair/token --bearer "$PAIR_TOKEN" --tries 2; then forget_farm_pairing; return 0; fi
+    if [ "$APP_KIND" = refused ] && [ "$APP_STATUS" -eq 401 ]; then forget_farm_pairing; return 0; fi
+    return 1
 }

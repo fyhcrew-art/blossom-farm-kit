@@ -1,0 +1,151 @@
+# Makes a kit release: the kit archive, its checksum list, and the two
+# bootstrap files with the release's checksum written into them
+# (.github/scripts/make-kit-release.sh has the details; docs/RELEASING.md the
+# procedure).
+#
+# Runs on a tag "kit-v*" (makes the files and publishes them as a
+# pre-release, not marked "Latest") or by hand (makes the files and keeps
+# them as a workflow artifact; publishes nothing).
+#
+# A release is published as a pre-release on purpose: its files have to be at
+# their final address before the acceptance checklists can be run with the
+# command Blossom would show. A maintainer marks it "Latest" afterwards; that
+# changes no file and no checksum. A published kit release is never changed
+# and its tag is never moved: Blossom CRM pins the SHA-256 of its bootstrap
+# files.
+name: Release the kit
+
+on:
+  push:
+    tags:
+      - 'kit-v*'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-kit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Make the release files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.pins.outputs.tag }}
+      version: ${{ steps.pins.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the kit version from versions.json
+        id: pins
+        run: |
+          set -euo pipefail
+          VERSION="$(jq -er .kit versions.json)"
+          {
+            echo "version=$VERSION"
+            echo "tag=kit-v$VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: The pushed tag must be the one versions.json names
+        if: github.event_name == 'push'
+        env:
+          PUSHED: ${{ github.ref_name }}
+          PINNED: ${{ steps.pins.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$PUSHED" != "$PINNED" ]; then
+            echo "::error::Tag $PUSHED was pushed, but versions.json says kit ${PINNED#kit-v}. Set \"kit\" in versions.json in the commit you tag."
+            exit 1
+          fi
+
+      - name: The provider files this kit downloads must be published
+        run: |
+          set -euo pipefail
+          FAILED=0
+          for URL in "$(jq -er .gadsDrag.url versions.json)" "$(jq -er .macos.arm64.provider.url versions.json)" "$(jq -er .macos.x86_64.provider.url versions.json)"; do
+            CODE="$(curl -sS -o /dev/null -L --max-redirs 5 -w '%{http_code}' -r 0-0 "$URL" || true)"
+            case "$CODE" in
+              200 | 206) echo "published: $URL" ;;
+              *) echo "::error::$URL answers HTTP $CODE. The installers of this kit would stop at step 4. Publish the gads-... release first (docs/RELEASING.md)."; FAILED=1 ;;
+            esac
+          done
+          exit "$FAILED"
+
+      - name: Make the archive, SHA256SUMS and the bootstrap files
+        env:
+          TAG: ${{ steps.pins.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/make-kit-release.sh --out "$RUNNER_TEMP/dist" --tag "$TAG"
+
+      - name: The chain holds together
+        env:
+          VERSION: ${{ steps.pins.outputs.version }}
+        working-directory: ${{ runner.temp }}/dist
+        run: |
+          set -euo pipefail
+          sha256sum -c SHA256SUMS
+          SUMS="$(sha256sum SHA256SUMS | cut -d' ' -f1)"
+          grep -qx "KIT_SUMS_SHA256='$SUMS'" bootstrap.sh
+          grep -q "^\$KitSumsSha256 = '$SUMS'" bootstrap.ps1
+          test "$(jq -er .bootstrapShSha256 bootstrap-hashes.json)" = "$(sha256sum bootstrap.sh | cut -d' ' -f1)"
+          test "$(jq -er .bootstrapPs1Sha256 bootstrap-hashes.json)" = "$(sha256sum bootstrap.ps1 | cut -d' ' -f1)"
+          # what the archive holds is what the tag holds
+          unzip -q "blossom-farm-kit-$VERSION.zip" -d "$RUNNER_TEMP/unpacked"
+          diff -r --exclude=.git "$GITHUB_WORKSPACE" "$RUNNER_TEMP/unpacked/blossom-farm-kit-$VERSION" > /dev/null || {
+            # line ends of the Windows scripts differ between a checkout on Linux and the archive; nothing else may
+            diff -r --exclude=.git --strip-trailing-cr "$GITHUB_WORKSPACE" "$RUNNER_TEMP/unpacked/blossom-farm-kit-$VERSION"
+          }
+          echo "The command pins the bootstrap files, they pin SHA256SUMS, SHA256SUMS pins the archive."
+
+      - name: Keep the files for the release job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kit-release
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish the pre-release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: kit-release
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c SHA256SUMS
+          cat > notes.md <<NOTES
+          Blossom farm kit ${VERSION}: everything needed to turn a Windows PC or a Mac into a phone farm for Blossom CRM. The README of the repository is the guide.
+
+          * **The usual way:** Blossom CRM shows one command for the farm computer (Phone Farm → Farm setup → Connect a computer). It downloads \`bootstrap.ps1\` or \`bootstrap.sh\` from this release, checks it, and that file fetches and checks the kit.
+          * **By hand:** download \`blossom-farm-kit-${VERSION}.zip\`, compare its SHA-256 with \`SHA256SUMS\`, unpack it and run the installer inside (README, "Without the command").
+          * \`bootstrap-hashes.json\` is for the people who maintain Blossom CRM: the SHA-256 of the two bootstrap files, which Blossom writes into the command it shows.
+
+          The files of this release are never replaced. Releases named \`GADS-drag …\` on the same page are a program the installer fetches by itself, not the kit.
+          NOTES
+          # A pre-release, not "Latest": see the top of this file.
+          gh release create "$TAG" --verify-tag --title "kit-v${VERSION}" --notes-file notes.md --prerelease --latest=false \
+            "blossom-farm-kit-${VERSION}.zip" SHA256SUMS bootstrap.sh bootstrap.ps1 bootstrap-hashes.json

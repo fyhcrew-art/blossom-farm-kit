@@ -9,7 +9,18 @@
 # (programs, the tunnel, secrets, the database) and only fills in what is
 # missing. See README.md for what each step does.
 #
+# The command Blossom CRM shows under Phone Farm -> Farm setup -> Connect a
+# computer runs this script with --app-origin and --pairing-code: the farm is
+# then connected to Blossom by the script itself, and nothing has to be
+# copied by hand.
+#
 # Options:
+#   --pairing-code CODE      The pairing code Blossom shows (five groups of four characters). It
+#                            works once and for 30 minutes. Needs --app-origin.
+#   --app-origin ADDRESS     The https address of Blossom, as in the command Blossom shows. The
+#                            farm's credentials are sent there and nowhere else.
+#   --domain NAME            Your domain at Cloudflare, for example yourdomain.com. The three host
+#                            names become farm-hub., farm-provider. and farm-restart. under it.
 #   --hub-host NAME          Public host name for the hub, for example farm-hub.yourdomain.com.
 #   --provider-host NAME     Public host name for the provider, for example farm-provider.yourdomain.com.
 #   --restart-host NAME      Public host name for the restart service, for example farm-restart.yourdomain.com.
@@ -41,10 +52,17 @@ KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 HUB_HOST=''; PROVIDER_HOST=''; RESTART_HOST=''; NICKNAME=''; TUNNEL_NAME='blossom-farm'
 OVERWRITE_DNS=0; RESET_HUB_USER=0; WITH_APPIUM=0; PROVIDER_BINARY=''; FFMPEG_OPTION=''
 SKIP_FIREWALL=0; SKIP_POWER=0; SKIP_SELF_TEST=0
+PAIRING_CODE=''; APP_ORIGIN=''; DOMAIN=''
 
 need_value() { [ $# -ge 2 ] || stop_farm "The option $1 needs a value." 'See the list of options at the top of install.sh.'; }
 while [ $# -gt 0 ]; do
     case $1 in
+        --pairing-code=*) PAIRING_CODE=${1#*=} ;;
+        --pairing-code) need_value "$@"; PAIRING_CODE=$2; shift ;;
+        --app-origin=*) APP_ORIGIN=${1#*=} ;;
+        --app-origin) need_value "$@"; APP_ORIGIN=$2; shift ;;
+        --domain=*) DOMAIN=${1#*=} ;;
+        --domain) need_value "$@"; DOMAIN=$2; shift ;;
         --hub-host=*) HUB_HOST=${1#*=} ;;
         --hub-host) need_value "$@"; HUB_HOST=$2; shift ;;
         --provider-host=*) PROVIDER_HOST=${1#*=} ;;
@@ -91,6 +109,13 @@ HAVE_SUMMARY=0
 VALUES_SHOWN=0
 ADMIN_PASSWORD=''
 ADMIN_TOKEN=''
+# 1 once Blossom has accepted this computer (a pairing code claimed in this
+# run, or a pairing from an earlier run that Blossom still knows).
+PAIRING=0
+# 1 once Blossom has accepted the description of the farm in this run: the
+# values are then not printed for copying.
+SENT_TO_BLOSSOM=0
+ACTIVE_IN_BLOSSOM=0
 
 # Farm services that were running when the script started. Whatever happens
 # (an error, a wrong password, Ctrl+C), the ones this run stopped are started
@@ -125,19 +150,43 @@ restore_farm_services() {
 show_final_values() {
     [ "$HAVE_SUMMARY" = 1 ] || return 0
     VALUES_SHOWN=1
+    if [ "$SENT_TO_BLOSSOM" = 1 ]; then
+        echo
+        write_color "$FK_CYAN" '======================================================================'
+        write_color "$FK_CYAN" ' Blossom CRM has this farm: nothing to copy'
+        write_color "$FK_CYAN" '======================================================================'
+        echo "   Sent to ................ $PAIR_ORIGIN${PAIR_WORKSPACE:+ (workspace \"$PAIR_WORKSPACE\")}"
+        echo "   Hub address ............ https://$HUB_HOST"
+        echo "   Provider address ....... https://$PROVIDER_HOST"
+        echo "   Provider nickname ...... $NICKNAME"
+        echo "   Hub user ............... $HUB_USER_NAME (Blossom has its password; it is not shown here)"
+        echo "   Restart service address  https://$RESTART_HOST (Blossom has its secret; it is not shown here)"
+        echo
+        if [ "$ACTIVE_IN_BLOSSOM" = 1 ]; then
+            write_color "$FK_YELLOW" ' The site is confirmed and active in Blossom. New passwords made later by'
+            write_color "$FK_YELLOW" ' scripts/rotate-secrets.sh reach Blossom the same way. To see the pairing:'
+            write_color "$FK_YELLOW" ' scripts/status.sh.'
+        else
+            write_color "$FK_YELLOW" ' The site becomes active when an admin has confirmed it in Blossom (Phone Farm'
+            write_color "$FK_YELLOW" ' -> Farm setup). New passwords made later by scripts/rotate-secrets.sh reach'
+            write_color "$FK_YELLOW" ' Blossom the same way. To see the pairing: scripts/status.sh.'
+        fi
+        echo
+        return 0
+    fi
     echo
     write_color "$FK_CYAN" '======================================================================'
-    write_color "$FK_CYAN" ' Paste these into Blossom CRM -> Phone Farm -> Farm setup -> Connect a farm'
+    write_color "$FK_CYAN" ' Enter these in Blossom CRM -> Phone Farm -> Farm setup -> Advanced'
     write_color "$FK_CYAN" '======================================================================'
     echo "   Hub address ............ https://$HUB_HOST"
     echo "   Provider address ....... https://$PROVIDER_HOST"
     echo "   Provider nickname ...... $NICKNAME"
     echo "   Hub user ............... $HUB_USER_NAME"
     if [ -n "$NEW_HUB_PASSWORD" ]; then echo "   Hub password ........... $NEW_HUB_PASSWORD"
-    else echo '   Hub password ........... (unchanged - the one shown when it was created)'; fi
+    else echo '   Hub password ........... (unchanged - the one made earlier)'; fi
     echo "   Restart service address  https://$RESTART_HOST"
     if [ -n "$NEW_RESTART_SECRET" ]; then echo "   Restart secret ......... $NEW_RESTART_SECRET"
-    else echo '   Restart secret ......... (unchanged - the one shown when it was created)'; fi
+    else echo '   Restart secret ......... (unchanged - the one made earlier)'; fi
     echo
     if [ -n "$NEW_HUB_PASSWORD" ] || [ -n "$NEW_RESTART_SECRET" ]; then
         write_color "$FK_YELLOW" ' WARNING: the password and the secret above are shown ONCE.'
@@ -148,7 +197,32 @@ show_final_values() {
         write_color "$FK_YELLOW" ' Nothing secret was changed in this run. Lost a value? scripts/rotate-secrets.sh'
         write_color "$FK_YELLOW" ' makes new ones.'
     fi
+    write_color "$FK_YELLOW" ' The way without copying: Blossom -> Phone Farm -> Farm setup -> Connect a'
+    write_color "$FK_YELLOW" ' computer shows one command for this computer; it is safe to run on a farm'
+    write_color "$FK_YELLOW" ' that is already installed.'
     echo
+}
+
+set_hub_user_password() {
+    # Gives the hub user Blossom signs in with a new random password. Sets
+    # NEW_HUB_PASSWORD when the hub accepted it; status 1 otherwise.
+    local candidate body
+    candidate=$(new_random_secret 32 base64url)
+    body="{\"username\":$(json_string "$HUB_USER_NAME"),\"password\":$(json_string "$candidate"),\"role\":\"admin\",\"workspace_ids\":[]}"
+    hub_admin /admin/user PUT "$body"
+    body=''
+    [ "$HTTP_STATUS" -eq 200 ] || return 1
+    NEW_HUB_PASSWORD=$candidate
+    return 0
+}
+
+send_farm_to_blossom() {
+    # The description of this farm, to the Blossom this computer is paired
+    # with. The hub password goes along only when this run made one; the
+    # restart secret is read from its file.
+    local secret
+    secret=$(tr -d '[:space:]' < "$FARM_RESTART_SECRET")
+    pair_send_site "https://$HUB_HOST" "https://$PROVIDER_HOST" "$NICKNAME" "$HUB_USER_NAME" "$NEW_HUB_PASSWORD" "https://$RESTART_HOST" "$secret"
 }
 
 # shellcheck disable=SC2329  # runs as a trap
@@ -247,6 +321,20 @@ write_step '1/12  Checking this Mac'
 # ----------------------------------------------------------------------
 assert_macos_root
 get_farm_arch
+if [ -n "$PAIRING_CODE" ] || [ -n "$APP_ORIGIN" ]; then
+    # A slip in the command is cheaper to find now than after the installation.
+    if [ -z "$PAIRING_CODE" ] || [ -z "$APP_ORIGIN" ]; then
+        stop_farm 'The options --pairing-code and --app-origin belong together, and one of them is missing.' 'Copy the whole command from Blossom (Phone Farm -> Farm setup -> Connect a computer) and run it again. To install without pairing, leave both out: the values to enter in Blossom are then shown at the end.'
+    fi
+    reason=$(test_app_origin "$APP_ORIGIN")
+    [ -z "$reason" ] || stop_farm "--app-origin: $reason" 'Copy the whole command from Blossom (Phone Farm -> Farm setup -> Connect a computer) and run it again.'
+    reason=$(test_pairing_code "$PAIRING_CODE")
+    [ -z "$reason" ] || stop_farm "--pairing-code: $reason" 'Copy the whole command from Blossom (Phone Farm -> Farm setup -> Connect a computer) and run it again.'
+fi
+if [ -n "$DOMAIN" ]; then
+    reason=$(test_farm_domain "$DOMAIN")
+    [ -z "$reason" ] || stop_farm "--domain: $reason" 'Give the domain you added to Cloudflare, for example   --domain yourdomain.com'
+fi
 RUN_USER=${SUDO_USER:-}
 [ "$RUN_USER" = root ] && RUN_USER=''
 for needed in versions.json lib/json.awk services/restart-server.js services/provider-gate.js services/keep-available.sh \
@@ -310,6 +398,37 @@ if ! { cp -f "$KIT_ROOT/versions.json" "$FARM_CONFIG/versions.json" && chown 0:0
     stop_farm "Could not write to $FARM_CONFIG." 'Run install.sh again with sudo.'
 fi
 write_ok "$FARM_ROOT is ready: root owns it, the service account $FARM_SERVICE_USER may read it, nobody else may open it."
+
+# Pairing with Blossom starts here, before the long steps: the code is used
+# within its 30 minutes, Blossom shows "Computer connected" while the rest
+# runs, and a code that does not work is known now and not at the end. Only
+# the code and the name of this computer are sent at this point; the farm's
+# addresses and credentials follow at the very end, with the farm token.
+read_farm_pairing
+if [ -n "$PAIRING_CODE" ]; then
+    write_note "Telling Blossom ($(normalize_app_origin "$APP_ORIGIN")) about this computer..."
+    if pair_claim "$APP_ORIGIN" "$PAIRING_CODE"; then
+        PAIRING=1
+        read_farm_pairing
+        write_ok "Blossom knows this computer now${PAIR_WORKSPACE:+ (workspace \"$PAIR_WORKSPACE\")}. The farm is sent to it when the installation has finished."
+    else
+        write_warn "Pairing with Blossom did not work: $APP_MESSAGE"
+        write_warn "The installation continues. At the end the values are shown for you to enter in Blossom by hand; or get a new command there and run it afterwards. $FK_PAIR_HELP"
+    fi
+    PAIRING_CODE=''
+elif [ "$FARM_IS_PAIRED" = 1 ]; then
+    if pair_get_status; then
+        case $PAIR_STATE in
+            rejected | expired) write_warn "This computer was paired with Blossom, but the pairing was declined or ran out. The values are shown at the end for manual entry. $FK_PAIR_HELP" ;;
+            *) PAIRING=1; write_ok "This computer is paired with Blossom ($PAIR_ORIGIN${PAIR_WORKSPACE:+, workspace \"$PAIR_WORKSPACE\"}). What changes in this run is sent there at the end." ;;
+        esac
+    elif [ "$APP_KIND" = refused ]; then
+        write_warn "This computer was paired with Blossom ($PAIR_ORIGIN), but: $APP_MESSAGE The values are shown at the end for manual entry. $FK_PAIR_HELP"
+    else
+        PAIRING=1
+        write_warn "Blossom could not be asked about the pairing of this computer right now ($APP_MESSAGE). It is tried again at the end."
+    fi
+fi
 
 # ----------------------------------------------------------------------
 write_step '3/12  Programs (pinned versions, checksums verified)'
@@ -561,6 +680,13 @@ WORKSPACE_JSON="[${WORKSPACE_JSON#,}]"
 hub_admin /admin/users
 hub_user_exists=0
 if json_values "$HTTP_TEXT" 'result.*.username' | grep -Fxq "$HUB_USER_NAME"; then hub_user_exists=1; fi
+# Blossom needs the password of this user, and it is stored nowhere on this
+# Mac. The first time the farm is sent to Blossom through a pairing, a user
+# that exists therefore gets a new one.
+if [ "$PAIRING" = 1 ] && [ -z "$PAIR_SITE_SENT_AT" ] && [ "$hub_user_exists" = 1 ] && [ "$RESET_HUB_USER" = 0 ]; then
+    RESET_HUB_USER=1
+    write_note "Hub user \"$HUB_USER_NAME\" gets a new password: Blossom receives it through the pairing, and the one it had is not stored on this Mac."
+fi
 set_hub_user=1
 [ "$hub_user_exists" = 1 ] && [ "$RESET_HUB_USER" = 0 ] && set_hub_user=0
 if [ "$set_hub_user" = 1 ]; then
@@ -580,7 +706,8 @@ if [ "$set_hub_user" = 1 ]; then
     fi
     if [ "$set_hub_user" = 1 ]; then
         NEW_HUB_PASSWORD=$candidate
-        write_ok "Hub user \"$HUB_USER_NAME\" has a new random password (shown at the end)."
+        if [ "$PAIRING" = 1 ]; then write_ok "Hub user \"$HUB_USER_NAME\" has a new random password (it goes to Blossom at the end)."
+        else write_ok "Hub user \"$HUB_USER_NAME\" has a new random password (shown at the end)."; fi
     fi
     candidate=''; body=''
 fi
@@ -658,9 +785,44 @@ write_step '8/12  Public host names'
 write_note 'Three host names under a domain that you own and that uses Cloudflare for its DNS.'
 write_note 'Use direct sub-domains (farm-hub.yourdomain.com), not deeper ones (hub.farm.yourdomain.com):'
 write_note 'Cloudflare'"'"'s free certificate covers one level only.'
-if [ -z "$HUB_HOST" ]; then read_hostname 'Host name for the hub' "$FARM_CFG_HUB_HOST" 'farm-hub.yourdomain.com'; HUB_HOST=$REPLY_HOST; fi
-if [ -z "$PROVIDER_HOST" ]; then read_hostname 'Host name for the provider' "$FARM_CFG_PROVIDER_HOST" 'farm-provider.yourdomain.com'; PROVIDER_HOST=$REPLY_HOST; fi
-if [ -z "$RESTART_HOST" ]; then read_hostname 'Host name for the restart service' "$FARM_CFG_RESTART_HOST" 'farm-restart.yourdomain.com'; RESTART_HOST=$REPLY_HOST; fi
+# What is offered at each question: the names of the earlier installation.
+offer_hub=$FARM_CFG_HUB_HOST; offer_provider=$FARM_CFG_PROVIDER_HOST; offer_restart=$FARM_CFG_RESTART_HOST
+# A new farm: one question, the domain, and the three names follow from it.
+domain_asked=0
+if [ -z "$HUB_HOST$PROVIDER_HOST$RESTART_HOST$FARM_CFG_HUB_HOST" ]; then
+    while [ -z "$DOMAIN" ]; do
+        domain_asked=1
+        if ! IFS= read -r -p 'Your domain at Cloudflare [for example yourdomain.com]: ' answer < /dev/tty; then
+            echo
+            stop_farm 'Nothing could be read from the keyboard.' 'Run the script in a Terminal window, or give the domain with --domain.'
+        fi
+        reason=$(test_farm_domain "$answer")
+        if [ -z "$reason" ]; then DOMAIN=$answer; else write_warn "$reason"; fi
+    done
+fi
+if [ -n "$DOMAIN" ]; then
+    DOMAIN=$(normalize_farm_domain "$DOMAIN")
+    proposed=$(get_default_farm_hostnames "$DOMAIN")
+    default_hub=$(printf '%s\n' "$proposed" | sed -n 1p); default_provider=$(printf '%s\n' "$proposed" | sed -n 2p); default_restart=$(printf '%s\n' "$proposed" | sed -n 3p)
+    if [ -z "$HUB_HOST$PROVIDER_HOST$RESTART_HOST" ]; then
+        answer=''
+        if [ "$domain_asked" = 1 ]; then
+            write_note "Proposed:  $default_hub   $default_provider   $default_restart"
+            IFS= read -r -p '   Press Enter to use these three names, or type n to choose each one: ' answer < /dev/tty || answer=''
+        fi
+        case $answer in
+            [nN]*) offer_hub=$default_hub; offer_provider=$default_provider; offer_restart=$default_restart ;;
+            *) HUB_HOST=$default_hub; PROVIDER_HOST=$default_provider; RESTART_HOST=$default_restart ;;
+        esac
+    else
+        [ -n "$HUB_HOST" ] || HUB_HOST=$default_hub
+        [ -n "$PROVIDER_HOST" ] || PROVIDER_HOST=$default_provider
+        [ -n "$RESTART_HOST" ] || RESTART_HOST=$default_restart
+    fi
+fi
+if [ -z "$HUB_HOST" ]; then read_hostname 'Host name for the hub' "$offer_hub" 'farm-hub.yourdomain.com'; HUB_HOST=$REPLY_HOST; fi
+if [ -z "$PROVIDER_HOST" ]; then read_hostname 'Host name for the provider' "$offer_provider" 'farm-provider.yourdomain.com'; PROVIDER_HOST=$REPLY_HOST; fi
+if [ -z "$RESTART_HOST" ]; then read_hostname 'Host name for the restart service' "$offer_restart" 'farm-restart.yourdomain.com'; RESTART_HOST=$REPLY_HOST; fi
 HUB_HOST=$(to_lower "$(trim_text "$HUB_HOST")"); PROVIDER_HOST=$(to_lower "$(trim_text "$PROVIDER_HOST")"); RESTART_HOST=$(to_lower "$(trim_text "$RESTART_HOST")")
 problems=$(test_farm_hostname_set "$HUB_HOST" "$PROVIDER_HOST" "$RESTART_HOST" | tr '\n' ' ')
 if [ -n "$problems" ]; then
@@ -798,7 +960,8 @@ else
     NEW_RESTART_SECRET=$(new_random_secret 32 hex)
     [ "${#NEW_RESTART_SECRET}" -eq 64 ] || stop_farm 'The random generator of this Mac gave no secret.' 'Run install.sh again; if it repeats, report it on the kit repository.'
     write_secret_file "$FARM_RESTART_SECRET" "$NEW_RESTART_SECRET" private
-    write_ok 'A new random restart secret was generated (256 bits, shown at the end).'
+    if [ "$PAIRING" = 1 ]; then write_ok 'A new random restart secret was generated (256 bits; it goes to Blossom at the end).'
+    else write_ok 'A new random restart secret was generated (256 bits, shown at the end).'; fi
 fi
 HAVE_SUMMARY=1
 
@@ -930,10 +1093,42 @@ else
         write_warn 'This test ran from this Mac. "Test connection" in Blossom runs from Blossom'"'"'s servers and is the one that counts.'
     fi
 fi
+if [ "$PAIRING" = 1 ]; then
+    write_step 'Blossom CRM'
+    write_note "Sending the addresses and the credentials of this farm to $PAIR_ORIGIN..."
+    if ! send_farm_to_blossom && [ "$APP_CODE" = credentials_required ] && [ -z "$NEW_HUB_PASSWORD" ]; then
+        # Blossom holds no password for these addresses (they changed, or it
+        # is another workspace). The one in use is stored nowhere on this
+        # Mac, so the hub user gets a new one, and the farm is sent again.
+        if set_hub_user_password; then
+            write_note "Hub user \"$HUB_USER_NAME\" got a new password, because Blossom has none for these addresses."
+            send_farm_to_blossom
+        fi
+    fi
+    if [ "$APP_KIND" = ok ]; then
+        SENT_TO_BLOSSOM=1
+        write_ok 'Blossom received the farm.'
+        if [ "$PAIR_NEEDS_CONFIRMATION" = true ] || [ "$PAIR_STATE" != active ]; then
+            write_note 'Blossom now calls the farm from its servers, then asks an admin to confirm it (up to 10 minutes are waited here; closing this window does no harm).'
+        fi
+        pair_wait 600; waited=$?
+        [ "$waited" = 0 ] && ACTIVE_IN_BLOSSOM=1
+        if [ "$waited" = 2 ]; then
+            write_note 'Not confirmed yet. Nothing is lost: confirm in Blossom (Phone Farm -> Farm setup) when you are ready. scripts/status.sh shows where the pairing stands.'
+        fi
+    else
+        write_warn "The farm could not be sent to Blossom: $APP_MESSAGE"
+        write_warn "The farm itself is set up. Enter the values below in Blossom by hand, or: $FK_PAIR_HELP"
+    fi
+fi
 ADMIN_PASSWORD=''; ADMIN_TOKEN=''
 
 show_final_values
-write_color "$FK_CYAN" 'Next: prepare the phones - docs/phones.md. Then press "Test connection" in Blossom.'
+if [ "$SENT_TO_BLOSSOM" = 1 ]; then
+    write_color "$FK_CYAN" 'Next: prepare the phones - docs/phones.md. They appear in Blossom by themselves.'
+else
+    write_color "$FK_CYAN" 'Next: prepare the phones - docs/phones.md. Then press "Test connection" in Blossom.'
+fi
 echo
 EXIT_CODE=0
 exit 0

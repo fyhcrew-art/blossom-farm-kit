@@ -363,6 +363,130 @@ function Test-FarmRootTrust {
     return $verdict
 }
 
+# --- pairing with Blossom CRM: the checks that need no network ---------------
+
+function ConvertTo-PairingCode {
+    # A pairing code as it is sent: upper case, without the hyphens and spaces
+    # it is shown with, and with the letters people mistype put right (O is 0,
+    # I and L are 1: the alphabet of a code has none of them).
+    param([AllowEmptyString()][AllowNull()][string]$Code)
+    $c = ([string]$Code).ToUpperInvariant() -replace '[\s-]', ''
+    return $c.Replace('O', '0').Replace('I', '1').Replace('L', '1')
+}
+
+function Test-PairingCode {
+    # Returns $null when the text is shaped like a pairing code, otherwise the
+    # reason. A code is 20 characters of 0-9 and A-Z without I, L, O, U (100
+    # random bits), shown in five groups of four.
+    param([AllowEmptyString()][AllowNull()][string]$Code)
+    $c = ConvertTo-PairingCode -Code $Code
+    if (-not $c) { return 'The pairing code is empty.' }
+    if ($c -cnotmatch '^[0-9A-HJKMNP-TV-Z]{20}$') {
+        return 'A pairing code has 20 letters and digits in five groups of four, like K7QM-2XVD-9HTR-4BWN-6CPA. Copy the whole command from Blossom again.'
+    }
+    return $null
+}
+
+function ConvertTo-AppOrigin {
+    # The address of Blossom as it is stored and compared: lower case, no
+    # slash at the end.
+    param([AllowEmptyString()][AllowNull()][string]$Origin)
+    return ([string]$Origin).Trim().ToLowerInvariant().TrimEnd('/')
+}
+
+function Test-AppOrigin {
+    # Returns $null when the text is an https origin (https://host or
+    # https://host:port, nothing else), otherwise the reason. The farm's
+    # credentials are sent to this address and to no other.
+    param([AllowEmptyString()][AllowNull()][string]$Origin)
+    $o = ConvertTo-AppOrigin -Origin $Origin
+    if (-not $o) { return 'The address of Blossom is missing.' }
+    if ($o.StartsWith('http://')) { return 'The address of Blossom must start with https://. The passwords of the farm are never sent over a connection that is not encrypted.' }
+    if (-not $o.StartsWith('https://')) { return 'The address of Blossom must look like https://<the address you open Blossom at>.' }
+    $rest = $o.Substring(8)
+    if (-not $rest -or $rest -match '[/?#@\\\s\[\]]') { return 'Give the address of Blossom only: https:// and the host name, with nothing after it.' }
+    $hostName = $rest
+    $colon = $rest.IndexOf(':')
+    if ($colon -ge 0) {
+        $hostName = $rest.Substring(0, $colon)
+        $port = $rest.Substring($colon + 1)
+        if ($port -notmatch '^[0-9]{1,5}$' -or [int]$port -lt 1 -or [int]$port -gt 65535) { return 'The port in the address of Blossom is not a number.' }
+    }
+    if ($hostName.Length -gt 253 -or $hostName -cnotmatch '^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$' -or $hostName.Contains('..')) { return 'The host name in the address of Blossom is not valid.' }
+    return $null
+}
+
+function Test-FarmToken {
+    # True when the text is shaped like a farm token: "bft_" and 32 random
+    # bytes in URL-safe base64.
+    param([AllowEmptyString()][AllowNull()][string]$Token)
+    return ([string]$Token -cmatch '^bft_[A-Za-z0-9_-]{43}$')
+}
+
+function New-FarmToken { return ('bft_' + (New-RandomSecret -Bytes 32 -Format Base64Url)) }
+
+function ConvertTo-FarmDomain {
+    # "https://YourDomain.com/" -> "yourdomain.com"
+    param([AllowEmptyString()][AllowNull()][string]$Domain)
+    $d = ([string]$Domain).Trim().ToLowerInvariant() -replace '^https?://', ''
+    return $d.Trim('/').TrimStart('.')
+}
+
+function Test-FarmDomain {
+    # Returns $null when the three default host names can be made under this
+    # domain, otherwise the reason.
+    param([AllowEmptyString()][AllowNull()][string]$Domain)
+    $d = ConvertTo-FarmDomain -Domain $Domain
+    if (-not $d) { return 'The domain is empty.' }
+    if (-not $d.Contains('.')) { return 'Enter the domain itself, for example yourdomain.com.' }
+    return (Test-FarmHostname -Name ('farm-hub.' + $d))
+}
+
+function Get-DefaultFarmHostnames {
+    # The three proposed names: hub, provider, restart service.
+    param([Parameter(Mandatory = $true)][string]$Domain)
+    $d = ConvertTo-FarmDomain -Domain $Domain
+    return @(('farm-hub.' + $d), ('farm-provider.' + $d), ('farm-restart.' + $d))
+}
+
+function ConvertTo-ComputerLabel {
+    # The name of this computer as Blossom shows it: plain ASCII, at most 64
+    # characters, never empty.
+    param([AllowEmptyString()][AllowNull()][string]$Name)
+    $t = ([string]$Name) -replace '[^A-Za-z0-9 ._-]', ''
+    if ($t.Length -gt 64) { $t = $t.Substring(0, 64) }
+    $t = $t.Trim()
+    if (-not $t) { $t = 'farm computer' }
+    return $t
+}
+
+function ConvertTo-RemoteText {
+    # A text that came from the network, made safe to print: one line of plain
+    # ASCII, at most 300 characters.
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    $t = ([string]$Text) -replace '[\r\n\t]', ' ' -replace '[^\x20-\x7e]', ''
+    if ($t.Length -gt 300) { $t = $t.Substring(0, 300) }
+    return $t
+}
+
+function Get-PairingMessage {
+    # What an answer of Blossom's pairing API means, for the person reading.
+    param([AllowEmptyString()][AllowNull()][string]$Code, [AllowEmptyString()][AllowNull()][string]$Text)
+    switch ([string]$Code) {
+        'pairing_code_unknown' { return 'Blossom does not know this pairing code. A code works once and only as it is shown.' }
+        'pairing_code_expired' { return 'This pairing code has expired. A code is valid for 30 minutes.' }
+        'pairing_code_used' { return 'This pairing code was already used by another computer. If that was not you, do not confirm anything in Blossom: decline that computer there.' }
+        'rate_limited' { return 'Blossom is receiving too many pairing attempts at the moment.' }
+        'farm_token_invalid' { return 'Blossom no longer accepts this computer: it was unpaired there, or its site was removed.' }
+        'farm_token_revoked' { return 'Blossom no longer accepts this computer: it was unpaired there, or its site was removed.' }
+        'pairing_rejected' { return 'This computer was declined in Blossom.' }
+        'pairing_expired' { return 'The pairing was not confirmed in Blossom in time.' }
+        'credentials_required' { return 'Blossom has no hub password or restart secret for these addresses and needs them sent again.' }
+    }
+    if ($Text) { return (ConvertTo-RemoteText -Text $Text) }
+    return 'Blossom refused the request.'
+}
+
 # ---------------------------------------------------------------------------
 # System helpers
 # ---------------------------------------------------------------------------
@@ -571,20 +695,23 @@ function Get-VerifiedDownload {
 
 function Invoke-FarmHttp {
     # One HTTP call that never throws for an HTTP status and never follows a
-    # redirect. Returns Status (0 = no HTTP answer), Text, Json, Error.
+    # redirect. Returns Status (0 = no HTTP answer), Text, Json, Error,
+    # ErrorKind ('tls' when the certificate could not be verified, otherwise
+    # 'network') and RetryAfter (the seconds of a Retry-After header, or $null).
     param(
         [Parameter(Mandatory = $true)][string]$Url,
         [string]$Method = 'GET',
         [hashtable]$Headers = @{},
         [string]$Body = $null,
         [int]$TimeoutSec = 15,
+        [string]$UserAgent = 'blossom-farm-kit',
         # Send what Blossom's servers send: no User-Agent and no Accept header.
         # Cloudflare treats a request without a User-Agent differently
         # (Browser Integrity Check), so the self-test must look the same.
         [switch]$LikeBlossom
     )
     Enable-Tls12
-    $result = New-Object PSObject -Property @{ Status = 0; Text = ''; Json = $null; Error = $null; Challenge = $false }
+    $result = New-Object PSObject -Property @{ Status = 0; Text = ''; Json = $null; Error = $null; Challenge = $false; ErrorKind = $null; RetryAfter = $null }
     $response = $null
     try {
         $req = [System.Net.HttpWebRequest][System.Net.WebRequest]::Create($Url)
@@ -595,7 +722,7 @@ function Invoke-FarmHttp {
         if ($LikeBlossom) {
             $req.Headers['Accept-Encoding'] = 'identity'
         } else {
-            $req.UserAgent = 'blossom-farm-kit'
+            $req.UserAgent = $UserAgent
             $req.Accept = 'application/json'
         }
         foreach ($k in $Headers.Keys) { $req.Headers[$k] = [string]$Headers[$k] }
@@ -616,6 +743,8 @@ function Invoke-FarmHttp {
         $result.Status = [int]$response.StatusCode
         # Cloudflare marks an answer that is its own challenge or block page.
         if ($response.Headers['cf-mitigated']) { $result.Challenge = $true }
+        $retryAfter = [string]$response.Headers['Retry-After']
+        if ($retryAfter -match '^[0-9]{1,4}$') { $result.RetryAfter = [int]$retryAfter }
         $reader = New-Object System.IO.StreamReader($response.GetResponseStream(), [System.Text.Encoding]::UTF8)
         try {
             $buffer = New-Object char[] 1048576
@@ -629,7 +758,13 @@ function Invoke-FarmHttp {
         }
     } catch {
         $inner = $_.Exception
-        while ($inner.InnerException) { $inner = $inner.InnerException }
+        $result.ErrorKind = 'network'
+        while ($true) {
+            if ($inner -is [System.Security.Authentication.AuthenticationException]) { $result.ErrorKind = 'tls' }
+            if ($inner -is [System.Net.WebException] -and ([string]$inner.Status -eq 'TrustFailure' -or [string]$inner.Status -eq 'SecureChannelFailure')) { $result.ErrorKind = 'tls' }
+            if (-not $inner.InnerException) { break }
+            $inner = $inner.InnerException
+        }
         $result.Error = $inner.Message
     } finally {
         if ($response) { $response.Close() }
@@ -671,6 +806,8 @@ function Get-FarmPaths {
         HubExe          = Join-Path (Join-Path $Root 'bin') 'GADS.exe'
         ProviderExe     = Join-Path (Join-Path $Root 'bin') 'GADS-drag.exe'
         Nssm            = Join-Path (Join-Path $Root 'bin') 'nssm.exe'
+        Pairing         = Join-Path $config 'pairing.json'
+        PairingNew      = Join-Path $config 'pairing.new.json'
     }
 }
 
@@ -1215,6 +1352,419 @@ function Write-SelfTestReport {
         if ($reached -notcontains $id) { Write-Host ('   NOT RUN ' + $titles[$id] + ': an earlier step failed.') -ForegroundColor DarkGray }
     }
     return $allOk
+}
+
+# ---------------------------------------------------------------------------
+# Pairing with Blossom CRM
+# ---------------------------------------------------------------------------
+# Blossom shows a command that carries a pairing code. The installer claims
+# the code when it starts, sends the description of the farm when it has
+# finished, and from then on this computer holds a "farm token": with it the
+# scripts send new credentials to Blossom without a new code. The token is
+# made here, kept in C:\farm\config\pairing.json (Administrators and SYSTEM
+# only), and Blossom stores only its SHA-256. Everything goes to the one https
+# address the pairing was made with; a redirect is refused, not followed.
+# docs\security.md, section 9, is the threat model.
+
+$script:BlossomTries = 4
+$script:BlossomRetryDelaySec = 2
+$FarmPairHelp = 'In Blossom open Phone Farm -> Farm setup -> Connect a computer, copy the new command and run it on this computer. That is safe: it keeps what is already set up.'
+
+function Get-FarmPairHelp { return $FarmPairHelp }
+
+function Get-FarmComputerInfo {
+    # What this computer says about itself. No secret is in it.
+    param([Parameter(Mandatory = $true)]$Paths)
+    $kit = '0'; $gads = ''; $drag = ''
+    $installed = Join-Path $Paths.Config 'versions.json'
+    if (Test-Path -LiteralPath $installed) {
+        try {
+            $v = Get-Content -LiteralPath $installed -Raw | ConvertFrom-Json
+            if ([string](Get-JsonProperty -Object $v -Name 'kit') -match '^[0-9A-Za-z.+-]+$') { $kit = [string]$v.kit }
+            $gads = [string](Get-JsonProperty -Object (Get-JsonProperty -Object $v -Name 'gads') -Name 'version')
+            $drag = [string](Get-JsonProperty -Object (Get-JsonProperty -Object $v -Name 'gadsDrag') -Name 'version')
+        } catch { $kit = '0' }
+    }
+    $info = New-Object System.Collections.Specialized.OrderedDictionary
+    $info['label'] = ConvertTo-ComputerLabel -Name ([Environment]::MachineName)
+    $info['platform'] = 'windows'
+    $info['os_version'] = ConvertTo-ComputerLabel -Name ('Windows ' + [Environment]::OSVersion.Version.ToString())
+    $info['kit_version'] = $kit
+    $info['gads_version'] = $gads
+    $info['provider_version'] = $drag
+    return $info
+}
+
+function Read-FarmPairing {
+    # The pairing this computer holds ($null when it holds none): AppOrigin,
+    # FarmToken, CodeSha256, PairingId, Workspace, ClaimedAt, SiteSentAt
+    # (empty until Blossom has accepted the description of the farm once).
+    param([Parameter(Mandatory = $true)]$Paths)
+    if (-not (Test-Path -LiteralPath $Paths.Pairing)) { return $null }
+    $j = $null
+    try { $j = Get-Content -LiteralPath $Paths.Pairing -Raw | ConvertFrom-Json } catch { return $null }
+    $origin = ConvertTo-AppOrigin -Origin ([string](Get-JsonProperty -Object $j -Name 'appOrigin'))
+    $token = [string](Get-JsonProperty -Object $j -Name 'farmToken')
+    if ((Test-AppOrigin -Origin $origin) -or -not (Test-FarmToken -Token $token)) { return $null }
+    return New-Object PSObject -Property @{
+        AppOrigin  = $origin
+        FarmToken  = $token
+        CodeSha256 = [string](Get-JsonProperty -Object $j -Name 'codeSha256')
+        PairingId  = [string](Get-JsonProperty -Object $j -Name 'pairingId')
+        Workspace  = [string](Get-JsonProperty -Object $j -Name 'workspace')
+        ClaimedAt  = [string](Get-JsonProperty -Object $j -Name 'claimedAt')
+        SiteSentAt = [string](Get-JsonProperty -Object $j -Name 'siteSentAt')
+    }
+}
+
+function Write-FarmPairing {
+    param([Parameter(Mandatory = $true)]$Paths, [Parameter(Mandatory = $true)]$Pairing)
+    $record = New-Object System.Collections.Specialized.OrderedDictionary
+    $record['appOrigin'] = $Pairing.AppOrigin
+    $record['farmToken'] = $Pairing.FarmToken
+    $record['codeSha256'] = $Pairing.CodeSha256
+    $record['pairingId'] = $Pairing.PairingId
+    $record['workspace'] = $Pairing.Workspace
+    $record['claimedAt'] = $Pairing.ClaimedAt
+    $record['siteSentAt'] = $Pairing.SiteSentAt
+    Write-SecretFile -Path $Paths.Pairing -Text ($record | ConvertTo-Json)
+}
+
+function Remove-FarmPairingFile {
+    param([Parameter(Mandatory = $true)]$Paths)
+    foreach ($f in @($Paths.Pairing, $Paths.PairingNew)) {
+        if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }
+    }
+}
+
+function New-BlossomResult {
+    return New-Object PSObject -Property @{
+        Ok = $false; Status = 0; Json = $null; Code = ''; Kind = ''; Message = ''
+        State = ''; NeedsConfirmation = $false; SiteChanged = $false; SiteLabel = ''; Workspace = ''
+        CheckOk = $null; Devices = $null; CheckStep = ''; CheckDetail = ''; PollSec = 3
+    }
+}
+
+function Invoke-Blossom {
+    # One call to Blossom's pairing API. Returns Ok ($true when Blossom
+    # answered 2xx with JSON), Status, Json, Code (the "code" of a refusal),
+    # Kind and Message (a sentence for the person at the keyboard; never
+    # contains a secret).
+    #   Kind   ok           Blossom accepted the request
+    #          refused      Blossom answered and said no (Code says why)
+    #          origin       the address is not an https origin: nothing was sent
+    #          tls          the certificate of the address could not be verified
+    #          redirect     the address answered with a redirect: not followed
+    #          not_blossom  the address answered, but not as Blossom's API
+    #          network      no answer, or Blossom was busy, after every try
+    # The request is repeated, with a growing pause, only when it did not
+    # arrive or Blossom said to come back later (429, 5xx).
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Origin,
+        [Parameter(Mandatory = $true)][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$Body = $null,
+        [string]$Token = $null,
+        [string]$KitVersion = '0',
+        [int]$Tries = $script:BlossomTries
+    )
+    $out = New-BlossomResult
+    $o = ConvertTo-AppOrigin -Origin $Origin
+    $reason = Test-AppOrigin -Origin $o
+    if ($reason) { $out.Kind = 'origin'; $out.Message = $reason + ' Nothing was sent.'; return $out }
+    $headers = @{}
+    if ($Token) { $headers['Authorization'] = 'Bearer ' + $Token }
+    $delay = $script:BlossomRetryDelaySec
+    for ($try = 1; ; $try++) {
+        $r = Invoke-FarmHttp -Url ($o + $Path) -Method $Method -Headers $headers -Body $Body -TimeoutSec 20 -UserAgent ('blossom-farm-kit/' + $KitVersion)
+        $out.Status = $r.Status; $out.Json = $null; $out.Code = ''
+        if ($r.Status -eq 0) {
+            if ($r.ErrorKind -eq 'tls') {
+                $out.Kind = 'tls'
+                $out.Message = 'The certificate of ' + $o + ' could not be verified (' + (ConvertTo-RemoteText -Text $r.Error) + '). Nothing was sent. Check the date and time of this computer; if they are right, something between this computer and Blossom is intercepting the connection.'
+                return $out
+            }
+            $out.Kind = 'network'
+            $out.Message = $o + ' could not be reached (' + (ConvertTo-RemoteText -Text $r.Error) + '). Check the internet connection of this computer.'
+        } elseif ($r.Status -ge 300 -and $r.Status -lt 400) {
+            $out.Kind = 'redirect'
+            $out.Message = $o + ' answered with a redirect (HTTP ' + $r.Status + '). The farm''s credentials are only sent to the address the pairing was made with, so the redirect was not followed. Copy the command from Blossom again.'
+            return $out
+        } elseif ($r.Status -ge 200 -and $r.Status -lt 300) {
+            if ($null -ne $r.Json -and $r.Json -is [System.Management.Automation.PSCustomObject]) {
+                $out.Ok = $true; $out.Kind = 'ok'; $out.Json = $r.Json
+                return $out
+            }
+            $out.Kind = 'not_blossom'
+            $out.Message = $o + ' answered, but not the way Blossom does. Is it the address you open Blossom at? Copy the command from Blossom again.'
+            return $out
+        } else {
+            $code = [string](Get-JsonProperty -Object $r.Json -Name 'code')
+            if ($code -cnotmatch '^[a-z0-9_]+$') { $code = '' }
+            $out.Code = $code
+            if ($r.Status -eq 429 -or $r.Status -ge 500) {
+                $out.Kind = 'network'
+                $out.Message = 'Blossom is busy or not available right now (HTTP ' + $r.Status + ').'
+            } elseif (-not $code) {
+                $out.Kind = 'not_blossom'
+                $out.Message = $o + ' answered HTTP ' + $r.Status + ', but not the way Blossom does. Is it the address you open Blossom at? Is this kit current?'
+                return $out
+            } else {
+                $out.Kind = 'refused'; $out.Json = $r.Json
+                $out.Message = Get-PairingMessage -Code $code -Text ([string](Get-JsonProperty -Object $r.Json -Name 'error'))
+                return $out
+            }
+        }
+        if ($try -ge $Tries) { return $out }
+        $wait = $delay
+        if ($null -ne $r.RetryAfter) { $wait = [int]$r.RetryAfter }
+        if ($wait -gt 60) { $wait = 60 }
+        if ($wait -gt 0) { Start-Sleep -Seconds $wait }
+        $delay = $delay * 2
+        if ($delay -gt 30) { $delay = 30 }
+    }
+}
+
+function Update-BlossomResult {
+    # Reads the state of the pairing out of an answer of Blossom.
+    param([Parameter(Mandatory = $true)]$Result)
+    $j = $Result.Json
+    $state = [string](Get-JsonProperty -Object $j -Name 'state')
+    if (@('installing', 'checking', 'awaiting_confirmation', 'active', 'rejected', 'expired') -cnotcontains $state) { $state = '' }
+    $Result.State = $state
+    $Result.NeedsConfirmation = ((Get-JsonProperty -Object $j -Name 'needs_confirmation') -eq $true)
+    $Result.SiteChanged = ((Get-JsonProperty -Object $j -Name 'site_changed') -eq $true)
+    $Result.SiteLabel = ConvertTo-RemoteText -Text ([string](Get-JsonProperty -Object $j -Name 'site_label'))
+    $Result.Workspace = ConvertTo-RemoteText -Text ([string](Get-JsonProperty -Object $j -Name 'workspace_name'))
+    $check = Get-JsonProperty -Object $j -Name 'check'
+    if ($null -ne $check) {
+        $ok = Get-JsonProperty -Object $check -Name 'ok'
+        if ($ok -is [bool]) { $Result.CheckOk = $ok }
+        $devices = Get-JsonProperty -Object $check -Name 'devices'
+        if ([string]$devices -match '^[0-9]{1,6}$') { $Result.Devices = [int]$devices }
+        $Result.CheckStep = ConvertTo-RemoteText -Text ([string](Get-JsonProperty -Object $check -Name 'failed_step'))
+        $Result.CheckDetail = ConvertTo-RemoteText -Text ([string](Get-JsonProperty -Object $check -Name 'detail'))
+    }
+    $poll = Get-JsonProperty -Object $j -Name 'poll_after_seconds'
+    if ([string]$poll -match '^[0-9]{1,4}$') { $Result.PollSec = [Math]::Min(30, [Math]::Max(1, [int]$poll)) }
+    return $Result
+}
+
+function Register-FarmPairing {
+    # Hands the pairing code to Blossom together with a farm token made here.
+    # Ok: Blossom knows this computer; pairing.json holds the token.
+    # Otherwise Kind and Message say why, and an earlier pairing of this
+    # computer is left as it was.
+    #
+    # The token is written to disk BEFORE it is sent: if the answer is lost on
+    # the way, running the same command again repeats the claim with the same
+    # token, which Blossom accepts as the same claim.
+    param(
+        [Parameter(Mandatory = $true)]$Paths,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Origin,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Code
+    )
+    $out = New-BlossomResult
+    $o = ConvertTo-AppOrigin -Origin $Origin
+    $c = ConvertTo-PairingCode -Code $Code
+    $reason = Test-AppOrigin -Origin $o
+    if (-not $reason) { $reason = Test-PairingCode -Code $c }
+    if ($reason) { $out.Kind = 'origin'; $out.Message = $reason + ' Nothing was sent.'; return $out }
+    $codeSha = Get-TextSha256 -Text ($o + ' ' + $c)
+
+    $old = Read-FarmPairing -Paths $Paths
+    if ($old -and $old.CodeSha256 -eq $codeSha -and $old.ClaimedAt) {
+        # this very code was claimed by this computer before
+        $out.Ok = $true; $out.Kind = 'ok'; $out.Workspace = $old.Workspace
+        return $out
+    }
+    $token = $null
+    if (Test-Path -LiteralPath $Paths.PairingNew) {
+        try {
+            $pending = Get-Content -LiteralPath $Paths.PairingNew -Raw | ConvertFrom-Json
+            if ([string](Get-JsonProperty -Object $pending -Name 'codeSha256') -eq $codeSha) { $token = [string](Get-JsonProperty -Object $pending -Name 'farmToken') }
+        } catch { $token = $null }
+    }
+    if (-not (Test-FarmToken -Token $token)) {
+        $token = New-FarmToken
+        Write-SecretFile -Path $Paths.PairingNew -Text (@{ codeSha256 = $codeSha; farmToken = $token } | ConvertTo-Json -Compress)
+    }
+
+    $computer = Get-FarmComputerInfo -Paths $Paths
+    $request = New-Object System.Collections.Specialized.OrderedDictionary
+    $request['protocol'] = 1
+    $request['pairing_code'] = $c
+    $request['farm_token'] = $token
+    $request['computer'] = $computer
+    $out = Invoke-Blossom -Origin $o -Method 'POST' -Path '/api/farm/pair/claim' -Body ($request | ConvertTo-Json -Compress -Depth 4) -KitVersion $computer['kit_version']
+    if (-not $out.Ok) {
+        if (@('pairing_code_unknown', 'pairing_code_expired', 'pairing_code_used', 'bad_request') -contains $out.Code) {
+            if (Test-Path -LiteralPath $Paths.PairingNew) { Remove-Item -LiteralPath $Paths.PairingNew -Force }
+        }
+        return $out
+    }
+    $out.Workspace = ConvertTo-RemoteText -Text ([string](Get-JsonProperty -Object $out.Json -Name 'workspace_name'))
+    $pairing = New-Object PSObject -Property @{
+        AppOrigin = $o; FarmToken = $token; CodeSha256 = $codeSha
+        PairingId = ConvertTo-RemoteText -Text ([string](Get-JsonProperty -Object $out.Json -Name 'pairing_id'))
+        Workspace = $out.Workspace; ClaimedAt = (Get-Date).ToUniversalTime().ToString('s') + 'Z'; SiteSentAt = ''
+    }
+    Write-FarmPairing -Paths $Paths -Pairing $pairing
+    if (Test-Path -LiteralPath $Paths.PairingNew) { Remove-Item -LiteralPath $Paths.PairingNew -Force }
+    if ($old -and $old.FarmToken -cne $token) {
+        # the pairing this one replaces: tell its Blossom, without insisting
+        $null = Invoke-Blossom -Origin $old.AppOrigin -Method 'DELETE' -Path '/api/farm/pair/token' -Token $old.FarmToken -Tries 1
+    }
+    return $out
+}
+
+function Send-FarmSite {
+    # Sends the description of this farm to the Blossom it is paired with, with
+    # the farm token. A password or secret that is left out means "keep the
+    # one you have", which Blossom refuses (Code credentials_required) when it
+    # has none for these addresses. Ok when Blossom accepted; then State and
+    # NeedsConfirmation say where the pairing stands.
+    param(
+        [Parameter(Mandatory = $true)]$Paths,
+        [Parameter(Mandatory = $true)][string]$HubUrl,
+        [Parameter(Mandatory = $true)][string]$ProviderUrl,
+        [Parameter(Mandatory = $true)][string]$Nickname,
+        [Parameter(Mandatory = $true)][string]$HubUser,
+        [string]$HubPassword = $null,
+        [Parameter(Mandatory = $true)][string]$RestartUrl,
+        [string]$RestartSecret = $null
+    )
+    $pairing = Read-FarmPairing -Paths $Paths
+    if (-not $pairing) { $out = New-BlossomResult; $out.Kind = 'origin'; $out.Message = 'This computer is not paired with Blossom.'; return $out }
+    $site = New-Object System.Collections.Specialized.OrderedDictionary
+    $site['hub_url'] = $HubUrl
+    $site['provider_url'] = $ProviderUrl
+    $site['provider_nickname'] = $Nickname
+    $site['hub_user'] = $HubUser
+    $site['restart_url'] = $RestartUrl
+    if ($HubPassword) { $site['hub_password'] = $HubPassword }
+    if ($RestartSecret) { $site['restart_secret'] = $RestartSecret }
+    $computer = Get-FarmComputerInfo -Paths $Paths
+    $request = New-Object System.Collections.Specialized.OrderedDictionary
+    $request['protocol'] = 1
+    $request['site'] = $site
+    $request['computer'] = $computer
+    $out = Invoke-Blossom -Origin $pairing.AppOrigin -Method 'PUT' -Path '/api/farm/pair/site' -Token $pairing.FarmToken -Body ($request | ConvertTo-Json -Compress -Depth 4) -KitVersion $computer['kit_version']
+    if (-not $out.Ok) { return $out }
+    $out = Update-BlossomResult -Result $out
+    $pairing.SiteSentAt = (Get-Date).ToUniversalTime().ToString('s') + 'Z'
+    Write-FarmPairing -Paths $Paths -Pairing $pairing
+    return $out
+}
+
+function Send-FarmComputer {
+    # Tells Blossom the versions this computer runs now (after an update).
+    param([Parameter(Mandatory = $true)]$Paths)
+    $pairing = Read-FarmPairing -Paths $Paths
+    if (-not $pairing) { $out = New-BlossomResult; $out.Kind = 'origin'; $out.Message = 'This computer is not paired with Blossom.'; return $out }
+    $computer = Get-FarmComputerInfo -Paths $Paths
+    $request = New-Object System.Collections.Specialized.OrderedDictionary
+    $request['protocol'] = 1
+    $request['computer'] = $computer
+    $out = Invoke-Blossom -Origin $pairing.AppOrigin -Method 'PUT' -Path '/api/farm/pair/site' -Token $pairing.FarmToken -Body ($request | ConvertTo-Json -Compress -Depth 4) -KitVersion $computer['kit_version'] -Tries 2
+    if ($out.Ok) { $out = Update-BlossomResult -Result $out }
+    return $out
+}
+
+function Get-FarmPairingStatus {
+    # Asks Blossom where the pairing stands. Ok: State is one of installing,
+    # checking, awaiting_confirmation, active, rejected, expired; CheckOk
+    # ($true, $false or $null), Devices, CheckStep and CheckDetail describe
+    # what Blossom found when it called the farm.
+    param([Parameter(Mandatory = $true)]$Paths, [int]$Tries = 2)
+    $pairing = Read-FarmPairing -Paths $Paths
+    if (-not $pairing) { $out = New-BlossomResult; $out.Kind = 'origin'; $out.Message = 'This computer is not paired with Blossom.'; return $out }
+    $computer = Get-FarmComputerInfo -Paths $Paths
+    $out = Invoke-Blossom -Origin $pairing.AppOrigin -Method 'GET' -Path '/api/farm/pair/status' -Token $pairing.FarmToken -KitVersion $computer['kit_version'] -Tries $Tries
+    if (-not $out.Ok) { return $out }
+    $out = Update-BlossomResult -Result $out
+    if (-not $out.State) {
+        $out.Ok = $false; $out.Kind = 'not_blossom'
+        $out.Message = $pairing.AppOrigin + ' answered, but with a pairing state this kit does not know. Is this kit current?'
+    }
+    return $out
+}
+
+function Get-PairingCheckText {
+    # One sentence about what Blossom found when it called the farm ($null
+    # when it has not called it yet).
+    param([Parameter(Mandatory = $true)]$Status)
+    if ($Status.CheckOk -eq $true) {
+        $phones = '' + $Status.Devices + ' phones'
+        if (-not $Status.Devices) { $phones = 'no phone yet (expected until the phones are added)' }
+        elseif ($Status.Devices -eq 1) { $phones = '1 phone' }
+        return ('Blossom sees your farm: ' + $phones + '.')
+    }
+    if ($Status.CheckOk -eq $false) {
+        $text = 'Blossom could not use the farm yet'
+        if ($Status.CheckStep) { $text += ' (step: ' + $Status.CheckStep + ')' }
+        if ($Status.CheckDetail) { $text += ': ' + $Status.CheckDetail }
+        return $text
+    }
+    return $null
+}
+
+function Wait-FarmPairing {
+    # Follows the pairing after the farm was sent, and says what happens.
+    # Returns 0: the site is active in Blossom. 2: still waiting for somebody
+    # to confirm in Blossom (nothing is lost). 1: declined, expired, or
+    # Blossom no longer accepts this computer.
+    param([Parameter(Mandatory = $true)]$Paths, [int]$MaxSec = 600)
+    $waited = 0; $last = ''; $saidConfirm = $false; $poll = 3
+    while ($true) {
+        $s = Get-FarmPairingStatus -Paths $Paths -Tries 1
+        if ($s.Ok) {
+            $poll = $s.PollSec
+            $line = Get-PairingCheckText -Status $s
+            if ($s.State -eq 'active') {
+                if (-not $line) { $line = 'The site is active.' }
+                $as = ''
+                if ($s.SiteLabel) { $as = ' as "' + $s.SiteLabel + '"' }
+                Write-Ok ('Confirmed in Blossom' + $as + '. ' + $line)
+                return 0
+            }
+            if ($s.State -eq 'awaiting_confirmation' -and -not $saidConfirm) {
+                $saidConfirm = $true
+                if ($s.CheckOk -eq $false) { Write-Warn $line } elseif ($line) { Write-Ok $line }
+                Write-Host ('   Now confirm in Blossom: Phone Farm -> Farm setup shows this computer ("' + (ConvertTo-ComputerLabel -Name ([Environment]::MachineName)) + '")') -ForegroundColor Yellow
+                Write-Host '   with its addresses. Check that they are yours, then press Confirm. Waiting...' -ForegroundColor Yellow
+            }
+            if ($s.State -eq 'checking' -and $last -ne 'checking') { Write-Note 'Blossom is calling the farm from its servers...' }
+            if ($s.State -eq 'installing' -and $last -ne 'installing') { Write-Note 'Blossom is waiting for the description of the farm.' }
+            if ($s.State -eq 'rejected') { Write-Warn ('This computer was declined in Blossom. ' + $FarmPairHelp); return 1 }
+            if ($s.State -eq 'expired') { Write-Warn ('The pairing was not confirmed in Blossom in time. ' + $FarmPairHelp); return 1 }
+            $last = $s.State
+        } elseif ($s.Kind -eq 'refused') {
+            Write-Warn ($s.Message + ' ' + $FarmPairHelp)
+            return 1
+        } elseif ($s.Kind -ne 'network') {
+            Write-Warn $s.Message
+            return 1
+        }
+        if ($waited -ge $MaxSec) { return 2 }
+        Start-Sleep -Seconds $poll
+        $waited += $poll
+    }
+}
+
+function Remove-FarmPairing {
+    # Tells Blossom that this computer gives up its farm token, and deletes
+    # the pairing file. Returns Ok when Blossom took note or no longer knew
+    # the token; otherwise it could not be told, and the file is kept.
+    param([Parameter(Mandatory = $true)]$Paths)
+    $pairing = Read-FarmPairing -Paths $Paths
+    if (-not $pairing) { Remove-FarmPairingFile -Paths $Paths; $out = New-BlossomResult; $out.Ok = $true; $out.Kind = 'ok'; return $out }
+    $out = Invoke-Blossom -Origin $pairing.AppOrigin -Method 'DELETE' -Path '/api/farm/pair/token' -Token $pairing.FarmToken -Tries 2
+    if ($out.Ok -or ($out.Kind -eq 'refused' -and $out.Status -eq 401)) {
+        Remove-FarmPairingFile -Paths $Paths
+        $out.Ok = $true
+    }
+    return $out
 }
 
 Export-ModuleMember -Function *

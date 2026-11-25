@@ -12,8 +12,15 @@
 #         with the GADS database, every secret and phone pairing in it, and
 #         the farm's service account.
 #
+# A computer that is paired with Blossom can give the pairing up as well
+# (--unpair, or the question asked with --remove-data): Blossom then no longer
+# accepts anything from this computer. The site stays listed in Blossom until
+# an admin removes it there. Do NOT unpair a farm that was moved to another
+# computer with export-farm: the new computer uses the same pairing.
+#
 # What the script does not remove is listed at the end with the way to remove it.
 #   --remove-data     Delete the tunnel, /opt/farm and the service account. Cannot be undone.
+#   --unpair          Give up the pairing with Blossom, without asking.
 #   --services-only   Same as running without options (kept for clarity in instructions).
 
 set -u
@@ -22,13 +29,14 @@ KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 . "$KIT_ROOT/lib/farmkit.sh"
 trap farm_http_cleanup EXIT
 
-REMOVE_DATA=0; SERVICES_ONLY=0
+REMOVE_DATA=0; SERVICES_ONLY=0; UNPAIR=0
 for arg in "$@"; do
     case $arg in
         --remove-data) REMOVE_DATA=1 ;;
         --services-only) SERVICES_ONLY=1 ;;
+        --unpair) UNPAIR=1 ;;
         -h | --help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
-        *) stop_farm "Unknown option: $arg" 'Use --remove-data, --services-only, or no option.' ;;
+        *) stop_farm "Unknown option: $arg" 'Use --remove-data, --services-only, --unpair, or no option.' ;;
     esac
 done
 
@@ -47,6 +55,30 @@ if [ "$REMOVE_DATA" = 1 ]; then
     answer=''
     IFS= read -r -p 'Type DELETE to continue: ' answer < /dev/tty
     if [ "$answer" != DELETE ]; then write_note 'Nothing was changed.'; exit 0; fi
+fi
+
+# The pairing with Blossom. Asked before anything is removed, and only when
+# the pairing file is about to be deleted anyway.
+read_farm_pairing
+STILL_PAIRED=$FARM_IS_PAIRED
+PAIRED_WITH=$PAIR_ORIGIN
+if [ "$FARM_IS_PAIRED" = 1 ] && [ "$REMOVE_DATA" = 1 ] && [ "$UNPAIR" = 0 ]; then
+    echo
+    write_color "$FK_YELLOW" "This computer is paired with Blossom ($PAIR_ORIGIN). Unpair it as well?"
+    write_color "$FK_YELLOW" 'Answer no if you moved this farm to another computer with export-farm: the new'
+    write_color "$FK_YELLOW" 'computer uses the same pairing, and unpairing would cut it off.'
+    answer=''
+    IFS= read -r -p 'Unpair this computer from Blossom? [y/N]: ' answer < /dev/tty || answer=''
+    case $answer in [yY]*) UNPAIR=1 ;; esac
+fi
+if [ "$FARM_IS_PAIRED" = 1 ] && [ "$UNPAIR" = 1 ]; then
+    write_step 'Unpairing from Blossom'
+    if pair_unpair; then
+        STILL_PAIRED=0
+        write_ok "Blossom ($PAIRED_WITH) no longer accepts anything from this computer."
+    else
+        write_warn "Blossom could not be told ($APP_MESSAGE). Revoke this computer there instead: Phone Farm -> Farm setup -> the site -> Unpair computer."
+    fi
 fi
 
 write_step 'Removing the launchd services'
@@ -81,6 +113,11 @@ write_step 'What is left, and how to remove it'
 if [ "$FARM_HAS_CONFIG" = 1 ]; then
     write_note "DNS records at Cloudflare (dashboard -> your domain -> DNS): $FARM_CFG_HUB_HOST, $FARM_CFG_PROVIDER_HOST, $FARM_CFG_RESTART_HOST"
     write_note 'The site in Blossom CRM: Phone Farm -> Farm setup -> Remove.'
+fi
+if [ "$STILL_PAIRED" = 1 ] && [ "$REMOVE_DATA" = 1 ]; then
+    write_note "The pairing with Blossom ($PAIRED_WITH) was not given up; its token went with /opt/farm. Unless the farm moved to another computer, revoke it in Blossom: Phone Farm -> Farm setup -> the site -> Unpair computer."
+elif [ "$STILL_PAIRED" = 1 ]; then
+    write_note "The pairing with Blossom ($PAIRED_WITH) was kept in /opt/farm. To give it up:   sudo bash scripts/uninstall.sh --unpair"
 fi
 write_note 'FFmpeg and OpenSSL from Homebrew (only if nothing else on this Mac uses them):   brew uninstall ffmpeg'
 write_note 'Sleep was switched off by install.sh: System Settings -> Energy, or   sudo pmset -a sleep 1'

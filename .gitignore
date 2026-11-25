@@ -10,6 +10,8 @@
 farm.json
 restart-secret.txt
 keep-available.json
+pairing.json
+pairing.new.json
 tunnel-credentials.json
 node_modules/
 dist/

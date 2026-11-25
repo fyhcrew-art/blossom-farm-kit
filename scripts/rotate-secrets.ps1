@@ -8,14 +8,17 @@
         powershell -ExecutionPolicy Bypass -File .\scripts\rotate-secrets.ps1 -All
 
     When somebody who had Phone Farm access in Blossom leaves: run it with
-    -HubUser (and -AdminPassword if that person knew it), then enter the new
-    hub password in Blossom (Farm setup -> Edit). See docs\security.md.
+    -HubUser (and -AdminPassword if that person knew it). See docs\security.md.
 
-    New values are shown once and written to no log.
+    On a computer that is paired with Blossom, the new hub password and the
+    new restart secret are sent to Blossom by this script (with the
+    computer's farm token) and are not shown. Without a pairing, or when
+    Blossom cannot be reached, they are shown once, to be entered in Blossom
+    (Farm setup -> Edit), and written to no log.
 .PARAMETER RestartSecret
-    New restart secret. Enter it in Blossom afterwards.
+    New restart secret.
 .PARAMETER HubUser
-    New random password for the hub user Blossom uses ("blossom"). Enter it in Blossom afterwards.
+    New random password for the hub user Blossom uses ("blossom").
 .PARAMETER KeepAvailable
     New random password for the internal keep-available user (nothing to enter anywhere).
 .PARAMETER AdminPassword
@@ -33,9 +36,11 @@ Import-Module (Join-Path $KitRoot 'lib\FarmKit.psm1') -Force -DisableNameCheckin
 $HubUrl = 'http://127.0.0.1:10000'
 $newHubPassword = $null
 $newRestartSecret = $null
+$sentToBlossom = $false
 
 function Show-New {
     if (-not $newHubPassword -and -not $newRestartSecret) { return }
+    if ($sentToBlossom) { return }
     Write-Host ''
     Write-Host '======================================================================' -ForegroundColor Cyan
     Write-Host ' Enter these in Blossom CRM -> Phone Farm -> Farm setup -> Edit' -ForegroundColor Cyan
@@ -121,6 +126,27 @@ try {
         if (-not (Wait-TcpPort -Port 19999 -WaitSec 20)) {
             Write-Warn 'The restart service did not come back. Read C:\farm\logs\restart-server.log.'
         } else { Write-Ok 'Done, and the restart service was restarted with the new secret.' }
+    }
+
+    # Paired with Blossom: the new values go there with this computer's farm
+    # token, and nobody has to copy them.
+    if (($newHubPassword -or $newRestartSecret) -and (Read-FarmPairing -Paths $paths)) {
+        Write-Step 'Blossom CRM'
+        $secret = $null
+        if (Test-Path -LiteralPath $paths.RestartSecret) { $secret = (Get-Content -LiteralPath $paths.RestartSecret -Raw).Trim() }
+        $hubUserName = [string](Get-JsonProperty -Object $farm -Name 'hubUser')
+        if (-not $hubUserName) { $hubUserName = 'blossom' }
+        $sent = Send-FarmSite -Paths $paths -HubUrl ('https://' + $farm.hubHost) -ProviderUrl ('https://' + $farm.providerHost) -Nickname ([string]$farm.nickname) `
+            -HubUser $hubUserName -HubPassword $newHubPassword -RestartUrl ('https://' + $farm.restartHost) -RestartSecret $secret
+        $secret = $null
+        if ($sent.Ok) {
+            $sentToBlossom = $true
+            Write-Ok ('Blossom (' + (Read-FarmPairing -Paths $paths).AppOrigin + ') received the new values through the pairing of this computer. Nothing has to be entered there, and they are not shown here.')
+            if ($sent.NeedsConfirmation) { Write-Warn 'The site is waiting for an admin to confirm it in Blossom (Phone Farm -> Farm setup); until then Blossom does not use it.' }
+        } else {
+            Write-Warn ('The new values could not be sent to Blossom: ' + $sent.Message)
+            Write-Warn 'They are shown below instead: enter them in Blossom by hand.'
+        }
     }
 
     Show-New

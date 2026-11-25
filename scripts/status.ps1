@@ -40,6 +40,34 @@ try {
         Write-Note ('Restart    https://' + $farm.restartHost)
     }
 
+    Write-Step 'Pairing with Blossom CRM'
+    $pairing = Read-FarmPairing -Paths $paths
+    if (-not $pairing) {
+        Write-Note 'Not paired: Blossom has the values that were entered there by hand, if any. To pair, Blossom shows one command under Phone Farm -> Farm setup -> Connect a computer.'
+    } else {
+        $state = Get-FarmPairingStatus -Paths $paths
+        $where = $pairing.AppOrigin
+        if ($state.Workspace) { $where += ', workspace "' + $state.Workspace + '"' } elseif ($pairing.Workspace) { $where += ', workspace "' + $pairing.Workspace + '"' }
+        if ($state.SiteLabel) { $where += ', site "' + $state.SiteLabel + '"' }
+        if ($state.Ok -and $state.State -eq 'active') {
+            Write-Ok ('Paired with ' + $where + '. The site is active.')
+            $line = Get-PairingCheckText -Status $state
+            if ($state.CheckOk -eq $false) { Write-Warn $line; $problems++ } elseif ($line) { Write-Ok $line }
+        } elseif ($state.Ok -and $state.State -eq 'awaiting_confirmation') {
+            Write-Warn ('Paired with ' + $where + ', but nobody has confirmed this computer in Blossom yet: open Phone Farm -> Farm setup there and confirm it. Until then Blossom does not use the farm.'); $problems++
+        } elseif ($state.Ok -and $state.State -eq 'checking') {
+            Write-Note ('Paired with ' + $where + '. Blossom is checking the farm right now.')
+        } elseif ($state.Ok -and $state.State -eq 'installing') {
+            Write-Warn ('Paired with ' + $where + ', but the farm was never sent to Blossom. Run install.ps1 to the end.'); $problems++
+        } elseif ($state.Ok) {
+            Write-Warn ('The pairing with ' + $where + ' was declined or ran out. ' + (Get-FarmPairHelp)); $problems++
+        } elseif ($state.Kind -eq 'refused') {
+            Write-Warn ('Paired with ' + $pairing.AppOrigin + ', but: ' + $state.Message + ' ' + (Get-FarmPairHelp)); $problems++
+        } else {
+            Write-Note ('Paired with ' + $where + '. Its state could not be asked right now: ' + $state.Message)
+        }
+    }
+
     Write-Step 'Windows services'
     foreach ($name in @('MongoDB', 'GadsHub', 'GadsProvider', 'FarmGate', 'KeepAvailable', 'FarmRestart', 'Cloudflared')) {
         $svc = Get-Service -Name $name -ErrorAction SilentlyContinue

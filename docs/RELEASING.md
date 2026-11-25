@@ -5,7 +5,7 @@ Two kinds of release live in this repository:
 | Tag | What | Made by |
 |---|---|---|
 | `gads-v<upstream>-drag.<n>` | the patched provider, three times from the same source (`GADS-drag.exe` for Windows x64, `GADS-drag-darwin-arm64` and `GADS-drag-darwin-amd64` for macOS), `SHA256SUMS`, the source archive, `THIRD-PARTY-NOTICES.txt`, `LICENSE-AGPL-3.0.txt`. Never marked "Latest". | `.github/workflows/build-gads.yml` |
-| `kit-v<x.y.z>` | the kit itself; customers download its "Source code (zip)". Always marked "Latest". | a normal GitHub release, by hand |
+| `kit-v<x.y.z>` | the kit itself: `blossom-farm-kit-<x.y.z>.zip`, `SHA256SUMS`, `bootstrap.ps1` and `bootstrap.sh` (the first file of the command Blossom CRM shows), `bootstrap-hashes.json`. Published as a pre-release; marked "Latest" by hand once it has passed the checklists. | `.github/workflows/release-kit.yml` |
 
 `install.ps1` downloads `GADS-drag.exe`, and `install.sh` the
 `GADS-drag-darwin-…` file for its processor, from the addresses in
@@ -53,7 +53,13 @@ somewhere else or the customer passes `-ProviderExe` / `--provider-binary`.
      bash tests with the bash 3.2, awk and sed that macOS ships, `plutil
      -lint` on the property lists, `pfctl -n` on the packet filter rule,
      `newsyslog -n` on the log rotation file;
-   * the Node tests on Windows, Linux and macOS.
+   * the Node tests on Windows, Linux and macOS;
+   * on all three: the pairing client and the bootstrap files against
+     `tests/fake-blossom.js`, a stand-in for Blossom's pairing API served
+     over https with a certificate made for the run (`tests/pairing.test.sh`,
+     `tests/bootstrap.test.sh`, `tests/Pairing.Tests.ps1`,
+     `tests/Bootstrap.Tests.ps1`). These prove the client against the
+     contract, not against Blossom itself: the checklists below do that.
 
    **The macOS job has never run before the first push that contains it.**
    Read its log on that first run: it is the only place where the shell
@@ -75,10 +81,73 @@ somewhere else or the customer passes `-ProviderExe` / `--provider-binary`.
    **not** carry the "Latest" badge.
 4. Check that the three addresses in `versions.json` (`gadsDrag.url`,
    `macos.arm64.provider.url`, `macos.x86_64.provider.url`) answer 200.
-5. Run both acceptance checklists below, on a Windows PC and on a Mac, each
-   with a phone, following the README as a customer would.
-6. Create the release `kit-v1.0.0` from that commit, with "Set as the latest
-   release" ticked. The README sends customers to `/releases/latest`.
+5. Tag the commit `kit-v1.0.0` (`versions.json` must say `"kit": "1.0.0"`)
+   and push the tag. The *Release the kit* workflow checks that the provider
+   files are published, makes the kit archive from the tagged commit, and
+   creates the release as a **pre-release** with five files (the table
+   above). A pre-release is downloadable at its final address but is not
+   "Latest", so customers do not get it yet.
+6. Run both acceptance checklists below, on a Windows PC and on a Mac, each
+   with a phone, following the README as a customer would. For the pairing
+   points you need a Blossom that knows this release ("A kit release and
+   Blossom CRM" below): a staging deployment, never production.
+7. When both lists have passed: `gh release edit kit-v1.0.0 --prerelease=false
+   --latest`. The README sends customers to `/releases/latest`. This changes
+   no file of the release.
+8. Hand `bootstrap-hashes.json` of the release to the maintainers of Blossom
+   CRM. Until they put its three values into Blossom, the command Blossom
+   shows keeps naming the previous kit release.
+
+## A kit release and Blossom CRM
+
+The command Blossom shows under *Connect a computer* names one kit release
+and carries the SHA-256 of that release's bootstrap file. Three values per
+release go into Blossom, all from `bootstrap-hashes.json`: `release` (the
+tag), `bootstrapPs1Sha256` and `bootstrapShSha256`. They are copied by a
+person, in a commit to Blossom that somebody reviews; Blossom never fetches
+them. That is the point of the chain: the value a download is checked
+against never comes from the place the download comes from.
+
+What follows from that:
+
+* **Never replace a file of a published `kit-…` release, and never move its
+  tag.** Every command Blossom has shown for it would stop with "The
+  downloaded file is not the one Blossom expects". A fix is a new release.
+* **Never delete a `kit-…` release that Blossom still names.** Check with
+  the maintainers of Blossom first.
+* The bootstrap files in the repository are templates and refuse to run. The
+  workflow writes four values into the copies it publishes: the tag, the
+  download address of the release, the name of the archive, and the SHA-256
+  of `SHA256SUMS`. `SHA256SUMS` holds the SHA-256 of the archive.
+* To try a release before Blossom knows it, write the command by hand, with
+  the values of its `bootstrap-hashes.json`. Windows (in an Administrator
+  PowerShell):
+
+  ```powershell
+  $f = "$env:TEMP\blossom-bootstrap.ps1"; [Net.ServicePointManager]::SecurityProtocol = 'Tls12'; Invoke-WebRequest -UseBasicParsing 'https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/kit-v1.0.0/bootstrap.ps1' -OutFile $f; if ((Get-FileHash $f -Algorithm SHA256).Hash -ne '<bootstrapPs1Sha256>') { Remove-Item $f; throw 'The downloaded file is not the one Blossom expects. Nothing was run.' }; powershell -NoProfile -ExecutionPolicy Bypass -File $f -AppOrigin 'https://<staging Blossom>' -PairingCode '<code>'
+  ```
+
+  macOS (in Terminal):
+
+  ```sh
+  cd ~ && curl -fsSL --proto '=https' --tlsv1.2 -o blossom-bootstrap.sh 'https://github.com/fyhcrew-art/blossom-farm-kit/releases/download/kit-v1.0.0/bootstrap.sh' && echo '<bootstrapShSha256>  blossom-bootstrap.sh' | shasum -a 256 -c - && sudo bash blossom-bootstrap.sh --app-origin 'https://<staging Blossom>' --pairing-code '<code>'
+  ```
+
+  Without `-AppOrigin`/`-PairingCode` (`--app-origin`/`--pairing-code`) the
+  same command installs without pairing.
+* **What has run, and what has not.** The pairing client and the bootstrap
+  files were written against the contract and have run against the stand-in
+  only: under bash 5 and bash 3.2 and PowerShell 7 on Linux, and in CI under
+  Windows PowerShell 5.1 and on macOS. `install.sh` with a pairing code ran
+  to the end against stand-ins for the system tools of macOS; `install.ps1`
+  with a pairing code has not run at all, because it needs Windows services.
+  No Blossom deployment had the pairing API when this was written. The
+  pairing points of the two checklists below are therefore the first run
+  against a real Blossom, on a real PC and a real Mac: expect to correct
+  something, and correct the contract document with it.
+* The HTTP contract between the kit and Blossom is what `tests/fake-blossom.js`
+  implements. When Blossom's side changes, change the stand-in first and let
+  the tests of both systems say what the kit has to follow.
 
 ## Acceptance checklist for a kit release: Windows
 
@@ -127,6 +196,36 @@ On a spare Windows PC (or a virtual machine), never the production farm:
 9. As a standard (non-administrator) user create `C:\farm\bin` with a file in
    it on a clean PC, then run `install.ps1` as Administrator: it must stop at
    step 2 with "already exists and cannot be used".
+10. **Pairing** (against a staging Blossom, with the command written as in "A
+    kit release and Blossom CRM"):
+    * on a clean PC the one command, pasted into an Administrator
+      PowerShell, ends with "Blossom sees your farm"; the kit is in
+      `C:\blossom-farm-kit`, and `icacls C:\blossom-farm-kit` shows
+      Administrators and SYSTEM with full control and Users with read only;
+    * Blossom showed "Computer connected" during the installation, then the
+      computer's name, its country and the three addresses; after Confirm
+      the site is green, and no password or secret appeared in the
+      PowerShell window at any point;
+    * the same command a second time: "this very code" is recognised,
+      nothing is asked of Blossom twice, the site stays as it is;
+    * change one character of the hash in the command: it stops with "not
+      the one Blossom expects" and `C:\blossom-farm-kit` is untouched;
+    * a command with an expired code: the installation completes and prints
+      the values for manual entry;
+    * `rotate-secrets.ps1 -HubUser -RestartSecret` shows no value and Blossom
+      keeps working (phone list, Services panel) without anybody typing;
+    * `scripts\status.ps1` shows the pairing; after "Unpair computer" in
+      Blossom it reports that Blossom no longer accepts this computer, and
+      `rotate-secrets.ps1 -HubUser` then prints the new password;
+    * `icacls C:\farm\config\pairing.json` shows Administrators and SYSTEM
+      only; nothing in `C:\farm\logs` contains `bft_`;
+    * behind a proxy that opens https (or with the PC's clock set a year
+      back) the installer says that the certificate could not be verified
+      and sends nothing;
+    * `export-farm.ps1` / `import-farm.ps1` to a second PC: `rotate-secrets`
+      there still reaches Blossom (the pairing moved);
+    * `uninstall.ps1 -RemoveData`, answer `y` to the unpair question: Blossom
+      shows the computer as unpaired.
 
 ## Acceptance checklist for a kit release: macOS
 
@@ -240,6 +339,16 @@ below).
 13. **Intel Mac** (if Intel stays supported): points 1 to 5; signing in the
     hub page fails as the README says and signing with zsign outside the hub
     works; FFmpeg from Homebrew is found in `/usr/local/bin`.
+14. **Pairing** (against a staging Blossom, with the command written as in "A
+    kit release and Blossom CRM"): the same points as number 10 of the
+    Windows list, with these differences. The command is pasted into
+    Terminal; `shasum -a 256 -c` prints "OK" before `sudo` asks for the
+    password. The kit is in `/opt/blossom-farm-kit`, owned by root and not
+    writable by anybody else (`ls -ld`). `/opt/farm/config/pairing.json` is
+    `-rw------- root`. While the installer sends the farm, `ps axww | grep
+    curl` in a second Terminal window shows no password, secret or token
+    (they go to curl through its standard input). The curl of macOS refuses
+    a certificate it cannot verify: check it with the clock set back.
 
 ## A new patched provider (patch changed, or a newer GADS)
 
@@ -298,8 +407,10 @@ them on a farm first (MongoDB and cloudflared are the ones that matter).
 ## What must never be committed
 
 No binary, no `.ipa`, no certificate or key, nothing copied from a real farm:
-no real host name, tunnel id, UDID, password or secret. Examples use
-`yourdomain.com` and zero UUIDs. `.gitignore` blocks the usual file types;
+no real host name, tunnel id, UDID, password, secret, pairing code or farm
+token, and no address of a real Blossom deployment. Examples use
+`yourdomain.com` and zero UUIDs; the tests make their certificate at run
+time instead of carrying one. `.gitignore` blocks the usual file types;
 it does not replace looking at the diff.
 
 ## Licence duties when publishing the `GADS-drag` programs

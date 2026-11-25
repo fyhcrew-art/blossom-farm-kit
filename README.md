@@ -7,8 +7,10 @@ and the guide.
 
 Your iPhones stay at your place, plugged into your computer. The computer
 runs [GADS](https://github.com/shamanec/GADS), an open-source device farm. A
-Cloudflare Tunnel gives it three public https addresses. You paste those
-addresses and two secrets into Blossom CRM, and your phones appear there.
+Cloudflare Tunnel gives it three public https addresses. Blossom CRM shows
+you one command for the farm computer; the installer it starts sets
+everything up and hands the addresses and the two secrets to Blossom by
+itself. You confirm the computer in Blossom, and your phones appear there.
 
 There is no onboarding call. This repository is the whole of it.
 
@@ -71,7 +73,7 @@ All of it starts with the computer, with nobody signed in:
 | A domain | A domain name you own, with its DNS at Cloudflare (free plan is enough). The installer creates three sub-domains on it. |
 | A Cloudflare account | Free. Needed for the tunnel. |
 | An Apple Developer account | Yours. WebDriverAgent, the helper app on each phone, is downloaded from the GADS author and must be signed with your own Apple account: the paid Apple Developer Program (a signature lasts a year). The kit contains no WebDriverAgent and cannot sign for you. See [`docs/phones.md`](docs/phones.md). |
-| Blossom CRM | A workspace with Phone Farm access. |
+| Blossom CRM | A workspace with Phone Farm access, and somebody who may manage its farm (an admin): that person gets the command and confirms the computer. |
 
 ## Step by step
 
@@ -79,49 +81,47 @@ All of it starts with the computer, with nobody signed in:
 
 1. Add your domain to Cloudflare and wait until Cloudflare shows it as
    "Active" ([`docs/network.md`](docs/network.md), section 1).
-2. Decide three host names, direct sub-domains of your domain, for example
-   `farm-hub.yourdomain.com`, `farm-provider.yourdomain.com`,
-   `farm-restart.yourdomain.com`.
-3. Have a password manager ready. The installer shows two secrets once.
+2. Have a password manager ready: the installer makes you choose one
+   password, for the farm's own administrator page.
+3. On a Mac: install [Homebrew](https://brew.sh) as your normal user.
 
-### 2. Download the kit
+### 2. Get the command from Blossom
 
-On the farm computer, download the latest kit from
-<https://github.com/fyhcrew-art/blossom-farm-kit/releases/latest>: the file
-"Source code (zip)" of the release whose name starts with `kit-v`. (Releases
-named `GADS-drag …` on the same page are a program the installer fetches by
-itself, not the kit.) Unpack it, for example to `C:\blossom-farm-kit` on
-Windows, or to `blossom-farm-kit` in your home folder on a Mac (directly in
-the home folder: macOS asks for an extra permission before Terminal may read
-Downloads, Documents or the Desktop). Keep the folder: the maintenance
-scripts are in it.
+In Blossom CRM open **Phone Farm → Farm setup → Connect a computer**, say
+whether the farm computer is a Windows PC or a Mac, and copy the command it
+shows. The command carries a **pairing code**: it works once, for 30 minutes,
+and only for your workspace. Leave the page open: it follows the
+installation.
 
-### 3. Run the installer
+### 3. Run it on the farm computer
 
 **Windows.** Press Start, type `powershell`, right-click **Windows
-PowerShell**, choose **Run as administrator**, then:
-
-```powershell
-cd C:\blossom-farm-kit
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
-
-`-ExecutionPolicy Bypass` applies to this one command only; it is needed
-because Windows does not run downloaded scripts by default.
+PowerShell**, choose **Run as administrator**, paste the command, press
+Enter.
 
 **macOS.** Signed in as an administrator of the Mac, open **Terminal**
-(Applications → Utilities), then:
+(Applications → Utilities), paste the command, press Enter. `sudo` asks for
+the password of your Mac user. Do not start from a root shell: Homebrew only
+works for a normal user.
 
-```sh
-cd ~/blossom-farm-kit
-sudo bash install.sh
-```
+What the command does before anything is installed
+([`docs/security.md`](docs/security.md), section 9, has the details):
 
-`sudo` asks for the password of your Mac user and runs the installer as
-root; it must not be started from a root shell, because Homebrew only works
-for a normal user.
+1. It downloads one small file, `bootstrap.ps1` or `bootstrap.sh`, from a
+   release of this repository, and compares its SHA-256 with the value that
+   is written in the command. If they differ it stops and runs nothing.
+2. That file downloads the kit of the same release and checks it against the
+   release's `SHA256SUMS`, whose own SHA-256 the file carries.
+3. The kit is unpacked to `C:\blossom-farm-kit` (Windows) or
+   `/opt/blossom-farm-kit` (macOS), and its installer starts, with the
+   address of your Blossom and the pairing code.
 
-Read a script before you run it with full rights: these are plain text.
+The installer asks for three things only: the new password of the farm's
+administrator (typing is hidden), your Cloudflare sign-in (in a browser
+window it opens), and your domain. From the domain it proposes the three host
+names `farm-hub.`, `farm-provider.` and `farm-restart.yourdomain.com`; press
+Enter to take them. Read a script before you run it with full rights: these
+are plain text.
 
 What the installer does, in order (it prints each step):
 
@@ -130,32 +130,24 @@ What the installer does, in order (it prints each step):
 | 1 Checks | Administrator, 64-bit Windows 10 1809+/11, 10 GB free. | Run with `sudo`, macOS version, Apple Silicon or Intel, not under Rosetta, 10 GB free. |
 | 2 Folders | Creates `C:\farm`, readable by Administrators and SYSTEM only. | Creates `/opt/farm` and the hidden service account `_blossomfarm`. Root owns the folder; that account may read it; nobody else may open it. |
 | | On both: a farm folder that already exists, has content and was not made by this kit stops the installer. It will not adopt a folder somebody else prepared. | |
+| | On both, when started with a pairing code: tells Blossom about this computer (its name, its system, the kit version; no address and no secret yet). Blossom shows "Computer connected". A code that is wrong, used or expired is reported here, and the installation continues without pairing. | |
 | 3 Programs | Installs, with `winget` and at pinned versions: NSSM, MongoDB, Node.js, FFmpeg, cloudflared. Checks for Apple's USB support (iTunes from Apple's installer, see `docs/phones.md`). | Downloads Node.js, MongoDB and cloudflared from their publishers at pinned versions into `/opt/farm/bin` and checks the SHA-256 of each. Installs FFmpeg (and OpenSSL on Apple Silicon) with Homebrew. Apple's USB support is part of macOS. |
 | | On both: programs that are already installed are kept as they are. | |
 | 4 GADS | On both: downloads the GADS hub from its publisher's release and the patched provider from this repository's release, and checks the SHA-256 of both against `versions.json`. A file with a wrong checksum is deleted, not used. | |
 | 5 MongoDB | On both: starts it and checks that it listens on this computer only. | On macOS it is the kit's own MongoDB, with its data in `/opt/farm/data`. |
 | 6 Hub + password | On both: starts the hub (on this computer only). GADS creates its administrator `admin` with a default password that anybody can look up; **the installer makes you replace it before anything is reachable from outside.** You choose it (14+ characters), typing is hidden. | |
 | 7 Users + provider | On both: creates the hub user `blossom` (random password, for Blossom CRM), the internal user `farm-keepalive`, and the provider record (`Provider1` unless you name another). | |
-| 8 Host names | On both: asks for the three host names. | |
+| 8 Host names | On both: asks for your domain and proposes the three host names (`-Domain` / `--domain` answers the question in advance; `-HubHost`, `-ProviderHost`, `-RestartHost` / `--hub-host`, `--provider-host`, `--restart-host` name them one by one). | |
 | 9 Tunnel | On both: opens the Cloudflare sign-in in a browser, creates the tunnel `blossom-farm`, creates the three DNS records, writes and validates the tunnel configuration. | |
 | 10 Restart secret | On both: generates it (256 random bits). | |
 | 11 Services | Adds the Windows Firewall rules for the provider's per-phone ports. Creates the Windows services (auto-start, restart on crash, rotating logs in `C:\farm\logs`) and starts them; the tunnel last. Switches off sleep on mains power. | Loads the packet filter rule for the provider's per-phone ports. Creates the launchd services (start with the Mac, restart on crash, logs in `/opt/farm/logs`, rotated by macOS) and starts them; the tunnel last. Switches off sleep, and switches on "start up after a power failure". |
 | 12 Self-test | On both: performs the checks of Blossom's "Test connection" against your public addresses, sending its requests the way Blossom's servers do, plus four of its own: that the provider and the restart service refuse a stranger, and that the tunnel refuses the two kinds of hub path GADS leaves without a login. | |
+| Blossom | On both, when paired: sends the three addresses, the provider nickname, the hub user with its password and the restart secret to your Blossom, over https, to the address the command named and to no other. Then it waits, up to ten minutes, for Blossom's own check of the farm and for your confirmation (next step). | |
 
-At the end it prints what to paste into Blossom:
-
-```
-   Hub address ............ https://farm-hub.yourdomain.com
-   Provider address ....... https://farm-provider.yourdomain.com
-   Provider nickname ...... Provider1
-   Hub user ............... blossom
-   Hub password ........... (shown once)
-   Restart service address  https://farm-restart.yourdomain.com
-   Restart secret ......... (shown once)
-```
-
-**The hub password and the restart secret are shown once and written to no
-log.** Copy them straight into Blossom or a password manager.
+When the farm was sent to Blossom, the installer shows no password and no
+secret: there is nothing to copy. If pairing was not asked for, or did not
+work, it prints the values for manual entry instead ("Without the command",
+below).
 
 The installer can be run again at any time. It keeps the database, the
 tunnel, the secrets and the passwords, and repairs what is missing. A farm
@@ -188,12 +180,74 @@ added later by running the installer again with the switch. Read
   on the day you install and are **not** checksum-verified by this kit,
   unlike the GADS programs.
 
-### 4. Connect it to Blossom
+### 4. Confirm the computer in Blossom
 
-In Blossom CRM open **Phone Farm → Farm setup → Connect a farm**, paste the
-values (the restart service goes under "Restart service (optional)"), press
-**Test connection**, then **Save and connect**. With no phone yet, the step
-"Phones" says *Check*: that is expected.
+The page in Blossom you left open now shows the computer that used the code:
+its name, its system, the country it connected from, and the three addresses
+it sent. Blossom has already called the farm from its servers and shows what
+it found ("3 phones found"; with no phone yet, "no phone yet", which is
+expected). **Check that the name and the addresses are yours, then press
+Confirm.** Until you do, Blossom does not use the site. If you do not
+recognise what is shown, press Decline: somebody else used your command.
+
+The installer notices the confirmation and ends with
+`Blossom sees your farm: 3 phones.` If you confirm later, nothing is lost;
+the status script shows where the pairing stands.
+
+From then on the farm computer holds a **farm token**
+(`config/pairing.json` in the farm folder). With it the scripts of this kit
+send Blossom new credentials when you rotate them, and nothing else: the
+token cannot read anything from Blossom and cannot touch any other site.
+Blossom lists the paired computer under the site and can unpair it at any
+time.
+
+#### Without the command (manual entry)
+
+The kit also works without pairing:
+
+1. On the farm computer, download the kit from
+   <https://github.com/fyhcrew-art/blossom-farm-kit/releases/latest>: the file
+   `blossom-farm-kit-<version>.zip` of the release whose name starts with
+   `kit-v`. (Releases named `GADS-drag …` on the same page are a program the
+   installer fetches by itself, not the kit.) Its SHA-256 is in the release's
+   `SHA256SUMS`. Unpack it, for example to `C:\blossom-farm-kit` on Windows,
+   or to `blossom-farm-kit` in your home folder on a Mac (directly in the
+   home folder: macOS asks for an extra permission before Terminal may read
+   Downloads, Documents or the Desktop). Keep the folder: the maintenance
+   scripts are in it.
+2. Run the installer inside it:
+
+   ```
+   powershell -ExecutionPolicy Bypass -File .\install.ps1     (Windows, in an Administrator PowerShell)
+   sudo bash install.sh                                        (macOS, in Terminal)
+   ```
+
+   `-ExecutionPolicy Bypass` applies to this one command only; it is needed
+   because Windows does not run downloaded scripts by default.
+3. At the end it prints what to enter in Blossom:
+
+   ```
+      Hub address ............ https://farm-hub.yourdomain.com
+      Provider address ....... https://farm-provider.yourdomain.com
+      Provider nickname ...... Provider1
+      Hub user ............... blossom
+      Hub password ........... (shown once)
+      Restart service address  https://farm-restart.yourdomain.com
+      Restart secret ......... (shown once)
+   ```
+
+   **The hub password and the restart secret are shown once and written to
+   no log.** In Blossom CRM open **Phone Farm → Farm setup → Advanced: enter
+   the addresses yourself**, paste the values (the restart service goes
+   under "Restart service (optional)"), press **Test connection**, then
+   **Save and connect**. With no phone yet, the step "Phones" says *Check*:
+   that is expected.
+
+A farm that was installed this way can be paired later: get the command from
+Blossom (step 2) and run it on the farm computer. It keeps everything that
+is set up, gives the hub user `blossom` a new password (the old one is
+stored nowhere on the computer, and Blossom needs one), and replaces the
+site you entered by hand once you confirm.
 
 ### 5. Add the phones
 
@@ -218,7 +272,9 @@ Which of the two you accept is your decision; `docs/security.md`, section 8.
 
 ## Day to day
 
-Run these with full rights, inside the kit folder:
+Run these with full rights, inside the kit folder (`C:\blossom-farm-kit` or
+`/opt/blossom-farm-kit` when the farm was set up with the command from
+Blossom):
 
 ```
 powershell -ExecutionPolicy Bypass -File .\scripts\<name>.ps1     (Windows, in an Administrator PowerShell)
@@ -229,12 +285,12 @@ Options are written `-Logs` on Windows and `--logs` on macOS.
 
 | Script | What it is for |
 |---|---|
-| `status` | Services, ports, the firewall, program checksums, disk. With `-Logs` / `--logs` it adds the last lines of every log with session tokens and your host names masked: copy **this output** when you ask for help, never a log file itself (`docs/security.md`, section 4). Changes nothing. |
+| `status` | The pairing with Blossom, services, ports, the firewall, program checksums, disk. With `-Logs` / `--logs` it adds the last lines of every log with session tokens and your host names masked: copy **this output** when you ask for help, never a log file itself (`docs/security.md`, section 4). Changes nothing. |
 | `self-test` | The connection test against the public addresses. |
-| `rotate-secrets` | New restart secret (`-RestartSecret` / `--restart-secret`), new password for `blossom` (`-HubUser` / `--hub-user`), for `admin` (`-AdminPassword` / `--admin-password`), or all (`-All` / `--all`). Use it whenever somebody with Phone Farm access leaves. |
-| `update` | Moves the farm to the versions of a newer kit; `-Rollback` / `--rollback` goes back. |
+| `rotate-secrets` | New restart secret (`-RestartSecret` / `--restart-secret`), new password for `blossom` (`-HubUser` / `--hub-user`), for `admin` (`-AdminPassword` / `--admin-password`), or all (`-All` / `--all`). Use it whenever somebody with Phone Farm access leaves. On a paired computer the new hub password and restart secret go to Blossom by themselves and are not shown; otherwise they are shown once, to be entered in Blossom. |
+| `update` | Moves the farm to the versions of a newer kit; `-Rollback` / `--rollback` goes back. On a paired computer it tells Blossom the new versions. |
 | `export-farm`, `import-farm` | Move the farm to another computer without changing anything in Blossom. An archive made on Windows can be imported on a Mac, and the other way round (see below). |
-| `uninstall` | Removes the services and the kit's firewall rules; with `-RemoveData` / `--remove-data` also the tunnel, the database and the farm folder. |
+| `uninstall` | Removes the services and the kit's firewall rules; with `-RemoveData` / `--remove-data` also the tunnel, the database and the farm folder. `-Unpair` / `--unpair` also gives up the pairing with Blossom (with `-RemoveData` the script asks). |
 
 Where things are:
 
@@ -242,7 +298,7 @@ Where things are:
 |---|---|---|
 | `C:\farm\bin` | `/opt/farm/bin` | the hub (`GADS`) and the provider (`GADS-drag`); on Windows also `nssm.exe`; on macOS also Node.js, MongoDB and cloudflared |
 | `C:\farm\services` | `/opt/farm/services` | the service scripts |
-| `C:\farm\config` | `/opt/farm/config` | `farm.json` (host names, no secrets), `restart-secret.txt`, `keep-available.json`, `cloudflared` (tunnel configuration and credentials) |
+| `C:\farm\config` | `/opt/farm/config` | `farm.json` (host names, no secrets), `restart-secret.txt`, `keep-available.json`, `pairing.json` (the farm token and the address of your Blossom, on a paired computer), `cloudflared` (tunnel configuration and credentials) |
 | `C:\farm\logs` | `/opt/farm/logs` | one log per service, rotated at 10 MB. Windows deletes rotated files after 30 days; macOS keeps the last ten. |
 | `C:\farm\Provider1` | `/opt/farm/Provider1` | the provider's own folder: its log, per-phone logs, cached pairings |
 | `C:\farm\export` | `/opt/farm/export` | archives written by `export-farm` (every secret of the farm: move them to an encrypted medium and delete them) |
@@ -250,17 +306,19 @@ Where things are:
 
 **Moving a farm between Windows and macOS.** The archive has the same format
 on both. What it carries over: the GADS database (phones, users, the uploaded
-WebDriverAgent), the tunnel credentials, the host names and the restart
-secret, so nothing changes in Blossom, and the provider's cached phone
-pairings. What it does not carry: the pairing records the operating system
+WebDriverAgent), the tunnel credentials, the host names, the restart secret
+and the pairing with Blossom, so nothing changes in Blossom, and the
+provider's cached phone pairings. (Because the pairing moves with the farm,
+do not unpair when you uninstall the old computer.) What it does not carry: the pairing records the operating system
 keeps for Apple's own software, which do not move from one system to the
 other. A phone that does not accept the cached pairing asks "Trust This
 Computer?" once on the new computer.
 
 ## Updating
 
-* **GADS and the kit's services**: download the newer kit and run its
-  `update` script. Only versions that a kit pins are installed: the hub
+* **GADS and the kit's services**: download the newer kit
+  (`blossom-farm-kit-<version>.zip` from the releases page; its SHA-256 is in
+  the release's `SHA256SUMS`), unpack it and run its `update` script. Only versions that a kit pins are installed: the hub
   and the patched provider must match each other, and the patch is made
   against a specific GADS version. Do not replace the GADS programs by hand.
 * **The other programs**: `update` leaves them alone.
@@ -296,6 +354,13 @@ follow the table):
 
 | What you see | Likely cause | What to do |
 |---|---|---|
+| The command from Blossom stops with "The downloaded file is not the one Blossom expects", or with a checksum that "is wrong" | The download was changed on the way, or the kit release was changed after Blossom was told about it | Nothing was run. Copy the command from Blossom again and retry on another network if you can. If it repeats, do not work around it: report it. |
+| "Pairing with Blossom did not work: This pairing code has expired" (or "was already used", or "does not know this pairing code") | A code works once and for 30 minutes | The installation went on without pairing. Get a new command in Blossom and run it on the farm computer; it keeps what is set up. If the code "was already used" and it was not you, decline the unknown computer in Blossom. |
+| "The certificate of … could not be verified" | The clock of the computer is wrong, or something on the network intercepts https (a filtering proxy, an antivirus that opens encrypted connections) | Nothing was sent. Set the date and time, or take the farm computer off that network or product. The kit has no switch to skip this check. |
+| "… answered with a redirect … not followed" or "answered, but not the way Blossom does" | The address in the command is not the one your Blossom answers at | Copy the command from Blossom again; do not type the address yourself. |
+| Blossom shows "Waiting for your computer…" and the installer has finished | The pairing step failed (the installer said why), or the command was run without the code | Read the end of the installer's output, or run the status script; then a new command from Blossom. |
+| The status script: "nobody has confirmed this computer in Blossom yet" | Step 4 was not done | Open Phone Farm → Farm setup in Blossom and confirm (or decline) the computer. |
+| The status script or `rotate-secrets`: "Blossom no longer accepts this computer" | The computer was unpaired in Blossom, or its site was removed there | New values are shown for manual entry. To pair again, get a new command in Blossom. |
 | The farm folder "already exists and cannot be used" | A folder of that name exists, has content, and was not created and locked by this kit | Rename it (`Rename-Item C:\farm C:\farm-old`; `sudo mv /opt/farm /opt/farm-old`) and run the installer again. If you do not know where the folder comes from, have the computer checked. |
 | "… is not at its download address (HTTP 404)" | The file the kit pins was not published yet or was withdrawn | Use the newest kit from the releases page. If you have the exact provider program from elsewhere: `install.ps1 -ProviderExe <path>` / `install.sh --provider-binary <path>` (its SHA-256 must be the pinned one). |
 | "…its SHA-256 is wrong … The file was deleted" | Damaged or altered download | Run again. If it repeats, do not work around it: report it. |
@@ -389,17 +454,18 @@ each.
 
 | Path | |
 |---|---|
-| `install.ps1`, `install.sh` | the one entry point, for Windows and for macOS |
+| `install.ps1`, `install.sh` | the installer, for Windows and for macOS |
+| `bootstrap.ps1`, `bootstrap.sh` | the template of the small file the command from Blossom downloads first; a kit release carries it with the release's checksum written in |
 | `versions.json` | every pinned version and checksum, for both systems |
 | `lib/` | functions shared by the scripts: `FarmKit.psm1` (Windows), `farmkit.sh` and `json.awk` (macOS) |
 | `services/` | `restart-server.js` and `provider-gate.js` (both systems); `keep-available.ps1` (Windows); `keep-available.sh`, `farm-run.sh`, `farm-firewall.sh` (macOS) |
 | `launchd/` | macOS: the service descriptions the installer fills in, the log rotation file and the packet filter rule |
 | `scripts/` | status, self-test, update, rotate-secrets, export, import, uninstall: each as `.ps1` and as `.sh` |
 | `patch/` | the provider patch and what it does |
-| `.github/` | `workflows/build-gads.yml` builds the patched provider for Windows and macOS and publishes it with its source and licence files (`scripts/make-source-archive.sh`); `workflows/ci.yml` tests the kit |
+| `.github/` | `workflows/build-gads.yml` builds the patched provider for Windows and macOS and publishes it with its source and licence files (`scripts/make-source-archive.sh`); `workflows/release-kit.yml` makes a kit release with its archive, checksums and bootstrap files (`scripts/make-kit-release.sh`); `workflows/ci.yml` tests the kit |
 | `LICENSE`, `LICENSE-AGPL-3.0`, `NOTICE` | the licences, and what applies to which part |
 | `docs/` | [`phones.md`](docs/phones.md), [`network.md`](docs/network.md), [`security.md`](docs/security.md), [`RELEASING.md`](docs/RELEASING.md) |
-| `tests/` | tests of the services (Node), of the pure PowerShell functions (Pester) and of the shell functions and scripts (bash) |
+| `tests/` | tests of the services (Node), of the PowerShell functions (Pester) and of the shell functions and scripts (bash); `fake-blossom.js` is a stand-in for Blossom's pairing API that the pairing and bootstrap tests of both systems run against |
 
 ## Licences, in short
 

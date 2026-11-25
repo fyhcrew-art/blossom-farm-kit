@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   node:
-    name: Restart service and provider gate (Node ${{ matrix.node }}, ${{ matrix.os }})
+    name: Restart service, provider gate, stand-in for Blossom (Node ${{ matrix.node }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     permissions:
@@ -32,7 +32,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Tests
-        run: node --test --test-timeout=20000 tests/restart-server.test.js tests/provider-gate.test.js
+        run: node --test --test-timeout=20000 tests/restart-server.test.js tests/provider-gate.test.js tests/fake-blossom.test.js
 
   powershell:
     name: PowerShell scripts on Windows PowerShell 5.1
@@ -79,8 +79,13 @@ jobs:
           $found | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message | Out-String -Width 250
           if ($found | Where-Object { $_.Severity -eq 'Error' -or $_.Severity -eq 'ParseError' }) { throw 'PSScriptAnalyzer reported errors' }
 
+      # The pairing and bootstrap tests talk https to tests/fake-blossom.js (node,
+      # openssl); its certificate is added to the trusted roots for the run.
+      # With FARMKIT_REQUIRE_STAND_IN a test that would be skipped fails instead.
       - name: Pester
         shell: powershell
+        env:
+          FARMKIT_REQUIRE_STAND_IN: '1'
         run: |
           $ErrorActionPreference = 'Stop'
           Import-Module Pester -RequiredVersion 5.7.1
@@ -118,13 +123,22 @@ jobs:
       - name: shellcheck (every .sh, as bash)
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" -s bash -x install.sh lib/farmkit.sh scripts/*.sh services/*.sh tests/*.sh .github/scripts/*.sh
+          "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" -s bash -x install.sh bootstrap.sh lib/farmkit.sh scripts/*.sh services/*.sh tests/*.sh .github/scripts/*.sh
 
       - name: The pure functions and the service scripts (bash, and bash in POSIX mode)
         run: |
           set -euo pipefail
           bash tests/farmkit.test.sh
           bash --posix tests/farmkit.test.sh
+
+      - name: Pairing and the one-command setup, against a stand-in for Blossom (https)
+        env:
+          FARMKIT_REQUIRE_STAND_IN: '1'
+        run: |
+          set -euo pipefail
+          bash tests/pairing.test.sh
+          bash --posix tests/pairing.test.sh
+          bash tests/bootstrap.test.sh
 
       - name: The JSON reader with every awk at hand
         run: |
@@ -180,13 +194,22 @@ jobs:
       - name: Every script parses with it
         run: |
           set -euo pipefail
-          for f in install.sh lib/farmkit.sh scripts/*.sh services/*.sh tests/*.sh; do /bin/bash -n "$f"; echo "parsed $f"; done
+          for f in install.sh bootstrap.sh lib/farmkit.sh scripts/*.sh services/*.sh tests/*.sh; do /bin/bash -n "$f"; echo "parsed $f"; done
 
       - name: The pure functions and the service scripts
         run: |
           set -euo pipefail
           /bin/bash tests/farmkit.test.sh
           /bin/bash --posix tests/farmkit.test.sh
+
+      - name: Pairing and the one-command setup, with the bash, curl and openssl of macOS
+        env:
+          FARMKIT_REQUIRE_STAND_IN: '1'
+        run: |
+          set -euo pipefail
+          /usr/bin/curl --version | head -n 1
+          /bin/bash tests/pairing.test.sh
+          /bin/bash tests/bootstrap.test.sh
 
       - name: The launchd property lists, the packet filter rule and the newsyslog file are accepted by macOS
         run: |
@@ -199,7 +222,7 @@ jobs:
           sudo newsyslog -n -v -f "$RUNNER_TEMP/rendered/newsyslog.conf"
 
       - name: The restart service, the provider gate and keep-available.sh
-        run: node --test --test-timeout=60000 tests/restart-server.test.js tests/provider-gate.test.js tests/keep-available.test.js
+        run: node --test --test-timeout=60000 tests/restart-server.test.js tests/provider-gate.test.js tests/keep-available.test.js tests/fake-blossom.test.js
 
   patch:
     name: The patch applies to the pinned upstream commit
@@ -220,5 +243,7 @@ jobs:
           git -C /tmp/gads -c advice.detachedHead=false checkout -q FETCH_HEAD
           git -C /tmp/gads apply --check "$GITHUB_WORKSPACE/patch/provider-drag.patch"
           echo "The patch applies to $COMMIT."
-      - name: The release script parses
-        run: bash -n .github/scripts/make-source-archive.sh
+      - name: The release scripts parse
+        run: |
+          bash -n .github/scripts/make-source-archive.sh
+          bash -n .github/scripts/make-kit-release.sh

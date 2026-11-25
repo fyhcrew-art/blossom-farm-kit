@@ -45,6 +45,28 @@ else
     write_note "Restart    https://$FARM_CFG_RESTART_HOST"
 fi
 
+write_step 'Pairing with Blossom CRM'
+read_farm_pairing
+if [ "$FARM_IS_PAIRED" = 0 ]; then
+    write_note 'Not paired: Blossom has the values that were entered there by hand, if any. To pair, Blossom shows one command under Phone Farm -> Farm setup -> Connect a computer.'
+elif pair_get_status; then
+    where="$PAIR_ORIGIN${PAIR_WORKSPACE:+, workspace \"$PAIR_WORKSPACE\"}${PAIR_SITE_LABEL:+, site \"$PAIR_SITE_LABEL\"}"
+    case $PAIR_STATE in
+        active)
+            write_ok "Paired with $where. The site is active."
+            line=$(describe_pairing_check)
+            if [ "$PAIR_CHECK_OK" = false ]; then note_problem "$line"; elif [ -n "$line" ]; then write_ok "$line"; fi ;;
+        awaiting_confirmation) note_problem "Paired with $where, but nobody has confirmed this computer in Blossom yet: open Phone Farm -> Farm setup there and confirm it. Until then Blossom does not use the farm." ;;
+        checking) write_note "Paired with $where. Blossom is checking the farm right now." ;;
+        installing) note_problem "Paired with $where, but the farm was never sent to Blossom. Run install.sh to the end." ;;
+        *) note_problem "The pairing with $where was declined or ran out. $FK_PAIR_HELP" ;;
+    esac
+elif [ "$APP_KIND" = refused ]; then
+    note_problem "Paired with $PAIR_ORIGIN, but: $APP_MESSAGE $FK_PAIR_HELP"
+else
+    write_note "Paired with $PAIR_ORIGIN${PAIR_WORKSPACE:+, workspace \"$PAIR_WORKSPACE\"}. Its state could not be asked right now: $APP_MESSAGE"
+fi
+
 write_step 'Services (launchd)'
 for name in mongodb hub provider gate keep-available restart cloudflared; do
     label=$(printf '%-28s' "$(farm_label "$name")")

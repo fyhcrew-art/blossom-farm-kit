@@ -7,12 +7,15 @@
 #     sudo bash scripts/rotate-secrets.sh --all
 #
 # When somebody who had Phone Farm access in Blossom leaves: run it with
-# --hub-user (and --admin-password if that person knew it), then enter the new
-# hub password in Blossom (Farm setup -> Edit). See docs/security.md.
+# --hub-user (and --admin-password if that person knew it). See docs/security.md.
 #
-# New values are shown once and written to no log.
-#   --restart-secret   New restart secret. Enter it in Blossom afterwards.
-#   --hub-user         New random password for the hub user Blossom uses ("blossom"). Enter it in Blossom afterwards.
+# On a computer that is paired with Blossom, the new hub password and the new
+# restart secret are sent to Blossom by this script (with the computer's farm
+# token) and are not shown. Without a pairing, or when Blossom cannot be
+# reached, they are shown once, to be entered in Blossom (Farm setup -> Edit),
+# and written to no log.
+#   --restart-secret   New restart secret.
+#   --hub-user         New random password for the hub user Blossom uses ("blossom").
 #   --keep-available   New random password for the internal keep-available user (nothing to enter anywhere).
 #   --admin-password   Change the password of the hub administrator ("admin"); you choose it.
 #   --all              All of the above.
@@ -24,7 +27,7 @@ KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 HUB_URL='http://127.0.0.1:10000'
 DO_RESTART=0; DO_HUB_USER=0; DO_KEEP=0; DO_ADMIN=0
-NEW_HUB_PASSWORD=''; NEW_RESTART_SECRET=''
+NEW_HUB_PASSWORD=''; NEW_RESTART_SECRET=''; SENT_TO_BLOSSOM=0
 for arg in "$@"; do
     case $arg in
         --restart-secret) DO_RESTART=1 ;;
@@ -41,6 +44,7 @@ show_new() {
     trap - EXIT
     farm_http_cleanup
     if [ -z "$NEW_HUB_PASSWORD" ] && [ -z "$NEW_RESTART_SECRET" ]; then return 0; fi
+    if [ "$SENT_TO_BLOSSOM" = 1 ]; then return 0; fi
     echo
     write_color "$FK_CYAN" '======================================================================'
     write_color "$FK_CYAN" ' Enter these in Blossom CRM -> Phone Farm -> Farm setup -> Edit'
@@ -134,6 +138,26 @@ if [ "$DO_RESTART" = 1 ]; then
     sleep 2
     if ! wait_tcp_port 19999 20; then write_warn 'The restart service did not come back. Read /opt/farm/logs/restart-server.log.'
     else write_ok 'Done, and the restart service was restarted with the new secret.'; fi
+fi
+
+# Paired with Blossom: the new values go there with this computer's farm
+# token, and nobody has to copy them.
+if [ -n "$NEW_HUB_PASSWORD" ] || [ -n "$NEW_RESTART_SECRET" ]; then
+    read_farm_pairing
+    if [ "$FARM_IS_PAIRED" = 1 ]; then
+        write_step 'Blossom CRM'
+        secret=''
+        [ -f "$FARM_RESTART_SECRET" ] && secret=$(tr -d '[:space:]' < "$FARM_RESTART_SECRET")
+        if pair_send_site "https://$FARM_CFG_HUB_HOST" "https://$FARM_CFG_PROVIDER_HOST" "$FARM_CFG_NICKNAME" "${FARM_CFG_HUB_USER:-blossom}" "$NEW_HUB_PASSWORD" "https://$FARM_CFG_RESTART_HOST" "$secret"; then
+            SENT_TO_BLOSSOM=1
+            write_ok "Blossom ($PAIR_ORIGIN) received the new values through the pairing of this computer. Nothing has to be entered there, and they are not shown here."
+            [ "$PAIR_NEEDS_CONFIRMATION" = true ] && write_warn 'The site is waiting for an admin to confirm it in Blossom (Phone Farm -> Farm setup); until then Blossom does not use it.'
+        else
+            write_warn "The new values could not be sent to Blossom: $APP_MESSAGE"
+            write_warn 'They are shown below instead: enter them in Blossom by hand.'
+        fi
+        secret=''
+    fi
 fi
 
 show_new

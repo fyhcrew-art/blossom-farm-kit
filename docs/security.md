@@ -290,7 +290,8 @@ macOS.
 | the provider's cached phone pairings | `<nickname>/pair_records` | Administrators, SYSTEM | the service account (and root) |
 | the system's own phone pairing records | Windows: `C:\ProgramData\Apple\Lockdown`; macOS: `/var/db/lockdown` | as Apple's software sets it | as macOS sets it; the kit never reads or copies them |
 | every hub password | MongoDB database `gads` | any program on the computer (section 3) | the same |
-| password of hub user `blossom` | **not stored by the kit**: shown once, then only in Blossom (encrypted there) and in the hub database | | |
+| farm token (a paired computer's key to its own site in Blossom, section 9) | `config/pairing.json` | Administrators, SYSTEM | root |
+| password of hub user `blossom` | **not stored by the kit**: sent to Blossom through the pairing, or shown once; then only in Blossom (encrypted there) and in the hub database | | |
 | password of hub user `admin` | **not stored by the kit**: you chose it | | |
 
 How the kit handles them:
@@ -325,9 +326,11 @@ How the kit handles them:
   temporary folder and the provider's own folder. It cannot change its own
   programs, scripts or settings.
 * Passwords you type are read hidden and are not kept in the console history.
-* The two values meant for Blossom are printed once, at the end. Close the
-  window afterwards. Do not run the installer inside a recording
-  (`Start-Transcript`, screen sharing).
+* The two values meant for Blossom are sent to it by the installer when the
+  computer is paired (section 9), and are then not printed at all. Without a
+  pairing they are printed once, at the end: close the window afterwards,
+  and do not run the installer inside a recording (`Start-Transcript`,
+  screen sharing).
 * An **export archive** (the `export-farm` script) contains all of it and is
   not encrypted. It is written to the farm's `export` folder (Administrators
   only, or root only) unless you name another place, and on a disk with file
@@ -415,7 +418,163 @@ leaked.
 * **Updates are manual.** Nothing here updates itself: you decide when to move
   to a newer kit. Watch this repository's releases.
 
-## 9. Reporting a problem
+## 9. Pairing with Blossom
+
+Pairing is how the farm's addresses and its two secrets reach Blossom without
+anybody copying them. It adds one new thing to protect, the **farm token**,
+and one new connection, from the farm computer **to** Blossom. This section
+says what is sent, what each party can do, and what can go wrong.
+
+### What happens, in order
+
+1. An admin of your workspace opens *Connect a computer* in Blossom. Blossom
+   makes a **pairing code** and shows a command that contains it, together
+   with Blossom's own https address.
+2. The command downloads a small bootstrap file from a release of this
+   repository and compares its SHA-256 with the value in the command; the
+   bootstrap file checks the kit it downloads the same way (below, "The
+   command").
+3. At its start the installer makes a random **farm token** on the farm
+   computer, stores it in the protected farm folder, and sends Blossom the
+   pairing code, the token, the computer's name, its system and the kit
+   version. Nothing about the farm itself yet: there are no addresses and no
+   secrets at that point.
+4. At its end the installer sends, with the farm token, the three addresses,
+   the provider nickname, the hub user with its password, and the restart
+   secret.
+5. Blossom calls the farm from its servers (the same check as "Test
+   connection") and shows the admin what it found, next to the computer's
+   name, its system, the country it connected from and the addresses it
+   sent. **The site is not used for anything until the admin presses
+   Confirm.**
+
+### The pairing code
+
+* 20 characters from an alphabet of 32 (digits and capital letters without
+  I, L, O and U), shown in five groups of four: **100 random bits**. It cannot
+  be guessed; Blossom limits attempts all the same.
+* It works **once**. The first computer that presents it binds it to that
+  computer's farm token; anybody presenting it afterwards is refused.
+* It is valid for **30 minutes**, and only for the workspace of the admin who
+  made it. Blossom stores its SHA-256, not the code.
+* The installer uses the code within the first minute and then forgets it. It
+  is not written to disk; a hash of it is, so that running the same command a
+  second time is recognised as the same pairing.
+* While it is valid, the code is in the command you pasted: in the window, in
+  the shell's history, and for a moment in the list of running programs. On a
+  computer used for the farm only, that is nobody but you. After its one use
+  it is worth nothing.
+
+### The farm token
+
+* Made on the farm computer from the operating system's random generator:
+  `bft_` and 256 random bits. Blossom receives it once, in step 3, and keeps
+  only its SHA-256.
+* Stored in `config/pairing.json` in the farm folder, readable by
+  Administrators and SYSTEM (Windows) or root (macOS) only, next to the
+  address of the Blossom it belongs to. It is sent to that address and to no
+  other; the scripts take the address from this file, never from an option.
+* **What it can do:** read the state of its own pairing; replace the
+  connection details of its own site (addresses, nickname, hub user, hub
+  password, restart secret); report the versions the computer runs; give
+  itself up (unpair). **What it cannot do:** read anything from Blossom, not
+  even the credentials it sent; see or touch another site or another
+  workspace; sign in to Blossom; delete the site.
+* New **credentials** for the addresses an admin confirmed are accepted at
+  once: this is how `rotate-secrets` works without anybody typing. New
+  **addresses** are not: a change of a host name puts the site back to
+  "waiting for confirmation", and Blossom stops using it until an admin has
+  looked at the new addresses and confirmed them.
+* It does not expire by itself. It ends when an admin unpairs the computer or
+  removes the site in Blossom, when the computer unpairs itself
+  (`uninstall` with `-Unpair` / `--unpair`), or when a new pairing code is
+  used on the same computer (the old token is given up).
+* It travels with an export archive (`export-farm`), so that a farm moved to
+  another computer keeps its pairing. That is one more reason to treat the
+  archive like a master key.
+
+### The connection to Blossom
+
+* **https only, to one address.** The address comes from the command Blossom
+  printed and is stored with the token. The scripts refuse an address that
+  is not `https://host` (no path, no user name, no `http://`) before anything
+  is sent.
+* **The certificate is verified** against the certificates the operating
+  system trusts, with TLS 1.2 or later. There is no option to skip this. If
+  it fails, nothing is sent and the message says so. A network that opens
+  encrypted connections (some company proxies and antivirus products do)
+  will fail here: that is intended.
+* **A redirect is refused, not followed.** If the address answers "go
+  elsewhere", the scripts stop. Credentials never follow a redirect to
+  another address.
+* A request that did not arrive, or that Blossom answered with "busy", is
+  repeated a few times with growing pauses. A refusal is not repeated.
+* Nothing secret is put on a command line, written to a log, or printed. On
+  macOS the request body goes to `curl` through its standard input.
+* Blossom's answers contain no secret: the token was made on the farm
+  computer, so there is none to send back.
+
+### What can go wrong, and what stops it
+
+* **Somebody else gets your command** (over your shoulder, from a
+  screenshot, from a chat it was pasted into). If they run it first, *their*
+  computer is the one that appears in Blossom. Your own run then fails with
+  "this pairing code was already used", which tells you. Their computer does
+  not become a site of yours unless an admin confirms it, and the page shows
+  its name, its system, the country it connected from and its addresses
+  beforehand. **Decline what you do not recognise.** If they run it after
+  you, the code is used up. If nobody runs it, it is dead after 30 minutes.
+* **Somebody talks an admin into pairing a farm that is not yours** ("paste
+  this code request for me", or a command that looks like Blossom's but
+  carries another address). What Blossom would gain is a farm that the other
+  person controls: your team would work on, and sign in to accounts on,
+  phones somebody else can watch. The confirmation page is the stop: a
+  computer name, a country and a domain that are not yours. Confirm only a
+  computer you set up yourself, with host names under your own domain.
+* **A command that carries another address than your Blossom's.** The
+  installer would send the farm's credentials to that address. Take the
+  command from Blossom itself, signed in, and not from a message, a document
+  or a helpful stranger. The installer prints the address it is about to
+  talk to, and shows it again at the end.
+* **The farm token is stolen** (somebody had Administrator or root on the
+  farm computer). With it they can point your site at another hub, which
+  Blossom will not use until an admin confirms the new addresses, or replace
+  the stored hub password with a wrong one, which breaks the site until you
+  rotate. They can read nothing from Blossom. But somebody with those rights
+  on the farm computer already controls the farm itself; unpair the computer
+  in Blossom, then deal with the computer.
+* **Blossom is unreachable or says no** at the end of the installation. The
+  farm is installed all the same, and the values are printed for manual
+  entry.
+
+### The command
+
+The command Blossom shows does not pipe a download into a shell. It:
+
+1. downloads `bootstrap.ps1` (Windows) or `bootstrap.sh` (macOS) from a
+   named release of this repository into a file;
+2. computes the file's SHA-256 and compares it with the value written in the
+   command itself. Blossom's maintainers copy that value from the kit release
+   into Blossom when they adopt a release, so it does not come from the same
+   place as the file;
+3. runs the file only if the two are equal.
+
+The bootstrap file carries the SHA-256 of the release's `SHA256SUMS`, and
+`SHA256SUMS` carries the SHA-256 of the kit archive. So each download is
+checked against a value that was fixed before it: the command pins the
+bootstrap file, the bootstrap file pins the list, the list pins the kit. A
+file that fails is deleted; nothing of it is unpacked or run. The kit then
+checks every program it downloads against `versions.json`, as before.
+
+The kit is unpacked to `C:\blossom-farm-kit` or `/opt/blossom-farm-kit`,
+writable by Administrators or root only: these scripts run with full rights
+later, so nobody else may change them.
+
+What this chain does not do: it does not prove that the release itself is
+good. That rests on this repository, as it does for a kit you download by
+hand. Read the scripts; they are plain text.
+
+## 10. Reporting a problem
 
 If you find a way around any of the protections above, please do not open a
 public issue. Use the repository's private vulnerability reporting

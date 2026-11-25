@@ -11,6 +11,20 @@
     (programs, the tunnel, secrets, the database) and only fills in what is
     missing. See README.md for what each step does.
 
+    The command Blossom CRM shows under Phone Farm -> Farm setup -> Connect a
+    computer runs this script with -AppOrigin and -PairingCode: the farm is
+    then connected to Blossom by the script itself, and nothing has to be
+    copied by hand.
+
+.PARAMETER PairingCode
+    The pairing code Blossom shows (five groups of four characters). It works
+    once and for 30 minutes. Needs -AppOrigin.
+.PARAMETER AppOrigin
+    The https address of Blossom, as in the command Blossom shows. The farm's
+    credentials are sent there and nowhere else.
+.PARAMETER Domain
+    Your domain at Cloudflare, for example yourdomain.com. The three host
+    names become farm-hub., farm-provider. and farm-restart. under it.
 .PARAMETER HubHost
     Public host name for the hub, for example farm-hub.yourdomain.com.
 .PARAMETER ProviderHost
@@ -46,6 +60,9 @@
 #>
 [CmdletBinding()]
 param(
+    [string]$PairingCode = '',
+    [string]$AppOrigin = '',
+    [string]$Domain = '',
     [string]$HubHost = '',
     [string]$ProviderHost = '',
     [string]$RestartHost = '',
@@ -79,6 +96,13 @@ $KeepUserName = 'farm-keepalive'
 $script:NewHubPassword = $null
 $script:NewRestartSecret = $null
 $script:Summary = $null
+# $true once Blossom has accepted this computer (a pairing code claimed in
+# this run, or a pairing from an earlier run that Blossom still knows).
+$script:Pairing = $false
+# $true once Blossom has accepted the description of the farm in this run:
+# the values are then not printed for copying.
+$script:SentToBlossom = $false
+$script:ActiveInBlossom = $false
 
 # Farm services that were running when the script started. Whatever happens
 # (an error, a wrong password, Ctrl+C), the ones this run stopped are started
@@ -110,9 +134,36 @@ function Restore-FarmServices {
 function Show-FinalValues {
     if (-not $script:Summary) { return }
     $s = $script:Summary
+    if ($script:SentToBlossom) {
+        $pairing = Read-FarmPairing -Paths (Get-FarmPaths -Root $FarmRoot)
+        $sentTo = ''
+        if ($pairing) { $sentTo = $pairing.AppOrigin; if ($pairing.Workspace) { $sentTo += ' (workspace "' + $pairing.Workspace + '")' } }
+        Write-Host ''
+        Write-Host '======================================================================' -ForegroundColor Cyan
+        Write-Host ' Blossom CRM has this farm: nothing to copy' -ForegroundColor Cyan
+        Write-Host '======================================================================' -ForegroundColor Cyan
+        Write-Host ('   Sent to ................ ' + $sentTo)
+        Write-Host ('   Hub address ............ https://' + $s.HubHost)
+        Write-Host ('   Provider address ....... https://' + $s.ProviderHost)
+        Write-Host ('   Provider nickname ...... ' + $s.Nickname)
+        Write-Host ('   Hub user ............... ' + $HubUserName + ' (Blossom has its password; it is not shown here)')
+        Write-Host ('   Restart service address  https://' + $s.RestartHost + ' (Blossom has its secret; it is not shown here)')
+        Write-Host ''
+        if ($script:ActiveInBlossom) {
+            Write-Host ' The site is confirmed and active in Blossom. New passwords made later by' -ForegroundColor Yellow
+            Write-Host ' scripts\rotate-secrets.ps1 reach Blossom the same way. To see the pairing:' -ForegroundColor Yellow
+            Write-Host ' scripts\status.ps1.' -ForegroundColor Yellow
+        } else {
+            Write-Host ' The site becomes active when an admin has confirmed it in Blossom (Phone Farm' -ForegroundColor Yellow
+            Write-Host ' -> Farm setup). New passwords made later by scripts\rotate-secrets.ps1 reach' -ForegroundColor Yellow
+            Write-Host ' Blossom the same way. To see the pairing: scripts\status.ps1.' -ForegroundColor Yellow
+        }
+        Write-Host ''
+        return
+    }
     Write-Host ''
     Write-Host '======================================================================' -ForegroundColor Cyan
-    Write-Host ' Paste these into Blossom CRM -> Phone Farm -> Farm setup -> Connect a farm' -ForegroundColor Cyan
+    Write-Host ' Enter these in Blossom CRM -> Phone Farm -> Farm setup -> Advanced' -ForegroundColor Cyan
     Write-Host '======================================================================' -ForegroundColor Cyan
     Write-Host ('   Hub address ............ https://' + $s.HubHost)
     Write-Host ('   Provider address ....... https://' + $s.ProviderHost)
@@ -121,13 +172,13 @@ function Show-FinalValues {
     if ($script:NewHubPassword) {
         Write-Host ('   Hub password ........... ' + $script:NewHubPassword)
     } else {
-        Write-Host '   Hub password ........... (unchanged - the one shown when it was created)'
+        Write-Host '   Hub password ........... (unchanged - the one made earlier)'
     }
     Write-Host ('   Restart service address  https://' + $s.RestartHost)
     if ($script:NewRestartSecret) {
         Write-Host ('   Restart secret ......... ' + $script:NewRestartSecret)
     } else {
-        Write-Host '   Restart secret ......... (unchanged - the one shown when it was created)'
+        Write-Host '   Restart secret ......... (unchanged - the one made earlier)'
     }
     Write-Host ''
     if ($script:NewHubPassword -or $script:NewRestartSecret) {
@@ -139,6 +190,9 @@ function Show-FinalValues {
         Write-Host ' Nothing secret was changed in this run. Lost a value? scripts\rotate-secrets.ps1' -ForegroundColor Yellow
         Write-Host ' makes new ones.' -ForegroundColor Yellow
     }
+    Write-Host ' The way without copying: Blossom -> Phone Farm -> Farm setup -> Connect a' -ForegroundColor Yellow
+    Write-Host ' computer shows one command for this computer; it is safe to run on a farm' -ForegroundColor Yellow
+    Write-Host ' that is already installed.' -ForegroundColor Yellow
     Write-Host ''
 }
 
@@ -155,6 +209,16 @@ function Read-HostName {
         if (-not $reason) { return $answer }
         Write-Warn $reason
     }
+}
+
+function Send-FarmToBlossom {
+    # The description of this farm, to the Blossom this computer is paired
+    # with. The hub password goes along only when this run made one; the
+    # restart secret is read from its file.
+    param([Parameter(Mandatory = $true)]$Paths)
+    $secret = (Get-Content -LiteralPath $Paths.RestartSecret -Raw).Trim()
+    return (Send-FarmSite -Paths $Paths -HubUrl ('https://' + $HubHost) -ProviderUrl ('https://' + $ProviderHost) -Nickname $Nickname -HubUser $HubUserName `
+            -HubPassword $script:NewHubPassword -RestartUrl ('https://' + $RestartHost) -RestartSecret $secret)
 }
 
 function Invoke-HubAdmin {
@@ -177,6 +241,21 @@ try {
     Write-Step '1/12  Checking this computer'
     # ------------------------------------------------------------------
     Assert-Administrator
+    if ($PairingCode -or $AppOrigin) {
+        # A slip in the command is cheaper to find now than after the installation.
+        $fromBlossom = 'Copy the whole command from Blossom (Phone Farm -> Farm setup -> Connect a computer) and run it again.'
+        if (-not $PairingCode -or -not $AppOrigin) {
+            Stop-Farm -Problem 'The options -PairingCode and -AppOrigin belong together, and one of them is missing.' -WhatToDo ($fromBlossom + ' To install without pairing, leave both out: the values to enter in Blossom are then shown at the end.')
+        }
+        $reason = Test-AppOrigin -Origin $AppOrigin
+        if ($reason) { Stop-Farm -Problem ('-AppOrigin: ' + $reason) -WhatToDo $fromBlossom }
+        $reason = Test-PairingCode -Code $PairingCode
+        if ($reason) { Stop-Farm -Problem ('-PairingCode: ' + $reason) -WhatToDo $fromBlossom }
+    }
+    if ($Domain) {
+        $reason = Test-FarmDomain -Domain $Domain
+        if ($reason) { Stop-Farm -Problem ('-Domain: ' + $reason) -WhatToDo 'Give the domain you added to Cloudflare, for example   -Domain yourdomain.com' }
+    }
     if ($PSVersionTable.PSVersion.Major -lt 5 -or ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -lt 1)) {
         Stop-Farm -Problem ('PowerShell ' + $PSVersionTable.PSVersion + ' is too old.') -WhatToDo 'Use Windows 10 (version 1809 or later) or Windows 11, which include Windows PowerShell 5.1.'
     }
@@ -235,6 +314,45 @@ try {
     }
     Copy-Item -LiteralPath (Join-Path $KitRoot 'versions.json') -Destination (Join-Path $paths.Config 'versions.json') -Force
     Write-Ok ($paths.Root + ' is ready and readable by Administrators and SYSTEM only.')
+
+    # Pairing with Blossom starts here, before the long steps: the code is
+    # used within its 30 minutes, Blossom shows "Computer connected" while the
+    # rest runs, and a code that does not work is known now and not at the
+    # end. Only the code and the name of this computer are sent at this point;
+    # the farm's addresses and credentials follow at the very end, with the
+    # farm token.
+    $pairHelp = Get-FarmPairHelp
+    $pairing = Read-FarmPairing -Paths $paths
+    if ($PairingCode) {
+        Write-Note ('Telling Blossom (' + (ConvertTo-AppOrigin -Origin $AppOrigin) + ') about this computer...')
+        $claim = Register-FarmPairing -Paths $paths -Origin $AppOrigin -Code $PairingCode
+        if ($claim.Ok) {
+            $script:Pairing = $true
+            $pairing = Read-FarmPairing -Paths $paths
+            $where = ''
+            if ($pairing -and $pairing.Workspace) { $where = ' (workspace "' + $pairing.Workspace + '")' }
+            Write-Ok ('Blossom knows this computer now' + $where + '. The farm is sent to it when the installation has finished.')
+        } else {
+            Write-Warn ('Pairing with Blossom did not work: ' + $claim.Message)
+            Write-Warn ('The installation continues. At the end the values are shown for you to enter in Blossom by hand; or get a new command there and run it afterwards. ' + $pairHelp)
+        }
+        $PairingCode = ''
+    } elseif ($pairing) {
+        $state = Get-FarmPairingStatus -Paths $paths
+        if ($state.Ok -and ($state.State -eq 'rejected' -or $state.State -eq 'expired')) {
+            Write-Warn ('This computer was paired with Blossom, but the pairing was declined or ran out. The values are shown at the end for manual entry. ' + $pairHelp)
+        } elseif ($state.Ok) {
+            $script:Pairing = $true
+            $where = $pairing.AppOrigin
+            if ($pairing.Workspace) { $where += ', workspace "' + $pairing.Workspace + '"' }
+            Write-Ok ('This computer is paired with Blossom (' + $where + '). What changes in this run is sent there at the end.')
+        } elseif ($state.Kind -eq 'refused') {
+            Write-Warn ('This computer was paired with Blossom (' + $pairing.AppOrigin + '), but: ' + $state.Message + ' The values are shown at the end for manual entry. ' + $pairHelp)
+        } else {
+            $script:Pairing = $true
+            Write-Warn ('Blossom could not be asked about the pairing of this computer right now (' + $state.Message + '). It is tried again at the end.')
+        }
+    }
 
     # ------------------------------------------------------------------
     Write-Step '3/12  Programs (winget, pinned versions)'
@@ -475,6 +593,16 @@ try {
     $users = @(Get-JsonProperty -Object $r.Json -Name 'result')
     $userNames = @($users | Where-Object { $_ } | ForEach-Object { [string](Get-JsonProperty -Object $_ -Name 'username') })
     $hubUserExists = ($userNames -contains $HubUserName)
+    # Blossom needs the password of this user, and it is stored nowhere on
+    # this computer. The first time the farm is sent to Blossom through a
+    # pairing, a user that exists therefore gets a new one.
+    if ($script:Pairing -and $hubUserExists -and -not $ResetHubUser) {
+        $pairing = Read-FarmPairing -Paths $paths
+        if ($pairing -and -not $pairing.SiteSentAt) {
+            $ResetHubUser = $true
+            Write-Note ('Hub user "' + $HubUserName + '" gets a new password: Blossom receives it through the pairing, and the one it had is not stored on this computer.')
+        }
+    }
     $setHubUser = $true
     if ($hubUserExists -and -not $ResetHubUser) { $setHubUser = $false }
     if ($setHubUser) {
@@ -495,7 +623,8 @@ try {
         }
         if ($setHubUser) {
             $script:NewHubPassword = $candidate
-            Write-Ok ('Hub user "' + $HubUserName + '" has a new random password (shown at the end).')
+            if ($script:Pairing) { Write-Ok ('Hub user "' + $HubUserName + '" has a new random password (it goes to Blossom at the end).') }
+            else { Write-Ok ('Hub user "' + $HubUserName + '" has a new random password (shown at the end).') }
         }
         $candidate = $null
     }
@@ -563,9 +692,37 @@ try {
         $prevProvider = [string](Get-JsonProperty -Object $previous -Name 'providerHost')
         $prevRestart = [string](Get-JsonProperty -Object $previous -Name 'restartHost')
     }
-    if (-not $HubHost) { $HubHost = Read-HostName -Prompt 'Host name for the hub' -Current $prevHub -Example 'farm-hub.yourdomain.com' }
-    if (-not $ProviderHost) { $ProviderHost = Read-HostName -Prompt 'Host name for the provider' -Current $prevProvider -Example 'farm-provider.yourdomain.com' }
-    if (-not $RestartHost) { $RestartHost = Read-HostName -Prompt 'Host name for the restart service' -Current $prevRestart -Example 'farm-restart.yourdomain.com' }
+    # What is offered at each question: the names of the earlier installation.
+    $offerHub = $prevHub; $offerProvider = $prevProvider; $offerRestart = $prevRestart
+    # A new farm: one question, the domain, and the three names follow from it.
+    $domainAsked = $false
+    if (-not ($HubHost -or $ProviderHost -or $RestartHost -or $prevHub)) {
+        while (-not $Domain) {
+            $domainAsked = $true
+            $answer = Read-Host -Prompt 'Your domain at Cloudflare [for example yourdomain.com]'
+            $reason = Test-FarmDomain -Domain $answer
+            if ($reason) { Write-Warn $reason } else { $Domain = $answer }
+        }
+    }
+    if ($Domain) {
+        $proposed = Get-DefaultFarmHostnames -Domain $Domain
+        if (-not ($HubHost -or $ProviderHost -or $RestartHost)) {
+            $answer = ''
+            if ($domainAsked) {
+                Write-Note ('Proposed:  ' + ($proposed -join '   '))
+                $answer = Read-Host -Prompt '   Press Enter to use these three names, or type n to choose each one'
+            }
+            if ([string]$answer -match '^\s*[nN]') { $offerHub = $proposed[0]; $offerProvider = $proposed[1]; $offerRestart = $proposed[2] }
+            else { $HubHost = $proposed[0]; $ProviderHost = $proposed[1]; $RestartHost = $proposed[2] }
+        } else {
+            if (-not $HubHost) { $HubHost = $proposed[0] }
+            if (-not $ProviderHost) { $ProviderHost = $proposed[1] }
+            if (-not $RestartHost) { $RestartHost = $proposed[2] }
+        }
+    }
+    if (-not $HubHost) { $HubHost = Read-HostName -Prompt 'Host name for the hub' -Current $offerHub -Example 'farm-hub.yourdomain.com' }
+    if (-not $ProviderHost) { $ProviderHost = Read-HostName -Prompt 'Host name for the provider' -Current $offerProvider -Example 'farm-provider.yourdomain.com' }
+    if (-not $RestartHost) { $RestartHost = Read-HostName -Prompt 'Host name for the restart service' -Current $offerRestart -Example 'farm-restart.yourdomain.com' }
     $HubHost = $HubHost.Trim().ToLowerInvariant(); $ProviderHost = $ProviderHost.Trim().ToLowerInvariant(); $RestartHost = $RestartHost.Trim().ToLowerInvariant()
     $problems = Test-FarmHostnameSet -Hub $HubHost -Provider $ProviderHost -Restart $RestartHost
     if ($problems.Count -gt 0) {
@@ -679,7 +836,8 @@ try {
     } else {
         $script:NewRestartSecret = New-RandomSecret -Bytes 32 -Format Hex
         Write-SecretFile -Path $paths.RestartSecret -Text $script:NewRestartSecret
-        Write-Ok 'A new random restart secret was generated (256 bits, shown at the end).'
+        if ($script:Pairing) { Write-Ok 'A new random restart secret was generated (256 bits; it goes to Blossom at the end).' }
+        else { Write-Ok 'A new random restart secret was generated (256 bits, shown at the end).' }
     }
     $script:Summary = New-Object PSObject -Property @{ HubHost = $HubHost; ProviderHost = $ProviderHost; RestartHost = $RestartHost; Nickname = $Nickname }
 
@@ -806,10 +964,50 @@ try {
             Write-Warn 'This test ran from this computer. "Test connection" in Blossom runs from Blossom''s servers and is the one that counts.'
         }
     }
-    $adminPassword = $null
+    if ($script:Pairing) {
+        Write-Step 'Blossom CRM'
+        $pairing = Read-FarmPairing -Paths $paths
+        Write-Note ('Sending the addresses and the credentials of this farm to ' + $pairing.AppOrigin + '...')
+        $sent = Send-FarmToBlossom -Paths $paths
+        if (-not $sent.Ok -and $sent.Code -eq 'credentials_required' -and -not $script:NewHubPassword) {
+            # Blossom holds no password for these addresses (they changed, or
+            # it is another workspace). The one in use is stored nowhere on
+            # this computer, so the hub user gets a new one, and the farm is
+            # sent again.
+            $candidate = New-RandomSecret -Bytes 32 -Format Base64Url
+            $body = (@{ username = $HubUserName; password = $candidate; role = 'admin'; workspace_ids = @() } | ConvertTo-Json -Compress)
+            $r = Invoke-HubAdmin -Path '/admin/user' -Method 'PUT' -Body $body -Token $adminToken
+            if ($r.Status -eq 200) {
+                $script:NewHubPassword = $candidate
+                Write-Note ('Hub user "' + $HubUserName + '" got a new password, because Blossom has none for these addresses.')
+                $sent = Send-FarmToBlossom -Paths $paths
+            }
+            $candidate = $null; $body = $null
+        }
+        if ($sent.Ok) {
+            $script:SentToBlossom = $true
+            Write-Ok 'Blossom received the farm.'
+            if ($sent.NeedsConfirmation -or $sent.State -ne 'active') {
+                Write-Note 'Blossom now calls the farm from its servers, then asks an admin to confirm it (up to 10 minutes are waited here; closing this window does no harm).'
+            }
+            $waited = Wait-FarmPairing -Paths $paths -MaxSec 600
+            if ($waited -eq 0) { $script:ActiveInBlossom = $true }
+            if ($waited -eq 2) {
+                Write-Note 'Not confirmed yet. Nothing is lost: confirm in Blossom (Phone Farm -> Farm setup) when you are ready. scripts\status.ps1 shows where the pairing stands.'
+            }
+        } else {
+            Write-Warn ('The farm could not be sent to Blossom: ' + $sent.Message)
+            Write-Warn ('The farm itself is set up. Enter the values below in Blossom by hand, or: ' + $pairHelp)
+        }
+    }
+    $adminPassword = $null; $adminToken = $null
 
     Show-FinalValues
-    Write-Host 'Next: prepare the phones - docs\phones.md. Then press "Test connection" in Blossom.' -ForegroundColor Cyan
+    if ($script:SentToBlossom) {
+        Write-Host 'Next: prepare the phones - docs\phones.md. They appear in Blossom by themselves.' -ForegroundColor Cyan
+    } else {
+        Write-Host 'Next: prepare the phones - docs\phones.md. Then press "Test connection" in Blossom.' -ForegroundColor Cyan
+    }
     Write-Host ''
     $script:ExitCode = 0
 }

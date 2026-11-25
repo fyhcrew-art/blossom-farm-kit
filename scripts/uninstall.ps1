@@ -11,15 +11,23 @@
             also deletes the tunnel at Cloudflare (when possible), the GADS
             database and C:\farm with every secret and phone pairing in it.
 
+    A computer that is paired with Blossom can give the pairing up as well
+    (-Unpair, or the question asked with -RemoveData): Blossom then no longer
+    accepts anything from this computer. The site stays listed in Blossom
+    until an admin removes it there. Do NOT unpair a farm that was moved to
+    another computer with export-farm: the new computer uses the same pairing.
+
     Programs installed with winget and the DNS records are listed at the end
     with the commands to remove them; the script does not remove them itself.
 .PARAMETER RemoveData
     Delete the tunnel, the database "gads" and C:\farm. Cannot be undone.
+.PARAMETER Unpair
+    Give up the pairing with Blossom, without asking.
 .PARAMETER ServicesOnly
     Same as running without parameters (kept for clarity in instructions).
 #>
 [CmdletBinding()]
-param([switch]$RemoveData, [switch]$ServicesOnly)
+param([switch]$RemoveData, [switch]$ServicesOnly, [switch]$Unpair)
 
 $ErrorActionPreference = 'Stop'
 $KitRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -38,6 +46,29 @@ try {
         Write-Host 'It cannot be undone. To move a farm instead, use scripts\export-farm.ps1 first.' -ForegroundColor Yellow
         $answer = Read-Host -Prompt 'Type DELETE to continue'
         if ($answer -cne 'DELETE') { Write-Note 'Nothing was changed.'; exit 0 }
+    }
+
+    # The pairing with Blossom. Asked before anything is removed, and only
+    # when the pairing file is about to be deleted anyway.
+    $pairing = Read-FarmPairing -Paths $paths
+    $stillPaired = [bool]$pairing
+    if ($pairing -and $RemoveData -and -not $Unpair) {
+        Write-Host ''
+        Write-Host ('This computer is paired with Blossom (' + $pairing.AppOrigin + '). Unpair it as well?') -ForegroundColor Yellow
+        Write-Host 'Answer no if you moved this farm to another computer with export-farm: the new' -ForegroundColor Yellow
+        Write-Host 'computer uses the same pairing, and unpairing would cut it off.' -ForegroundColor Yellow
+        $answer = Read-Host -Prompt 'Unpair this computer from Blossom? [y/N]'
+        if ([string]$answer -match '^\s*[yY]') { $Unpair = $true }
+    }
+    if ($pairing -and $Unpair) {
+        Write-Step 'Unpairing from Blossom'
+        $gone = Remove-FarmPairing -Paths $paths
+        if ($gone.Ok) {
+            $stillPaired = $false
+            Write-Ok ('Blossom (' + $pairing.AppOrigin + ') no longer accepts anything from this computer.')
+        } else {
+            Write-Warn ('Blossom could not be told (' + $gone.Message + '). Revoke this computer there instead: Phone Farm -> Farm setup -> the site -> Unpair computer.')
+        }
     }
 
     Write-Step 'Removing the Windows services'
@@ -92,6 +123,11 @@ try {
     if ($farm) {
         Write-Note ('DNS records at Cloudflare (dashboard -> your domain -> DNS): ' + $farm.hubHost + ', ' + $farm.providerHost + ', ' + $farm.restartHost)
         Write-Note 'The site in Blossom CRM: Phone Farm -> Farm setup -> Remove.'
+    }
+    if ($stillPaired -and $RemoveData) {
+        Write-Note ('The pairing with Blossom (' + $pairing.AppOrigin + ') was not given up; its token went with C:\farm. Unless the farm moved to another computer, revoke it in Blossom: Phone Farm -> Farm setup -> the site -> Unpair computer.')
+    } elseif ($stillPaired) {
+        Write-Note ('The pairing with Blossom (' + $pairing.AppOrigin + ') was kept in C:\farm. To give it up:   scripts\uninstall.ps1 -Unpair')
     }
     Write-Note 'Programs (only if nothing else on this computer uses them):'
     foreach ($id in @('Cloudflare.cloudflared', 'Gyan.FFmpeg', 'OpenJS.NodeJS.LTS', 'NSSM.NSSM', 'MongoDB.Server', 'MongoDB.DatabaseTools')) {

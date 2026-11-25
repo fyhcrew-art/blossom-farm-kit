@@ -118,7 +118,7 @@ fi
 write_ok 'Database "gads" dumped.'
 
 mkdir -p "$STAGE/config/cloudflared"
-for f in farm.json restart-secret.txt keep-available.json versions.json cloudflared/config.yml cloudflared/tunnel-credentials.json cloudflared/cert.pem; do
+for f in farm.json restart-secret.txt keep-available.json pairing.json versions.json cloudflared/config.yml cloudflared/tunnel-credentials.json cloudflared/cert.pem; do
     if [ -f "$FARM_CONFIG/$f" ]; then cp -f "$FARM_CONFIG/$f" "$STAGE/config/$f" || stop_farm "Could not copy $FARM_CONFIG/$f." 'Check the free space on the disk.'; fi
 done
 write_ok 'Configuration and secrets copied.'

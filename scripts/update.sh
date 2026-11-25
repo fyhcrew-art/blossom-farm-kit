@@ -145,5 +145,10 @@ if [ -n "$bad" ]; then
     stop_farm "After the update these services did not start: $bad" 'Go back with   sudo bash scripts/update.sh --rollback   . To report it on the kit repository, copy the output of   sudo bash scripts/status.sh --logs   (it masks session tokens and your host names). Never post a file from /opt/farm/logs itself: GADS writes request addresses into its logs, and they can contain a login token.'
 fi
 write_ok 'Updated and running. Check with scripts/status.sh, then "Test connection" in Blossom.'
+read_farm_pairing
+if [ "$FARM_IS_PAIRED" = 1 ]; then
+    if pair_send_computer; then write_ok "Blossom ($PAIR_ORIGIN) was told the versions this computer runs now."
+    else write_note "Blossom could not be told the new versions ($APP_MESSAGE). Nothing depends on it; scripts/status.sh shows the pairing."; fi
+fi
 write_note 'If this kit changed the tunnel configuration or the services (see its release notes), run install.sh once as well.'
 exit 0

@@ -138,6 +138,12 @@ try {
         Stop-Farm -Problem ('After the update these services did not start: ' + ($bad -join ', ')) -WhatToDo 'Go back with   scripts\update.ps1 -Rollback   . To report it on the kit repository, copy the output of   scripts\status.ps1 -Logs   (it masks session tokens and your host names). Never post a file from C:\farm\logs itself: GADS writes request addresses into its logs, and they can contain a login token.'
     }
     Write-Ok 'Updated and running. Check with scripts\status.ps1, then "Test connection" in Blossom.'
+    $pairing = Read-FarmPairing -Paths $paths
+    if ($pairing) {
+        $told = Send-FarmComputer -Paths $paths
+        if ($told.Ok) { Write-Ok ('Blossom (' + $pairing.AppOrigin + ') was told the versions this computer runs now.') }
+        else { Write-Note ('Blossom could not be told the new versions (' + $told.Message + '). Nothing depends on it; scripts\status.ps1 shows the pairing.') }
+    }
     Write-Note 'If this kit changed the tunnel configuration or the services (see its release notes), run install.ps1 once as well.'
     exit 0
 }

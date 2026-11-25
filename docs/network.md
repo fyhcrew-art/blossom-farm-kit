@@ -105,6 +105,13 @@ change, open an issue.
   documentation lists this as the thing to check behind a restrictive
   firewall.
 * **Outgoing UDP** in general, for the live video (next section).
+* **Outgoing https (port 443) to your Blossom**, on a paired computer: the
+  installer and the `rotate-secrets`, `update`, `status` and `uninstall`
+  scripts call Blossom's pairing API there (`docs/security.md`, section 9).
+  The connection must reach Blossom untouched: a proxy or security product
+  that opens encrypted connections makes the certificate check fail, and the
+  scripts then send nothing. During the setup the computer also downloads
+  from `github.com` and from the publishers named in `versions.json`.
 * A **wired** connection. The farm's upload speed carries every live screen
   somebody is watching.
 * Nothing needs to reach the computer from your local network. The hub, the
@@ -133,6 +140,7 @@ change, open an issue.
 | A team member's browser | hub host name | taps, swipes, typing from the Control page |
 | A team member's browser | provider host name (through the gate) | a WebSocket that carries the WebRTC handshake only |
 | A team member's browser | **the farm computer directly** | the live video itself (WebRTC, UDP, encrypted, peer to peer) |
+| The farm computer (installer, scripts) | your Blossom, https | on a paired computer: the pairing code once; the farm's addresses, hub login and restart secret when they are made or changed; the versions it runs; questions about the state of its pairing |
 
 The live video does **not** go through the tunnel and not through Blossom.
 After the short handshake the browser and the computer send to each other directly.

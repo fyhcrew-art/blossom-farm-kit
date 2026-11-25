@@ -122,6 +122,8 @@ restore_file() {
 restore_file farm.json private
 restore_file restart-secret.txt private
 restore_file keep-available.json service
+# the pairing with Blossom moves with the farm: the new computer speaks for the same site
+restore_file pairing.json private
 restore_file cloudflared/tunnel-credentials.json service
 restore_file cloudflared/cert.pem private
 write_ok '/opt/farm/config restored (host names, restart secret, tunnel credentials).'

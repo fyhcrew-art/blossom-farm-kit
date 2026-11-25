@@ -400,7 +400,7 @@ not_matches "$src" 'curl[^|]*(-u |--user |-d |--data|-H )' 'no credential is eve
 
 # ---------------------------------------------------------------------------
 describe 'the scripts'
-for f in "$KIT_ROOT"/install.sh "$KIT_ROOT"/lib/farmkit.sh "$KIT_ROOT"/scripts/*.sh "$KIT_ROOT"/services/*.sh "$KIT_ROOT"/tests/*.sh; do
+for f in "$KIT_ROOT"/install.sh "$KIT_ROOT"/bootstrap.sh "$KIT_ROOT"/lib/farmkit.sh "$KIT_ROOT"/scripts/*.sh "$KIT_ROOT"/services/*.sh "$KIT_ROOT"/tests/*.sh; do
     ok bash -n "$f"
     if LC_ALL=C grep -q '[^[:print:][:space:]]' "$f"; then fail "$f contains non-ASCII characters"; else pass; fi
     # What the bash 3.2 of macOS does not have.
@@ -412,6 +412,15 @@ for name in status self-test update rotate-secrets export-farm import-farm unins
     ok test -f "$KIT_ROOT/scripts/$name.sh"
     ok test -f "$KIT_ROOT/scripts/$name.ps1"
 done
+# every installer has both of its parts, and both offer the pairing options
+for name in install bootstrap; do
+    ok test -f "$KIT_ROOT/$name.sh"
+    ok test -f "$KIT_ROOT/$name.ps1"
+done
+ok grep -q -- '--pairing-code' "$KIT_ROOT/install.sh"
+ok grep -q -- '--app-origin' "$KIT_ROOT/install.sh"
+ok grep -q 'PairingCode' "$KIT_ROOT/install.ps1"
+ok grep -q 'AppOrigin' "$KIT_ROOT/install.ps1"
 
 # ---------------------------------------------------------------------------
 echo
