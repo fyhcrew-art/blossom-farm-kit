@@ -470,7 +470,7 @@ Describe 'Pairing against the stand-in for Blossom' {
         $state = Get-FakeState -Paths $paths
         $state.pairing.computer.kit_version | Should -BeExactly '9.9.10'
         $state.pairing.computer.gads_version | Should -BeExactly 'v6.0.1'
-        $state.pairing.site.hub_url | Should -BeExactly 'https://farm-hub.other.io'
+        $state.pairing.site.hub_url | Should -BeExactly 'https://farm-hub.agency.io'
     }
 
     It 'tries again when Blossom is busy, and not when it says no' {
