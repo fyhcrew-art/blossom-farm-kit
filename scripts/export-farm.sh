@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
     case $1 in
         --out-file=*) OUT_FILE=${1#*=} ;;
         --out-file) [ $# -ge 2 ] || stop_farm '--out-file needs a path.' 'For example:  --out-file /Volumes/STICK/farm.zip'; OUT_FILE=$2; shift ;;
-        -h | --help) sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) stop_farm "Unknown option: $1" 'Use --out-file PATH, or no option.' ;;
     esac
     shift
@@ -77,18 +77,28 @@ if [ ! -d "$out_dir" ]; then
     stop_farm "The folder for the archive does not exist: $out_dir" 'Create it, or choose another place with --out-file.'
 fi
 
-# File permissions exist on Mac disks (APFS, HFS+) only. Decided before
-# anything secret is written: either the file can be restricted first, or the
-# person is told plainly that this medium cannot protect it.
-fs_type=$(stat -f '%T' "$out_dir" 2> /dev/null)
+# File permissions exist on Mac disks (APFS, HFS+) only; a stick formatted
+# FAT32 or exFAT has none. Decided before anything secret is written: the
+# destination is created empty and restricted to root now, and what the disk
+# then reports is believed. Either the file is protected before the first
+# secret goes into it, or the person is told plainly that this medium cannot
+# protect it.
+if ! (set -C; : > "$OUT_FILE") 2> /dev/null; then
+    kept=$OUT_FILE; OUT_FILE=''
+    stop_farm "Could not create $kept." 'Check that the disk is not read-only, or choose another place with --out-file.'
+fi
+WRITTEN=1
 can_restrict=0
-case $fs_type in apfs | hfs) can_restrict=1 ;; esac
+if chown 0:0 "$OUT_FILE" 2> /dev/null && chmod 600 "$OUT_FILE" 2> /dev/null &&
+    [ "$(file_owner_uid "$OUT_FILE")" = 0 ] && [ "$(file_mode "$OUT_FILE")" = 600 ]; then
+    can_restrict=1
+fi
 if [ "$can_restrict" = 0 ]; then
-    write_warn "$OUT_FILE is on a disk without file permissions (file system: ${fs_type:-unknown})."
+    write_warn "$OUT_FILE is on a disk without file permissions."
     write_warn 'Everybody who can read that disk can read the archive, with every secret of this farm. Only continue if the disk itself is encrypted.'
     answer=''
     IFS= read -r -p 'Type YES to write the archive there anyway: ' answer < /dev/tty
-    if [ "$answer" != YES ]; then write_note 'Nothing was written.'; OUT_FILE=''; exit 0; fi
+    if [ "$answer" != YES ]; then write_note 'Nothing was written.'; exit 0; fi
 fi
 
 write_step '1/4  Database tools'
@@ -133,17 +143,13 @@ PACKED=$FARM_ROOT/export-$(new_random_secret 16 hex).zip
 if ! (cd "$STAGE" && zip -q -r -X "$PACKED" .); then
     stop_farm 'The archive could not be packed.' 'Check the free space on the disk and run the export again.'
 fi
-if ! (set -C; : > "$OUT_FILE") 2> /dev/null; then
-    kept=$OUT_FILE; OUT_FILE=''
-    stop_farm "Could not create $kept." 'Check that the disk is not read-only, or choose another place with --out-file.'
-fi
-WRITTEN=1
-if [ "$can_restrict" = 1 ]; then protect_farm_path "$OUT_FILE" private; fi
 cat "$PACKED" > "$OUT_FILE" || stop_farm "Could not write $OUT_FILE." 'Check the free space on that disk and run the export again.'
 size_kb=$(($(file_size "$OUT_FILE") / 1024))
+size="$((size_kb / 1024)) MB"
+[ "$size_kb" -lt 1024 ] && size="$size_kb KB"
 DONE=1
-if [ "$can_restrict" = 1 ]; then write_ok "$OUT_FILE written ($((size_kb / 1024)) MB), readable by root only."
-else write_warn "$OUT_FILE written ($((size_kb / 1024)) MB). It is NOT protected by file permissions: anyone with the disk can read it."; fi
+if [ "$can_restrict" = 1 ]; then write_ok "$OUT_FILE written ($size), readable by root only."
+else write_warn "$OUT_FILE written ($size). It is NOT protected by file permissions: anyone with the disk can read it."; fi
 
 write_step '4/4  Next'
 write_color "$FK_YELLOW" '   THE ARCHIVE IS NOT ENCRYPTED AND CONTAINS EVERY SECRET OF THIS FARM.'

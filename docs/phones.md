@@ -1,8 +1,12 @@
 # Preparing the iPhones
 
-Do this after `install.ps1` has finished and Blossom's "Test connection" is
-green (with *Check* on Phones). Set up **one phone completely** before you
-touch the others.
+Do this after the installer (`install.ps1` on Windows, `install.sh` on
+macOS) has finished and Blossom's "Test connection" is green (with *Check* on
+Phones). Set up **one phone completely** before you touch the others.
+
+The steps are the same on a Windows PC and on a Mac. Where a path or a
+command differs, both are given; the few things that exist on one system only
+are marked.
 
 This chapter follows the GADS 6.0.0 documentation and source. The official
 GADS instructions are the reference for every detail:
@@ -11,9 +15,9 @@ and [FAQ](https://github.com/shamanec/GADS/blob/v6.0.0/docs/faq.md). The hub's
 web page belongs to GADS; a button there may be worded slightly differently
 from what is written here.
 
-The hub's own page is used a lot in this chapter. Open it **on the farm PC**
-at `http://127.0.0.1:10000` and sign in as `admin` with the password you chose
-during installation.
+The hub's own page is used a lot in this chapter. Open it **on the farm
+computer** at `http://127.0.0.1:10000` and sign in as `admin` with the
+password you chose during installation.
 
 ## 0. What you need
 
@@ -25,7 +29,19 @@ during installation.
   membership year; a removed phone keeps its slot until the yearly reset). A
   free Apple ID signs for 7 days only and needs Xcode on a Mac with the phone
   attached, so it does not carry a farm.
-* **Apple's USB support on the PC: iTunes from Apple's own installer.**
+* **Apple's USB support on a Mac: nothing to install.** It is part of macOS
+  (the system service `usbmuxd`), starts with the Mac and runs with nobody
+  signed in. Neither Xcode nor Apple's Command Line Tools are needed for the
+  farm itself; Homebrew installs the Command Line Tools for its own use.
+* **Signing in the hub page on a Mac.** The hub signs WebDriverAgent with a
+  helper (zsign) that GADS 6.0.0 carries inside the program. That helper is
+  built for Apple Silicon and loads the OpenSSL library from Homebrew
+  (`/opt/homebrew/opt/openssl@3`). On a Mac with Apple Silicon the installer
+  installs that library with Homebrew; if it could not, run
+  `brew install openssl@3`. On an Intel Mac the helper does not run: sign
+  outside the hub ("Signing outside the hub" in section 2; `brew install
+  zsign` gives you the tool).
+* **Apple's USB support on a Windows PC: iTunes from Apple's own installer.**
   Download *iTunes for Windows* from Apple's website as an installer file
   (`iTunes64Setup.exe`; at the time of writing <https://www.apple.com/itunes/>
   offers it under "Looking for other versions", next to the button that leads
@@ -47,7 +63,7 @@ during installation.
   back) must pass. If you must use a Store app, set the PC to sign in
   automatically, and accept what that means for a PC that holds the farm's
   secrets.
-* A Mac is not needed.
+* On Windows, a Mac is not needed.
 
 ## 1. On each iPhone
 
@@ -64,14 +80,30 @@ during installation.
    GADS checks this and refuses a phone without it ("developer mode is not
    enabled" in the provider log). iOS shows the Developer Mode entry only
    after the phone has been connected to developer tools. If the entry is
-   missing, reveal it from the PC with the open-source tool
+   missing, reveal it from the farm computer with the open-source tool
    [go-ios](https://github.com/danielpaulus/go-ios), which GADS is built on:
-   download its Windows release, plug the phone in and run
-   `ios devmode enable`. (On a Mac, plugging the phone in with Xcode open does
-   the same.)
-5. Plug the phone into the PC and tap **Trust** when it asks. The provider is
-   started with `--use-ios-pair-cache`, which keeps the pairing so that the
-   question is not asked again after a reconnect.
+   download its release for Windows or for macOS, plug the phone in and run
+   `ios devmode enable`. (On a Mac that has Xcode, plugging the phone in with
+   Xcode open does the same.)
+5. Plug the phone into the computer and tap **Trust** on the phone when it
+   asks "Trust This Computer?". The provider is started with
+   `--use-ios-pair-cache`, which keeps the pairing so that the question is
+   not asked again after a reconnect.
+
+   On a Mac, two more things can appear when a phone is plugged in:
+   * a MacBook asks "Allow accessory to connect?" for every new USB device.
+     Set System Settings → Privacy & Security → *Allow accessories to
+     connect* to **Always**: on *Ask for new accessories* a phone that is
+     plugged in while nobody is at the Mac stays unconnected. Desktop Macs do
+     not ask.
+   * Finder, Photos or Music may open and offer to set the phone up or to
+     sync it. Close them; choose nothing. The farm does not use them.
+
+   Where the pairing is kept: the provider's own copy is in its folder
+   (`C:\farm\<nickname>\pair_records`, `/opt/farm/<nickname>/pair_records`).
+   The system keeps one too: Apple's software on Windows in
+   `C:\ProgramData\Apple\Lockdown`, macOS in `/var/db/lockdown`, which
+   macOS guards and the kit never touches.
 
 ## 2. WebDriverAgent: download it, then sign it with your Apple account
 
@@ -169,7 +201,7 @@ Notes that save hours:
 
 ## 3. Switch iOS on for the provider
 
-`install.ps1` created the provider with iOS switched **off**, because a GADS
+The installer created the provider with iOS switched **off**, because a GADS
 provider that has iOS on but no WebDriverAgent refuses to start
 ("Could not provide WebDriverAgent.ipa file from MongoDB").
 
@@ -183,24 +215,29 @@ your provider (`Provider1`):
   otherwise the identifier you signed with, without `.xctrunner`;
 * leave the host address `127.0.0.1` and the port `10001` as they are;
 * leave **Set up Appium servers** as the installer set it: off after a plain
-  `install.ps1`, on after `install.ps1 -WithAppium`. Do not switch it on by
+  installation, on after one with `-WithAppium` / `--with-appium`. Do not switch it on by
   hand without Appium installed: the provider then refuses to start ("Appium
   is not available"). With it off, GADS offers the phones for remote control,
   which is what Blossom uses (README, "Appium: off unless you ask for it");
 * save.
 
 Then restart the provider: in Blossom, Phone Farm → Services → *Restart
-Provider*; or on the PC `Restart-Service GadsProvider`.
+Provider*; or on the computer `Restart-Service GadsProvider` (Windows),
+`sudo launchctl kickstart -k system/blossom-farm.provider` (macOS).
 
-Check `C:\farm\Provider1\provider.log`: it should not end in an error.
+Check the provider's log (`C:\farm\Provider1\provider.log`,
+`/opt/farm/Provider1/provider.log`; on a Mac read it with
+`sudo tail -n 40 …`): it should not end in an error.
 
 ## 4. Register each phone in the hub
 
 Admin → Devices → add a device:
 
-* **UDID**: the phone's identifier. In iTunes,
-  click the serial number on the phone's summary page until it shows the UDID
-  (25 characters with a hyphen on recent iPhones, 40 on older ones).
+* **UDID**: the phone's identifier (25 characters with a hyphen on recent
+  iPhones, 40 on older ones). On Windows, in iTunes, click the serial number
+  on the phone's summary page until it shows the UDID. On a Mac, select the
+  phone in Finder's sidebar and click the line under its name until it shows
+  the UDID.
 * **Name**: anything; Blossom shows it until you rename the phone there.
 * **OS**: iOS, and the iOS version.
 * **Provider**: your provider.
@@ -216,7 +253,7 @@ control it there. **If it does not work in the hub page, it will not work in
 Blossom**: fix it here first. The GADS FAQ covers the usual WDA install loops.
 
 A phone that is connected but never becomes live, with WebDriverAgent install
-or launch errors in `C:\farm\Provider1\provider.log`: check first that the WDA
+or launch errors in the provider's log: check first that the WDA
 bundle ID in the provider's settings is the identifier inside the signed app
 minus `.xctrunner`, and that the provisioning profile covers that identifier
 and contains this phone's UDID (section 2).
@@ -225,8 +262,8 @@ and contains this phone's UDID (section 2).
 
 Blossom's Control page opens the provider's `ios-webrtc` address for a phone.
 GADS serves that address by taking the screen stream of WebDriverAgent and
-encoding it to H.264 with **FFmpeg** on the PC; the installer installs FFmpeg
-and puts it on the provider's path. Choose the iOS WebRTC stream type
+encoding it to H.264 with **FFmpeg** on the farm computer; the installer
+installs FFmpeg (on a Mac with Homebrew) and puts it on the provider's path. Choose the iOS WebRTC stream type
 (`ios_webrtc_ffmpeg`) for each phone.
 
 Nothing has to be installed or started on the phone for the video. GADS also
@@ -234,9 +271,9 @@ has a **Broadcast Extension** (`gads-broadcast.ipa`, started from Control
 Center), which serves a different address (`ios-webrtc-broadcast`) that
 Blossom does not open; you do not need it.
 
-No picture although the phone is Online: `scripts\status.ps1` must list FFmpeg,
-and the browser must be able to reach the PC directly (`docs/network.md`,
-section 4).
+No picture although the phone is Online: the status script must list FFmpeg,
+and the browser must be able to reach the farm computer directly
+(`docs/network.md`, section 4).
 
 ## 6. Optional: supervised phones
 

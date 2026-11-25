@@ -32,7 +32,7 @@ for arg in "$@"; do
         --keep-available) DO_KEEP=1 ;;
         --admin-password) DO_ADMIN=1 ;;
         --all) DO_RESTART=1; DO_HUB_USER=1; DO_KEEP=1; DO_ADMIN=1 ;;
-        -h | --help) sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) stop_farm "Unknown option: $arg" 'Add --restart-secret, --hub-user, --keep-available, --admin-password or --all.' ;;
     esac
 done

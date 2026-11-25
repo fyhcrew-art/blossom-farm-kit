@@ -27,7 +27,7 @@ for arg in "$@"; do
     case $arg in
         --remove-data) REMOVE_DATA=1 ;;
         --services-only) SERVICES_ONLY=1 ;;
-        -h | --help) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) stop_farm "Unknown option: $arg" 'Use --remove-data, --services-only, or no option.' ;;
     esac
 done

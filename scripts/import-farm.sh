@@ -31,7 +31,7 @@ while [ $# -gt 0 ]; do
         --archive=*) ARCHIVE=${1#*=} ;;
         --archive) [ $# -ge 2 ] || stop_farm '--archive needs a path.' 'Give the full path of the .zip file written by export-farm.'; ARCHIVE=$2; shift ;;
         --force) FORCE=1 ;;
-        -h | --help) sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) stop_farm "Unknown option: $1" 'Use --archive PATH and, to replace an existing installation, --force.' ;;
     esac
     shift

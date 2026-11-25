@@ -65,7 +65,7 @@ while [ $# -gt 0 ]; do
         --skip-firewall-rules) SKIP_FIREWALL=1 ;;
         --skip-power-settings) SKIP_POWER=1 ;;
         --skip-self-test) SKIP_SELF_TEST=1 ;;
-        -h | --help) sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) stop_farm "Unknown option: $1" 'See the list of options at the top of install.sh, or run:   bash install.sh --help' ;;
     esac
     shift

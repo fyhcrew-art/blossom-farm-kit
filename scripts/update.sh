@@ -31,7 +31,7 @@ while [ $# -gt 0 ]; do
         --rollback) ROLLBACK=1 ;;
         --provider-binary=*) PROVIDER_BINARY=${1#*=} ;;
         --provider-binary) [ $# -ge 2 ] || stop_farm '--provider-binary needs a path.' 'Give the full path of the GADS-drag program.'; PROVIDER_BINARY=$2; shift ;;
-        -h | --help) sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) stop_farm "Unknown option: $1" 'Use --rollback, --provider-binary PATH, or no option.' ;;
     esac
     shift

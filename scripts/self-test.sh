@@ -19,7 +19,7 @@ while [ $# -gt 0 ]; do
     case $1 in
         --hub-user=*) HUB_USER=${1#*=} ;;
         --hub-user) [ $# -ge 2 ] || stop_farm '--hub-user needs a name.' 'For example:  --hub-user blossom'; HUB_USER=$2; shift ;;
-        -h | --help) sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) stop_farm "Unknown option: $1" 'Use --hub-user NAME, or no option.' ;;
     esac
     shift

@@ -49,9 +49,17 @@ git checkout FETCH_HEAD                      # v6.0.0; the hub-ui submodule is N
 git apply patch/provider-drag.patch
 go install github.com/swaggo/swag/cmd/swag@v1.16.4
 swag init -g hub/hub.go -o docs              # generates the docs package the code imports
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
-  go build -trimpath -buildvcs=false -ldflags="-X main.AppVersion=v6.0.0-drag.1" -o GADS-drag.exe .
+build() { CGO_ENABLED=0 GOOS=$1 GOARCH=$2 \
+  go build -trimpath -buildvcs=false -ldflags="-X main.AppVersion=v6.0.0-drag.1" -o $3 .; }
+build windows amd64 GADS-drag.exe             # Windows x64
+build darwin  arm64 GADS-drag-darwin-arm64    # macOS, Apple Silicon
+build darwin  amd64 GADS-drag-darwin-amd64    # macOS, Intel
 ```
+
+The three programs come from the same patched tree. GADS and the modules it
+uses need no C compiler on any of the three systems (`CGO_ENABLED=0`), so the
+macOS programs are built on Linux as well, by the same job, and are
+reproducible in the same way.
 
 Differences from upstream's own release build
 (`.github/workflows/main.yml` in GADS), all on purpose:
@@ -61,17 +69,23 @@ Differences from upstream's own release build
   proprietary licence that forbids redistribution. This build does not contain
   it and could not: the source is not available to us. `GADS-drag.exe` is
   therefore used **as the provider only**; the hub on a farm is the
-  publisher's own `GADS.exe`.
+  publisher's own program (`GADS.exe`, or `GADS` on macOS).
+* **The macOS programs are built on Linux, without cgo.** Upstream builds its
+  macOS programs on a Mac, where Go links the Apple Silicon one with the
+  system's C library through cgo; this build sets `CGO_ENABLED=0` for all
+  three targets, which is what lets one Linux job build and reproduce them.
+  `docs/RELEASING.md` lists what is confirmed on a Mac before a kit release.
 * **`swag init` is needed**, exactly as in upstream's workflow: the hub
   package imports `GADS/docs`, which is generated and not committed. Upstream
   installs `swag@latest`; this build pins `v1.16.4`.
 * `-trimpath -buildvcs=false` and a fixed Go version make the build
   **reproducible**: the same inputs give the same file, bit for bit. The
-  SHA-256 is pinned in `versions.json`, and the workflow fails if what it
-  built differs.
+  three SHA-256 values are pinned in `versions.json` (`gadsDrag.sha256`,
+  `macos.arm64.provider.sha256`, `macos.x86_64.provider.sha256`), and the
+  workflow fails if what it built differs.
 
-To check the published file yourself, run the commands above with Go 1.26.0
-on Linux and compare `sha256sum GADS-drag.exe` with `versions.json`.
+To check a published file yourself, run the commands above with Go 1.26.0
+on Linux and compare its `sha256sum` with `versions.json`.
 
 After the build and its tests the workflow runs
 `.github/scripts/make-source-archive.sh`, which makes the files published

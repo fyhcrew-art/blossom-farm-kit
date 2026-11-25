@@ -90,6 +90,117 @@ jobs:
           $config.Output.Verbosity = 'Detailed'
           Invoke-Pester -Configuration $config
 
+  shell:
+    name: macOS scripts on Linux (shellcheck, bash, the property lists)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Install the pinned shellcheck
+        env:
+          SHELLCHECK_VERSION: v0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/shellcheck.tar.xz" "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/shellcheck-${SHELLCHECK_VERSION}/shellcheck" --version
+
+      - name: shellcheck (every .sh, as bash)
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" -s bash -x install.sh lib/farmkit.sh scripts/*.sh services/*.sh tests/*.sh .github/scripts/*.sh
+
+      - name: The pure functions and the service scripts (bash, and bash in POSIX mode)
+        run: |
+          set -euo pipefail
+          bash tests/farmkit.test.sh
+          bash --posix tests/farmkit.test.sh
+
+      - name: The JSON reader with every awk at hand
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends gawk mawk busybox > /dev/null
+          # the awk of macOS is this one; it is not in every package list
+          sudo apt-get install -y --no-install-recommends original-awk > /dev/null 2>&1 || echo "original-awk is not available here; the macOS job runs the real one"
+          DOC='{"a":{"b":[{"id":"xA\"y"},true,null,-1.5e3]}}'
+          WANT="$(printf 'a.b.0.id\txA"y\na.b.1\ttrue\na.b.2\tnull\na.b.3\t-1.5e3\n' | cksum)"
+          for AWK in "gawk --posix" mawk "busybox awk" original-awk; do
+            command -v "${AWK%% *}" > /dev/null || continue
+            echo "== $AWK"
+            # shellcheck disable=SC2086
+            test "$(printf '%s' "$DOC" | $AWK -f lib/json.awk | cksum)" = "$WANT"
+            # shellcheck disable=SC2086
+            if printf '%s' '{"a":1,}' | $AWK -f lib/json.awk > /dev/null 2>&1; then echo "accepted a document that is not JSON"; exit 1; fi
+          done
+
+      - name: keep-available.sh against a stand-in hub
+        run: node --test --test-timeout=60000 tests/keep-available.test.js
+
+      - name: The launchd property lists are valid (Apple's DTD, and a property list parser)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends libxml2-utils > /dev/null
+          bash tests/render-templates.sh "$RUNNER_TEMP/rendered"
+          curl -fsSL -o "$RUNNER_TEMP/PropertyList-1.0.dtd" https://www.apple.com/DTDs/PropertyList-1.0.dtd
+          for f in "$RUNNER_TEMP"/rendered/*.plist; do
+            xmllint --noout --nonet --dtdvalid "$RUNNER_TEMP/PropertyList-1.0.dtd" "$f" 2> "$RUNNER_TEMP/xmllint.log" || { cat "$RUNNER_TEMP/xmllint.log"; exit 1; }
+            python3 -c 'import plistlib, sys, os; d = plistlib.load(open(sys.argv[1], "rb")); assert d["Label"] + ".plist" == os.path.basename(sys.argv[1]); assert d["ProgramArguments"][0] == "/bin/bash"' "$f"
+            echo "valid: $(basename "$f")"
+          done
+
+  macos:
+    name: macOS scripts on macOS (the bash, awk and sed of macOS; plutil, pfctl, newsyslog)
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: The bash of macOS
+        run: |
+          /bin/bash --version | head -n 1
+          /bin/bash -c 'case $BASH_VERSION in 3.2.*) ;; *) echo "::warning::/bin/bash is $BASH_VERSION, not 3.2: the tests below no longer prove bash 3.2" ;; esac'
+
+      - name: Every script parses with it
+        run: |
+          set -euo pipefail
+          for f in install.sh lib/farmkit.sh scripts/*.sh services/*.sh tests/*.sh; do /bin/bash -n "$f"; echo "parsed $f"; done
+
+      - name: The pure functions and the service scripts
+        run: |
+          set -euo pipefail
+          /bin/bash tests/farmkit.test.sh
+          /bin/bash --posix tests/farmkit.test.sh
+
+      - name: The launchd property lists, the packet filter rule and the newsyslog file are accepted by macOS
+        run: |
+          set -euo pipefail
+          /bin/bash tests/render-templates.sh "$RUNNER_TEMP/rendered"
+          plutil -lint "$RUNNER_TEMP"/rendered/*.plist
+          # -n: parse only, nothing is loaded
+          sudo pfctl -n -f "$RUNNER_TEMP/rendered/pf.rules"
+          # -n: say what would be done, do nothing
+          sudo newsyslog -n -v -f "$RUNNER_TEMP/rendered/newsyslog.conf"
+
+      - name: The restart service, the provider gate and keep-available.sh
+        run: node --test --test-timeout=60000 tests/restart-server.test.js tests/provider-gate.test.js tests/keep-available.test.js
+
   patch:
     name: The patch applies to the pinned upstream commit
     runs-on: ubuntu-24.04

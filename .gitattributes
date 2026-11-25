@@ -12,3 +12,6 @@ LICENSE   text eol=lf
 NOTICE    text eol=lf
 *.sh      text eol=lf
 LICENSE-AGPL-3.0 text eol=lf
+*.awk     text eol=lf
+*.plist   text eol=lf
+*.template text eol=lf

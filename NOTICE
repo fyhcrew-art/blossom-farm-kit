@@ -41,17 +41,21 @@ GADS has two licences. Its LICENSE-OVERVIEW.txt says:
 
 What this kit does with each part:
 
-a) The hub. install.ps1 downloads the publisher's own release file
-   (gads-win.zip of v6.0.0) directly from the publisher's GitHub release page
-   to the farm computer, and verifies its SHA-256. This repository and its
+a) The hub. The installer downloads the publisher's own release file
+   (of v6.0.0: gads-win.zip with install.ps1; gads-mac-arm64.zip or
+   gads-mac-amd64.zip with install.sh) directly from the publisher's GitHub
+   release page to the farm computer, and verifies its SHA-256. This repository and its
    releases do not contain, mirror or modify that file. The person running a
    farm uses it on their own computer for their own business; whether that
    use fits the proprietary licence of the embedded hub-ui is for that person
    to judge from the licence text quoted above.
 
-b) The provider. The release assets of this repository include
-   GADS-drag.exe, built by .github/workflows/build-gads.yml from the AGPL-3.0
-   source of GADS at the pinned commit plus patch/provider-drag.patch.
+b) The provider. The release assets of this repository include the patched
+   provider as three programs built from the same source: GADS-drag.exe
+   (Windows x64), GADS-drag-darwin-arm64 and GADS-drag-darwin-amd64 (macOS).
+   They are built by .github/workflows/build-gads.yml from the AGPL-3.0
+   source of GADS at the pinned commit plus patch/provider-drag.patch. What
+   follows is true of each of them.
    - It is built WITHOUT the "ui" build tag, so it contains no hub-ui code.
      (In GADS, embed_ui.go embeds hub-ui/build only under that tag;
      no_embed_ui.go is used otherwise.)
@@ -67,7 +71,9 @@ b) The provider. The release assets of this repository include
                                  was changed, by whom, and the date);
        THIRD-PARTY-NOTICES.txt   the licence, notice and copyright files of
                                  the Go modules that are compiled into the
-                                 program (MIT, BSD, Apache-2.0 and others),
+                                 three programs (MIT, BSD, Apache-2.0 and
+                                 others; a few modules are compiled into
+                                 the program for one system only),
                                  which those licences require to accompany a
                                  binary. The Go standard library and runtime
                                  are BSD 3-Clause (https://go.dev/LICENSE).
@@ -87,14 +93,14 @@ b) The provider. The release assets of this repository include
      is Apple software as far as we can tell, and the .ipa, .apk and zsign
      files are pre-built: the source archive carries them as upstream ships
      them, without their source.
-   - Publishing GADS-drag.exe therefore makes this repository a distributor
+   - Publishing these programs therefore makes this repository a distributor
      of those embedded files, as upstream's own releases are. That is a
      decision for the people who publish, and the build workflow does not
      take it for them: it publishes nothing until versions.json says
      "redistributeEmbeddedResources": true (docs/RELEASING.md). If the file
-     is ever withdrawn, a farm that has it keeps working, and install.ps1 /
-     update.ps1 accept a local copy with -ProviderExe (checked against the
-     pinned SHA-256). An alternative that redistributes nothing is to build
+     is ever withdrawn, a farm that has it keeps working, and the install and
+     update scripts accept a local copy (-ProviderExe on Windows,
+     --provider-binary on macOS; checked against the pinned SHA-256). An alternative that redistributes nothing is to build
      the provider on each farm computer from upstream source and the patch
      (patch/README.md).
 
@@ -113,8 +119,9 @@ c) AGPL-3.0, section 13 (remote network interaction). Section 13 asks that
 3. Programs the installer fetches (not part of this repository)
 ---------------------------------------------------------------
 
-Installed with winget from the publishers' own download locations, at the
-versions pinned in versions.json. Licences as stated by the projects:
+On Windows: installed with winget from the publishers' own download
+locations, at the versions pinned in versions.json. Licences as stated by the
+projects:
 
 * MongoDB Community Server (MongoDB.Server) - Server Side Public License v1
 * MongoDB Database Tools (MongoDB.DatabaseTools) - Apache License 2.0
@@ -125,7 +132,28 @@ versions pinned in versions.json. Licences as stated by the projects:
 * NSSM (NSSM.NSSM) - public domain; the installer keeps a private copy of
   nssm.exe in C:\farm\bin on the farm computer
 
-Only with "install.ps1 -WithAppium", installed with npm from the npm registry:
+On macOS: downloaded by install.sh from the publishers' own download
+locations into /opt/farm/bin, at the versions and with the SHA-256 values
+pinned in versions.json:
+
+* Node.js (nodejs.org) - MIT and bundled third-party licences
+* MongoDB Community Server (fastdl.mongodb.org) - Server Side Public
+  License v1
+* MongoDB Database Tools (fastdl.mongodb.org; only when a farm is exported
+  or imported) - Apache License 2.0
+* cloudflared (github.com/cloudflare/cloudflared) - Apache License 2.0; use
+  of the Cloudflare service is under Cloudflare's terms
+
+and installed with Homebrew, which the person running the farm installs
+themselves (https://brew.sh, BSD 2-Clause), at the version Homebrew offers
+on that day:
+
+* FFmpeg (formula "ffmpeg") - GPL v3 or later as Homebrew builds it
+* OpenSSL 3 (formula "openssl@3"; on Apple Silicon, used by the signing
+  helper inside the GADS hub) - Apache License 2.0
+
+Only with Appium ("install.ps1 -WithAppium", "install.sh --with-appium"),
+installed with npm from the npm registry:
 
 * Appium (appium) and its iOS driver (appium-xcuitest-driver) - Apache
   License 2.0 - and the GADS Appium plugin (appium-gads, part of GADS). The
@@ -135,7 +163,8 @@ Only with "install.ps1 -WithAppium", installed with npm from the npm registry:
 
 Not installed by the kit, but required for iPhones (docs/phones.md):
 
-* iTunes for Windows (Apple) - Apple's licence terms
+* On Windows: iTunes for Windows (Apple) - Apple's licence terms. On macOS
+  nothing: Apple's USB support for iPhones is part of the system
 * WebDriverAgent, fork by the GADS author
   (https://github.com/shamanec/WebDriverAgent) - BSD licence of
   WebDriverAgent. The farm operator downloads the pre-built file from that
@@ -145,6 +174,6 @@ Not installed by the kit, but required for iPhones (docs/phones.md):
 4. Trademarks
 -------------
 
-GADS, Cloudflare, Apple, iPhone, iOS, Windows, MongoDB, Node.js and FFmpeg
-are names of their respective owners. This kit is not affiliated with or
+GADS, Cloudflare, Apple, iPhone, iOS, Mac, macOS, Windows, MongoDB, Node.js,
+Homebrew and FFmpeg are names of their respective owners. This kit is not affiliated with or
 endorsed by any of them.

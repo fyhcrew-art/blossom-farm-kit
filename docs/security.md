@@ -18,35 +18,54 @@ is open on your router.
 | provider | the **provider gate**, and behind it the GADS provider | a valid hub session token, checked by the gate with the hub |
 | restart | the restart service | the restart secret (256 random bits) |
 
-### What listens on the PC, and what your local network can reach
+### What listens on the computer, and what your local network can reach
 
 * MongoDB, the hub, the provider's own port, the provider gate and the
-  restart service listen on `127.0.0.1` only: nothing outside the PC can
-  connect to them. `install.ps1` and `scripts\status.ps1` check these five
+  restart service listen on `127.0.0.1` only: nothing outside the computer
+  can connect to them. The installer and the status script check these five
   ports.
 * **The per-phone ports are different.** For every connected iPhone the GADS
   provider opens three more ports (WebDriverAgent, the screen stream, the
   WebDriverAgent video), on port numbers it picks at run time, and upstream
-  GADS opens them on **all** network addresses of the PC, not on `127.0.0.1`
-  (`provider/devices/ios.go`, through go-ios `ios/forward/forward.go`). With
-  `-WithAppium` the same goes for one Appium server per phone
+  GADS opens them on **all** network addresses of the computer, not on
+  `127.0.0.1` (`provider/devices/ios.go`, through go-ios
+  `ios/forward/forward.go`). With Appium installed (`-WithAppium`,
+  `--with-appium`) the same goes for one Appium server per phone
   (`provider/devices/appium.go` starts it without an address). None of these
   ports asks for a login: whoever reaches a WebDriverAgent port can take
   screenshots and tap on that phone, past the hub, the gate and the tunnel.
-* What closes them: **Windows Firewall.** `install.ps1` creates rules named
-  "Blossom farm - no network access to …" that refuse incoming TCP connections
-  to `GADS-drag.exe`, to `GADS.exe` and, with `-WithAppium`, to `node.exe`.
-  A block rule wins over any "allow" rule for the same program (for example
-  one made long ago by clicking "Allow access"). Connections from the PC to
-  itself are never filtered by Windows Firewall, so the farm is unaffected;
-  the live video is UDP and is not touched. `scripts\status.ps1` lists every
-  port the farm programs have open, says whether a rule covers it, and warns
-  when Windows Firewall is switched off.
-* What that means for you: **keep Windows Firewall on.** If another security
-  product replaces it, the kit's rules do nothing, and that product must
-  block incoming connections to the PC itself. Either way, a farm PC belongs
-  on a network you control, not on a shared office or guest Wi-Fi. The kit
-  does not change how GADS opens these ports; the rule is the protection.
+* What closes them **on Windows: Windows Firewall.** `install.ps1` creates
+  rules named "Blossom farm - no network access to …" that refuse incoming TCP
+  connections to `GADS-drag.exe`, to `GADS.exe` and, with `-WithAppium`, to
+  `node.exe`. A block rule wins over any "allow" rule for the same program
+  (for example one made long ago by clicking "Allow access"). Connections
+  from the PC to itself are never filtered by Windows Firewall, so the farm
+  is unaffected; the live video is UDP and is not touched.
+* What closes them **on macOS: the packet filter (pf).** GADS takes the
+  numbers of these ports from the system's range for temporary ports (49152
+  to 65535 unless the Mac is set otherwise; the installer reads the range).
+  `install.sh` loads one rule that drops every new TCP connection arriving
+  from the network for a port of that range:
+  `block drop in quick on ! lo0 proto tcp from any to any port 49152:65535 flags S/SA`.
+  Connections on the Mac itself (the loopback interface), connections the
+  Mac starts, and UDP (the live video) are not touched. The rule is by port
+  range and not by program: pf does not filter by program. The application
+  firewall of macOS (System Settings → Network → Firewall) is a separate
+  thing; the kit does not configure it, and it can stay on or off as you
+  have it: the farm needs no incoming connection. The rule
+  sits in a pf anchor of its own (`com.apple/blossom-farm`), `/etc/pf.conf`
+  is not changed, and the service `blossom-farm.firewall` loads it when the
+  Mac starts and checks every five minutes that it is still there.
+* On both, the status script lists every port the farm programs have open on
+  a network address, says whether the rule covers it, and warns when the
+  firewall is switched off or the rule is gone.
+* What that means for you: **keep that firewall on.** If another security
+  product replaces Windows Firewall, or rewrites the rules of pf on a Mac
+  (some VPN programs do), the kit's rule does nothing until it is put back,
+  and that product must block incoming connections to the computer itself.
+  Either way, a farm computer belongs on a network you control, not on a
+  shared office or guest Wi-Fi. The kit does not change how GADS opens these
+  ports; the rule is the protection.
 
 ### Why a tunnel and not port forwarding
 
@@ -102,9 +121,10 @@ Limits you should know:
   with automated tests in `tests/provider-gate.test.js`). Read it; it is
   short.
 
-`install.ps1` and `scripts\self-test.ps1` check from outside that the provider
+The installer and the self-test script check from outside that the provider
 host name answers **401** without a token. If that check ever fails, stop the
-tunnel (`Stop-Service Cloudflared`) until you know why.
+tunnel (`Stop-Service Cloudflared`; on macOS
+`sudo launchctl bootout system/blossom-farm.cloudflared`) until you know why.
 
 ## 3. What GADS itself does not protect
 
@@ -114,11 +134,11 @@ state of the software the farm runs on.
 * **Hub passwords are stored as plain text** in MongoDB (`common/db/user.go`)
   and compared directly. Anyone who can read the database reads every hub
   password. This is why the kit insists that MongoDB listens on `127.0.0.1`
-  only and why `C:\farm` and the export archive are protected.
-* **MongoDB has no login** in this setup. It is reachable only from the PC
-  itself, but from *any* program and *any* Windows user on that PC. Use the
-  PC for the farm only; do not let other people sign in to it; do not install
-  software you do not trust on it.
+  only and why the farm folder and the export archive are protected.
+* **MongoDB has no login** in this setup. It is reachable only from the
+  computer itself, but from *any* program and *any* user on that computer.
+  Use the computer for the farm only; do not let other people sign in to it;
+  do not install software you do not trust on it.
 * **The default administrator.** GADS creates `admin` with a published default
   password and prints it at every start (`hub/hub.go`). The installer forces
   you to replace it before the tunnel is started, checks that the default no
@@ -141,7 +161,7 @@ state of the software the farm runs on.
   * by default the provider is created with Appium **off**, so there is no
     Appium server behind those paths at all.
 
-  If you install with `-WithAppium`, the first point is the only thing between
+  If you install with Appium (`-WithAppium`, `--with-appium`), the first point is the only thing between
   the internet and the Appium servers of your phones for anyone who knows a
   phone's UDID. cloudflared matches the rule against the decoded request path
   (`ingress/ingress.go` in its source), the same form the hub checks, so
@@ -149,10 +169,11 @@ state of the software the farm runs on.
   yourself, from any computer with curl, both of these must print **403**:
   `curl -s -o NUL -w "%{http_code}" --path-as-is https://<hub host>/device/x/appium/status`
   `curl -s -o NUL -w "%{http_code}" --path-as-is https://<hub host>/device/x/%61ppium/status`
+  (on a Mac write `/dev/null` instead of `NUL`)
   Do not edit the tunnel configuration by hand, and do not put a Cloudflare
   Access rule into it. A side effect of the rule: the hub page's Appium log
-  view does not load through the public address; open the hub page on the PC
-  (`http://127.0.0.1:10000`) for that.
+  view does not load through the public address; open the hub page on the
+  farm computer (`http://127.0.0.1:10000`) for that.
 * **Some hub endpoints are registered outside the login check**
   (`hub/router/handler.go`: everything registered before
   `auth.AuthMiddleware()` is added). All of them, and what the kit does:
@@ -160,7 +181,7 @@ state of the software the farm runs on.
   | Hub path | What it gives without a login | The kit |
   |---|---|---|
   | `POST /provider-update` | how a provider reports to the hub; a stranger could feed it false device states | refused at the tunnel (403) |
-  | `GET /admin/provider/<nickname>/info` | the provider's record from the database, sent again every second for as long as the connection stays open: operating system, port, WebDriverAgent bundle ID and, if you set one, the **supervision password** (`docs/phones.md`, section 6). Each open connection also costs the hub one database query per second | refused at the tunnel (403); the self-test checks it from outside. The hub page's provider view therefore only works on the PC (`http://127.0.0.1:10000`) |
+  | `GET /admin/provider/<nickname>/info` | the provider's record from the database, sent again every second for as long as the connection stays open: operating system, port, WebDriverAgent bundle ID and, if you set one, the **supervision password** (`docs/phones.md`, section 6). Each open connection also costs the hub one database query per second | refused at the tunnel (403); the self-test checks it from outside. The hub page's provider view therefore only works on the farm computer (`http://127.0.0.1:10000`) |
   | `GET /available-devices` | the device list of a workspace, for whoever knows the workspace id | stays reachable: the hub's own page needs it |
   | `/devices/control/<udid>/in-use`, `/lock`, `/unlock`, `/release` | nothing: these handlers check the session token themselves (`hub/router/routes.go`) | passed on |
   | `POST /authenticate`, `POST /oauth/token` | the sign-in itself | passed on |
@@ -188,7 +209,8 @@ versions extend sessions; check again when a kit moves to a newer GADS.)
 ### Session tokens end up in the hub's log
 
 GADS writes the address of every request to its output, and the kit keeps
-that output in `C:\farm\logs\hub.log` and `provider.log`. The hub accepts its
+that output in `hub.log` and `provider.log` in the farm's logs folder
+(`C:\farm\logs`, `/opt/farm/logs`). The hub accepts its
 session token as part of an address (`…?token=…`, used for WebSocket
 connections), so **`hub.log` can contain session tokens that are valid for up
 to an hour**, and with the `blossom` user those are administrator tokens. The
@@ -198,27 +220,29 @@ What it does:
 * the provider gate removes the token from the address before the provider
   sees it, so `provider.log` does not collect the tokens of the live-video
   connections;
-* `C:\farm\logs` is readable by Administrators and SYSTEM only;
-* `scripts\status.ps1 -Logs` masks tokens and your host names before it
-  prints the end of a log.
+* the logs folder is readable by Administrators and SYSTEM only on Windows,
+  by root and the farm's service account only on macOS;
+* the status script with `-Logs` / `--logs` masks tokens and your host names
+  before it prints the end of a log.
 
-What you must do: **never post, mail or upload a file from `C:\farm\logs`.**
-When you ask for help, copy the output of `scripts\status.ps1 -Logs`.
+What you must do: **never post, mail or upload a file from the logs folder.**
+When you ask for help, copy the output of the status script with logs.
 
 ### When somebody leaves, or loses Phone Farm access
 
 1. Remove their access in Blossom.
-2. On the farm PC: `scripts\rotate-secrets.ps1 -HubUser` and enter the new
-   hub password in Blossom (Farm setup → Edit). If that person also knew the
-   `admin` password or sat at the farm PC: `-All`.
+2. On the farm computer: the `rotate-secrets` script with `-HubUser` /
+   `--hub-user`, and enter the new hub password in Blossom (Farm setup →
+   Edit). If that person also knew the `admin` password or sat at the farm
+   computer: `-All` / `--all`.
 3. In the hub page (`http://127.0.0.1:10000`, Admin → Users) delete every
    user you do not recognise. A hub administrator can create further
    administrators; a leaver may have made one.
 4. A token they already hold works for at most one more hour. To end all
    sessions at once, replace the signing key in the hub page (Admin → Secret
    keys).
-5. If they had physical access to the phones or the PC, treat the accounts on
-   the phones as exposed as well.
+5. If they had physical access to the phones or the computer, treat the
+   accounts on the phones as exposed as well.
 
 ## 5. Do not put Cloudflare Access (or any login wall) in front
 
@@ -252,17 +276,22 @@ breaks it), and, if your team works from known countries only, a WAF rule that b
 aware that Blossom's own servers must stay allowed; ask Blossom support where
 they call from before you restrict by country or IP address.
 
-## 6. The secrets on the PC
+## 6. The secrets on the computer
 
-| Secret | Where it is | Who can read it |
-|---|---|---|
-| restart secret | `C:\farm\config\restart-secret.txt` | Administrators, SYSTEM |
-| login of the keep-available user | `C:\farm\config\keep-available.json` | Administrators, SYSTEM |
-| tunnel credentials, Cloudflare account certificate | `C:\farm\config\cloudflared\` | Administrators, SYSTEM |
-| phone pairing records | `C:\farm\<nickname>\pair_records`, `C:\ProgramData\Apple\Lockdown` | the first: Administrators, SYSTEM; the second: as Apple's software sets it |
-| every hub password | MongoDB database `gads` | any program on the PC (section 3) |
-| password of hub user `blossom` | **not stored by the kit**: shown once, then only in Blossom (encrypted there) and in the hub database | |
-| password of hub user `admin` | **not stored by the kit**: you chose it | |
+The paths are below the farm folder: `C:\farm` on Windows, `/opt/farm` on
+macOS.
+
+| Secret | Where it is | Who can read it: Windows | Who can read it: macOS |
+|---|---|---|---|
+| restart secret | `config/restart-secret.txt` | Administrators, SYSTEM | root |
+| login of the keep-available user | `config/keep-available.json` | Administrators, SYSTEM | root, the service account |
+| tunnel credentials | `config/cloudflared/tunnel-credentials.json` | Administrators, SYSTEM | root, the service account |
+| Cloudflare account certificate | `config/cloudflared/cert.pem` | Administrators, SYSTEM | root |
+| the provider's cached phone pairings | `<nickname>/pair_records` | Administrators, SYSTEM | the service account (and root) |
+| the system's own phone pairing records | Windows: `C:\ProgramData\Apple\Lockdown`; macOS: `/var/db/lockdown` | as Apple's software sets it | as macOS sets it; the kit never reads or copies them |
+| every hub password | MongoDB database `gads` | any program on the computer (section 3) | the same |
+| password of hub user `blossom` | **not stored by the kit**: shown once, then only in Blossom (encrypted there) and in the hub database | | |
+| password of hub user `admin` | **not stored by the kit**: you chose it | | |
 
 How the kit handles them:
 
@@ -272,8 +301,11 @@ How the kit handles them:
 * Secrets are generated with the operating system's cryptographic random
   generator.
 * The kit never passes them on a command line, never writes them to a log of
-  its own, and does not keep them in the services' registry entries (the
-  restart service gets the *path* of its secret file, not the secret). One
+  its own, and does not keep them in the services' settings, which are the
+  registry entries on Windows and the property lists in
+  `/Library/LaunchDaemons` on macOS (the restart service gets the *path* of
+  its secret file, not the secret). The macOS scripts hand logins to `curl`
+  through its standard input, where the process list does not show them. One
   thing the kit cannot prevent is GADS itself logging request addresses that
   contain a session token: section 4, "Session tokens end up in the hub's
   log".
@@ -284,26 +316,38 @@ How the kit handles them:
   and SYSTEM only, stops the installer before anything in it is read or run;
   an empty one is deleted and created anew. The Administrators group is made
   the owner of the folder and of every secret file.
+* `install.sh` applies the same rule to `/opt/farm`: a folder with content
+  that root does not own, that a group or everybody may write to, or that
+  sits in a folder others can change, stops the installer. Root owns
+  everything the services run and everything they read as configuration
+  (files `600` or `640`, folders `700` or `750`); the service account can
+  read what it needs and can write only to the logs, the database, its
+  temporary folder and the provider's own folder. It cannot change its own
+  programs, scripts or settings.
 * Passwords you type are read hidden and are not kept in the console history.
 * The two values meant for Blossom are printed once, at the end. Close the
   window afterwards. Do not run the installer inside a recording
   (`Start-Transcript`, screen sharing).
-* An **export archive** (`scripts\export-farm.ps1`) contains all of it and is
-  not encrypted. It is written to `C:\farm\export\` (Administrators only)
-  unless you name another place, and on an NTFS drive the file is restricted
-  before the first secret is written into it. A USB stick formatted FAT32 or
-  exFAT has no file permissions: the script says so and asks first. Handle
-  the archive like a master key and delete it after the move.
+* An **export archive** (the `export-farm` script) contains all of it and is
+  not encrypted. It is written to the farm's `export` folder (Administrators
+  only, or root only) unless you name another place, and on a disk with file
+  permissions (NTFS on Windows, APFS on a Mac) the file is restricted before
+  the first secret is written into it. A USB stick formatted FAT32 or exFAT
+  has no file permissions: the script says so and asks first. Handle the
+  archive like a master key and delete it after the move.
 
 ## 7. The restart service
 
-It is reachable from the internet and runs as SYSTEM, so it is deliberately
-small (`services/restart-server.js`, under 300 lines, no dependencies):
+It is reachable from the internet and runs with full rights (as SYSTEM on
+Windows, as root on macOS: it is the one farm program that does), so it is
+deliberately small (`services/restart-server.js`, one file, no
+dependencies):
 
 * five fixed actions and one status call; a request can choose among them and
   nothing else. No part of a request ever reaches a command line: the service
-  runs `sc.exe start|stop|query` with service names that are constants in the
-  file;
+  runs `sc.exe start|stop|query` on Windows and
+  `/bin/launchctl print|bootstrap|kickstart|bootout` on macOS, with service
+  names that are constants in the file;
 * every request needs the secret, including unknown paths (they get 401, not
   404, so a stranger learns nothing);
 * it sends no CORS headers: it is called by Blossom's servers, never by a
@@ -311,31 +355,61 @@ small (`services/restart-server.js`, under 300 lines, no dependencies):
 * it listens on `127.0.0.1` and the address is not configurable.
 
 What the secret is worth to an attacker: stopping and starting your farm
-programs. It cannot read data or control a phone. Rotate it with
-`scripts\rotate-secrets.ps1 -RestartSecret` if it may have leaked.
+programs. It cannot read data or control a phone. Rotate it with the
+`rotate-secrets` script (`-RestartSecret`, `--restart-secret`) if it may have
+leaked.
 
 ## 8. What the kit accepts as a trade-off
 
-* The six services run as **LocalSystem**, as on the farm this kit was
-  modelled on. A flaw in GADS, in the gate or in the restart service would
-  therefore be a flaw with full rights on that PC. The kit does not set up a
-  restricted service account: the provider needs Apple's device service and
-  the pairing records, and the restart service needs the right to start and
-  stop services. This is one more reason to dedicate the PC to the farm.
-* The hub and provider binaries are **not code-signed**. Their integrity
-  rests on the SHA-256 values pinned in `versions.json`, which the installer
-  and `scripts\status.ps1` check. The provider is rebuilt by this repository's
-  workflow from public source and must reproduce the pinned value bit for bit.
-* **With `-WithAppium`, npm packages are not checksum-pinned.** The kit pins
+* **On Windows** the six services run as **LocalSystem**, as on the farm this
+  kit was modelled on. A flaw in GADS, in the gate or in the restart service
+  would therefore be a flaw with full rights on that PC. The kit does not set
+  up a restricted service account there: the provider needs Apple's device
+  service and the pairing records, and the restart service needs the right to
+  start and stop services. This is one more reason to dedicate the PC to the
+  farm.
+* **On macOS** MongoDB, the hub, the provider, the gate, keep-available and
+  the tunnel run as `_blossomfarm`, a hidden account without a password, a
+  shell or a home folder that the installer creates; a flaw in one of them
+  gives that account's rights, not root's. Two things run as root: the
+  restart service, because only root may start and stop system services,
+  and the small job that loads the packet filter rule. What the service
+  account can still do is a great deal: it runs the provider, so it controls
+  the phones, and it can read the database and the tunnel credentials.
+* **On macOS, FFmpeg and OpenSSL come from Homebrew**, and Homebrew's folder
+  belongs to the Mac user who installed it, not to root. Whoever can act as
+  that user can replace FFmpeg, and the provider runs FFmpeg (as the service
+  account, never as root). Everything else the farm runs is in `/opt/farm`
+  and belongs to root. This is one more reason not to use the farm Mac, or
+  that user, for anything else.
+* **On macOS, an unattended restart needs FileVault off** (README, step 6).
+  With FileVault off, the disk is readable by whoever takes the Mac: the
+  restart secret, the tunnel credentials and every hub password are on it.
+  With FileVault on, they are protected and the farm does not come back by
+  itself after a power cut. The installer changes neither; it tells you
+  which one it found.
+* The hub and provider binaries are **not code-signed** by a publisher's
+  certificate (on Apple Silicon they carry the signature without an
+  identity that macOS requires of every program, which says nothing about
+  who made them). Their integrity rests on the SHA-256 values pinned in
+  `versions.json`, which the installer and the status script check. The
+  provider is rebuilt by this repository's workflow from public source and
+  must reproduce the pinned value bit for bit. On macOS the same goes for
+  Node.js, MongoDB and cloudflared, which the installer downloads from their
+  publishers and checks against pinned SHA-256 values; a file fetched by the
+  installer carries no "quarantine" mark, so Gatekeeper is not asked about
+  it. The checksum is the check.
+* **With Appium (`-WithAppium`, `--with-appium`), npm packages are not checksum-pinned.** The kit pins
   the *versions* of three packages (`appium`, `appium-xcuitest-driver`,
   `appium-gads`, in `versions.json`). Each of them pulls in hundreds of other
   packages, whose versions npm chooses on the day of installation, and npm
-  runs the install scripts of all of them, as Administrator. That is how
-  every Appium installation works, GADS's own instructions included, and it
-  means: a compromised package anywhere in that tree would run with full
-  rights on the farm PC. The kit installs the GADS plugin itself during
-  `install.ps1`, so that the provider service (SYSTEM) finds it in place and
-  does not fetch it by itself when it starts; if the plugin is ever missing
+  runs the install scripts of all of them: as Administrator on Windows, as
+  the service account on macOS. That is how every Appium installation works,
+  GADS's own instructions included, and it means: a compromised package
+  anywhere in that tree would run with those rights on the farm computer.
+  The kit installs the GADS plugin itself during installation, so that the
+  provider service finds it in place and does not fetch it by itself when it
+  starts; if the plugin is ever missing
   or of another version, GADS installs it at start (`provider/provider.go`).
   Appium is off by default for these reasons; add it only if you use it.
 * **Updates are manual.** Nothing here updates itself: you decide when to move
