@@ -55,6 +55,7 @@ function Show-New {
 
 try {
     Assert-Administrator
+    Protect-KitFolder -KitRoot $KitRoot
     if ($All) { $RestartSecret = $true; $HubUser = $true; $KeepAvailable = $true; $AdminPassword = $true }
     if (-not ($RestartSecret -or $HubUser -or $KeepAvailable -or $AdminPassword)) {
         Stop-Farm -Problem 'Nothing was chosen.' -WhatToDo 'Add -RestartSecret, -HubUser, -KeepAvailable, -AdminPassword or -All.'

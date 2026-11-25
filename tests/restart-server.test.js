@@ -382,9 +382,20 @@ const NOT_FOUND = { code: 113, out: 'Bad request.\nCould not find service "bloss
 test('launchctl controller: running, not running and not loaded', async () => {
   let answer = { code: 0, out: printOut('running') }
   const calls = []
-  const lc = launchctlController(async args => { calls.push(args.join(' ')); return answer })
+  const asked = []
+  let command = '/opt/farm/bin/GADS hub --host-address=127.0.0.1 --port=10000'
+  const lc = launchctlController(async args => { calls.push(args.join(' ')); return answer }, async pid => { asked.push(pid); return command })
   assert.strictEqual(await lc.isRunning('blossom-farm.hub'), true)
+  assert.deepStrictEqual(asked, ['412'], 'the process launchd names is the one that is looked at')
   assert.strictEqual(await lc.isStopped('blossom-farm.hub'), false)
+  // launchd says "running" while the wrapper still waits for MongoDB: that is not the hub
+  command = '/bin/bash /opt/farm/services/farm-run.sh --log /opt/farm/logs/hub.log --wait 27017 -- /opt/farm/bin/GADS hub'
+  assert.strictEqual(await lc.isRunning('blossom-farm.hub'), false, 'the wrapper waiting for a port is not the program')
+  command = ''
+  assert.strictEqual(await lc.isRunning('blossom-farm.hub'), false, 'a process that is gone is not running')
+  command = '/opt/farm/bin/GADS hub'
+  answer = { code: 0, out: 'system/blossom-farm.hub = {\n\tstate = running\n}\n' }
+  assert.strictEqual(await lc.isRunning('blossom-farm.hub'), true, 'without a process number, the state launchd gives is taken')
   answer = { code: 0, out: printOut('not running') }
   assert.strictEqual(await lc.isRunning('blossom-farm.hub'), false, '"not running" must not read as running')
   assert.strictEqual(await lc.isStopped('blossom-farm.hub'), false, 'launchd still knows it, so it may not be loaded again yet')
@@ -533,9 +544,27 @@ test('macOS: /start-all brings back services that launchd no longer knows', asyn
   })
 })
 
-test('the macOS controller only ever runs /bin/launchctl by its full path, with fixed service names (no shell)', () => {
+test('GET /status on macOS: a service whose wrapper still waits for another service is not reported as running', async () => {
+  const pids = { 'blossom-farm.mongodb': 11, 'blossom-farm.hub': 12, 'blossom-farm.provider': 13, 'blossom-farm.gate': 14, 'blossom-farm.keep-available': 15, 'blossom-farm.cloudflared': 16 }
+  // MongoDB is down: its job has no process; the hub, the provider and keep-available wait in the wrapper
+  const run = async args => {
+    const name = String(args[1]).replace(/^system\//, '')
+    if (name === 'blossom-farm.mongodb') return { code: 0, out: `system/${name} = {\n\tstate = not running\n}\n` }
+    return { code: 0, out: `system/${name} = {\n\tstate = running\n\tpid = ${pids[name]}\n}\n` }
+  }
+  const commandOf = async pid => ([12, 13, 15].includes(Number(pid)) ? '/bin/bash /opt/farm/services/farm-run.sh --log x --wait 10000 -- program' : '/opt/farm/bin/program')
+  const app = createApp({ secret: SECRET, platform: 'darwin', run, commandOf, log: () => {}, replyGraceMs: 0, wait: async () => {} })
+  await new Promise(r => app.listen(0, r))
+  try {
+    const r = await request(app.server.address().port, 'GET', '/status', { Authorization: `Bearer ${SECRET}` })
+    assert.deepStrictEqual(r.json, { hub: false, provider: false, cloudflare: true, keep_available: false, mongodb: false, action_in_progress: false })
+  } finally { await new Promise(r => app.server.close(r)) }
+})
+
+test('the macOS controller only ever runs /bin/launchctl and /bin/ps by their full paths, with fixed arguments (no shell)', () => {
   const src = fs.readFileSync(SERVER, 'utf8')
   assert.match(src, /execFile\('\/bin\/launchctl'/)
-  assert.strictEqual((src.match(/execFile\(/g) || []).length, 2, 'two programs are ever run: sc.exe and launchctl')
+  assert.match(src, /execFile\('\/bin\/ps', \['-o', 'command=', '-p', String\(pid\)\]/)
+  assert.strictEqual((src.match(/execFile\(/g) || []).length, 3, 'three programs are ever run: sc.exe, launchctl and ps')
   assert.doesNotMatch(src, /execSync|spawn|shell:\s*true/)
 })

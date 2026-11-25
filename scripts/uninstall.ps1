@@ -35,6 +35,7 @@ Import-Module (Join-Path $KitRoot 'lib\FarmKit.psm1') -Force -DisableNameCheckin
 
 try {
     Assert-Administrator
+    Protect-KitFolder -KitRoot $KitRoot
     if ($RemoveData -and $ServicesOnly) { Stop-Farm -Problem '-RemoveData and -ServicesOnly contradict each other.' -WhatToDo 'Use one of them.' }
     $paths = Get-FarmPaths
     $farm = Read-FarmConfig -Paths $paths

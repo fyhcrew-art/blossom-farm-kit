@@ -145,6 +145,13 @@ function Test-ProviderNickname {
     if ($Nickname -notmatch '^[A-Za-z][A-Za-z0-9_-]{1,31}$') {
         return 'Use 2 to 32 characters: letters, digits, "-" and "_", starting with a letter (for example Provider1). It becomes a folder name and part of an address.'
     }
+    # The nickname becomes a folder below the farm folder, and Windows does
+    # not tell upper case from lower case: "Logs" IS "logs". (-contains
+    # compares without regard to case.)
+    $own = @('bin', 'config', 'logs', 'logs-root', 'services', 'downloads', 'data', 'var', 'npm', 'appium', 'export', 'previous', 'export-stage', 'import-stage')
+    if ($own -contains $Nickname) {
+        return 'It is the name of a folder the kit itself uses. Choose another, for example Provider1.'
+    }
     return $null
 }
 
@@ -531,6 +538,47 @@ function Write-TextFileUtf8 {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
     $enc = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($Path, $Text, $enc)
+}
+
+function Test-KitFolderPlace {
+    # Returns $null when the kit folder is in a place where ordinary accounts
+    # cannot put another folder in its stead: directly on a drive, like
+    # C:\blossom-farm-kit. A folder inside a user's profile (Downloads,
+    # Desktop, Documents) can be renamed and replaced by that account,
+    # however the folder itself is locked.
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$KitRoot)
+    $full = ([string]$KitRoot).TrimEnd('\')
+    if ($full -match '^[A-Za-z]:\\[^\\]+$') { return $null }
+    return 'It is not directly on a drive, and whoever may change the folder that contains it can put another kit in its place.'
+}
+
+function Protect-KitFolder {
+    # Called by install.ps1 and by every script, as Administrator, before
+    # they do anything else. The scripts of the kit run with full rights, now
+    # and at every later maintenance run: whoever can change one of them
+    # becomes Administrator the next time. So the kit folder is locked the
+    # way the command from Blossom locks it (Administrators and SYSTEM: full;
+    # Users: read), and a kit in a place that cannot be protected is refused.
+    param([Parameter(Mandatory = $true)][string]$KitRoot)
+    if ($env:OS -ne 'Windows_NT') { return }
+    $why = Test-KitFolderPlace -KitRoot $KitRoot
+    if ($why) {
+        Stop-Farm -Problem ('The kit folder ' + $KitRoot + ' is not in a protected place. ' + $why) -WhatToDo 'The scripts of the kit run as Administrator, now and at every later maintenance run, so nobody else may be able to change them. Move the whole kit folder directly onto drive C: (for example with   Move-Item <the kit folder> C:\blossom-farm-kit   ), then run the script again from there:   cd C:\blossom-farm-kit   . It locks the folder by itself.'
+    }
+    $failed = 0
+    $r = Invoke-Native -File 'icacls.exe' -Arguments @($KitRoot, '/setowner', '*S-1-5-32-544', '/T', '/C', '/Q')
+    if ($r.Code -ne 0) { $failed++ }
+    $r = Invoke-Native -File 'icacls.exe' -Arguments @($KitRoot, '/inheritance:r', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '/grant:r', '*S-1-5-18:(OI)(CI)F', '/grant:r', '*S-1-5-32-545:(OI)(CI)RX')
+    if ($r.Code -ne 0) { $failed++ }
+    foreach ($sid in @('*S-1-5-11', '*S-1-1-0')) {
+        $null = Invoke-Native -File 'icacls.exe' -Arguments @($KitRoot, '/remove:g', $sid)
+    }
+    # everything inside: only what it inherits from the kit folder
+    $r = Invoke-Native -File 'icacls.exe' -Arguments @((Join-Path $KitRoot '*'), '/reset', '/T', '/C', '/Q')
+    if ($r.Code -ne 0) { $failed++ }
+    if ($failed -gt 0) {
+        Stop-Farm -Problem ('Could not restrict access to the kit folder ' + $KitRoot + '.') -WhatToDo 'Check that the drive is NTFS (file permissions do not exist on FAT/exFAT) and that you run as Administrator, then run the script again.'
+    }
 }
 
 function Protect-FarmPath {
@@ -1146,6 +1194,13 @@ function Connect-Hub {
     return $token
 }
 
+function Resolve-FarmHostName {
+    # The addresses a host name resolves to on this computer, as text; none
+    # when it does not resolve.
+    param([Parameter(Mandatory = $true)][string]$Name)
+    try { return @([System.Net.Dns]::GetHostAddresses($Name) | ForEach-Object { $_.ToString() }) } catch { return @() }
+}
+
 function Invoke-FarmSelfTest {
     # The same walk the product's "Test connection" takes, from this computer,
     # against the public host names. Returns a list of step results; a step
@@ -1177,8 +1232,7 @@ function Invoke-FarmSelfTest {
 
     # 2 DNS: public addresses only
     foreach ($name in @($HubHost, $ProviderHost, $RestartHost)) {
-        $addresses = @()
-        try { $addresses = @([System.Net.Dns]::GetHostAddresses($name) | ForEach-Object { $_.ToString() }) } catch { $addresses = @() }
+        $addresses = @(Resolve-FarmHostName -Name $name)
         if ($addresses.Count -eq 0) {
             & $add 'dns' 'fail' ($name + ' does not resolve yet.') 'A new DNS record can take a few minutes. Wait, then run scripts\self-test.ps1. If it stays like this, look at the DNS records of your domain in the Cloudflare dashboard: there must be a CNAME for this name pointing at <tunnel id>.cfargotunnel.com.'
             return $steps
@@ -1222,7 +1276,11 @@ function Invoke-FarmSelfTest {
         return $steps
     }
     if ($r.Status -eq 401 -or $r.Status -eq 403) {
-        & $add 'signin' 'fail' 'The hub refused the user name or password.' 'Reset the login with scripts\rotate-secrets.ps1 -HubUser. A paired computer hands the new password to Blossom by itself; otherwise enter it there.'
+        if ($HubUser -eq 'admin') {
+            & $add 'signin' 'fail' 'The hub refused the password of its administrator "admin".' 'Run the test again and type the password you chose for the hub administrator when the farm was installed. If it is lost: README, section Troubleshooting, "Lost hub administrator password".'
+        } else {
+            & $add 'signin' 'fail' ('The hub refused the password of the user "' + $HubUser + '".') 'If you typed it by hand, run the test again as the hub administrator instead:   scripts\self-test.ps1 -HubUser admin   . If Blossom reports the same for this user, give it a new password:   scripts\rotate-secrets.ps1 -HubUser   . A paired computer hands the new password to Blossom by itself and does not show it; otherwise it is shown once, to be entered in Blossom.'
+        }
         return $steps
     }
     if (-not $token) {
@@ -1269,6 +1327,16 @@ function Invoke-FarmSelfTest {
         & $add 'hub-provider-info' 'ok' 'The provider record of the hub is refused at the tunnel (403), as it must be.' $null
     } else {
         & $add 'hub-provider-info' 'fail' ('The hub path /admin/provider/<nickname>/info is not refused by the tunnel (HTTP ' + $r.Status + '). GADS serves it without a login.') 'Run install.ps1 again: it rewrites the tunnel configuration and restarts the tunnel. If it stays like this, report it on the kit repository (privately: Security -> Report a vulnerability); see docs\security.md, section 3.'
+    }
+
+    # extra check, not part of the product's test: the provider reports the
+    # state of the phones to the hub on this path, from this computer, and
+    # GADS 6.0.0 asks for no login there.
+    $r = Invoke-FarmHttp -LikeBlossom -Url ($hub + '/provider-update') -TimeoutSec 8
+    if ($r.Status -eq 403) {
+        & $add 'hub-provider-update' 'ok' 'The path the provider reports to the hub on is refused at the tunnel (403), as it must be.' $null
+    } else {
+        & $add 'hub-provider-update' 'fail' ('The hub path /provider-update is not refused by the tunnel (HTTP ' + $r.Status + '). GADS accepts reports about the phones there without a login.') 'Run install.ps1 again: it rewrites the tunnel configuration and restarts the tunnel. If it stays like this, report it on the kit repository (privately: Security -> Report a vulnerability); see docs\security.md, section 3.'
     }
 
     # 6 phones
@@ -1338,7 +1406,7 @@ function Write-SelfTestReport {
     # Prints the steps; returns $true when nothing failed.
     param([Parameter(Mandatory = $true)]$Steps)
     $titles = @{ address = 'Addresses'; dns = 'DNS'; reach = 'Secure connection (TLS)'; signin = 'Hub sign-in'; hub = 'Hub answers like GADS';
-        'hub-appium' = 'Hub refuses unauthenticated Appium paths'; 'hub-provider-info' = 'Hub refuses the open provider record'; devices = 'Phones'; provider = 'Provider'; 'provider-locked' = 'Provider refuses strangers'; restart = 'Restart service'; 'restart-locked' = 'Restart service refuses strangers' }
+        'hub-appium' = 'Hub refuses unauthenticated Appium paths'; 'hub-provider-info' = 'Hub refuses the open provider record'; 'hub-provider-update' = 'Hub refuses reports from outside'; devices = 'Phones'; provider = 'Provider'; 'provider-locked' = 'Provider refuses strangers'; restart = 'Restart service'; 'restart-locked' = 'Restart service refuses strangers' }
     $allOk = $true
     foreach ($s in $Steps) {
         $color = 'Green'; $mark = 'OK    '
@@ -1368,9 +1436,21 @@ function Write-SelfTestReport {
 
 $script:BlossomTries = 4
 $script:BlossomRetryDelaySec = 2
-$FarmPairHelp = 'In Blossom open Phone Farm -> Farm setup -> Connect a computer, copy the new command and run it on this computer. That is safe: it keeps what is already set up.'
+$FarmPairHelp = 'In Blossom open Phone Farm -> Farm setup -> Connect a computer, copy the new command yourself and run it on this computer: it keeps what is already set up. Only ever run a command you took from your own Blossom, signed in.'
 
 function Get-FarmPairHelp { return $FarmPairHelp }
+
+function Get-SelfTestUser {
+    # The hub user scripts\self-test.ps1 signs in with when none is named. On
+    # a paired computer nobody has the password of Blossom's own user (it was
+    # sent to Blossom and never shown), so the test uses the hub
+    # administrator, whose password the owner chose.
+    param([Parameter(Mandatory = $true)]$Paths, [AllowEmptyString()][string]$HubUser = 'blossom')
+    $pairing = Read-FarmPairing -Paths $Paths
+    if ($pairing -and $pairing.SiteSentAt) { return 'admin' }
+    if ($HubUser) { return $HubUser }
+    return 'blossom'
+}
 
 function Get-FarmComputerInfo {
     # What this computer says about itself. No secret is in it.
@@ -1397,8 +1477,10 @@ function Get-FarmComputerInfo {
 
 function Read-FarmPairing {
     # The pairing this computer holds ($null when it holds none): AppOrigin,
-    # FarmToken, CodeSha256, PairingId, Workspace, ClaimedAt, SiteSentAt
-    # (empty until Blossom has accepted the description of the farm once).
+    # FarmToken, CodeSha256, PairingId, Workspace (the name the workspace
+    # gives itself), WorkspaceId (the identifier Blossom gives it, which
+    # nobody can choose), ClaimedAt, SiteSentAt (empty until Blossom has
+    # accepted the description of the farm once).
     param([Parameter(Mandatory = $true)]$Paths)
     if (-not (Test-Path -LiteralPath $Paths.Pairing)) { return $null }
     $j = $null
@@ -1412,6 +1494,7 @@ function Read-FarmPairing {
         CodeSha256 = [string](Get-JsonProperty -Object $j -Name 'codeSha256')
         PairingId  = [string](Get-JsonProperty -Object $j -Name 'pairingId')
         Workspace  = [string](Get-JsonProperty -Object $j -Name 'workspace')
+        WorkspaceId = ConvertTo-WorkspaceId -Id ([string](Get-JsonProperty -Object $j -Name 'workspaceId'))
         ClaimedAt  = [string](Get-JsonProperty -Object $j -Name 'claimedAt')
         SiteSentAt = [string](Get-JsonProperty -Object $j -Name 'siteSentAt')
     }
@@ -1425,6 +1508,7 @@ function Write-FarmPairing {
     $record['codeSha256'] = $Pairing.CodeSha256
     $record['pairingId'] = $Pairing.PairingId
     $record['workspace'] = $Pairing.Workspace
+    $record['workspaceId'] = [string]$Pairing.WorkspaceId
     $record['claimedAt'] = $Pairing.ClaimedAt
     $record['siteSentAt'] = $Pairing.SiteSentAt
     Write-SecretFile -Path $Paths.Pairing -Text ($record | ConvertTo-Json)
@@ -1550,11 +1634,76 @@ function Update-BlossomResult {
     return $Result
 }
 
+function ConvertTo-WorkspaceId {
+    # The identifier of a workspace as Blossom sends it: letters, digits and
+    # hyphens, at most 64 (a UUID), in lower case. Anything else gives ''.
+    param([AllowEmptyString()][AllowNull()][string]$Id)
+    $t = [string]$Id
+    if ($t -cmatch '^[A-Za-z0-9-]{1,64}$') { return $t.ToLowerInvariant() }
+    return ''
+}
+
+function Test-SameWorkspace {
+    # True only when both pairings are with the same Blossom AND the same
+    # workspace, by its identifier. A workspace NAME is never compared: the
+    # owner of a workspace chooses it, so it proves nothing.
+    param([AllowEmptyString()][string]$OriginA, [AllowEmptyString()][string]$IdA, [AllowEmptyString()][string]$OriginB, [AllowEmptyString()][string]$IdB)
+    return ([bool]$IdA -and [bool]$IdB -and ($OriginA -ceq $OriginB) -and ($IdA -ceq $IdB))
+}
+
+function Read-FarmTypedWord {
+    # What the person at the keyboard types, or $null when nobody is at a
+    # keyboard (a scheduled or remote run): the caller takes that as "no".
+    param([Parameter(Mandatory = $true)][string]$Prompt)
+    if (-not [Environment]::UserInteractive) { return $null }
+    try { if ([Console]::IsInputRedirected) { return $null } } catch { return $null }
+    try { return [string](Read-Host -Prompt $Prompt) } catch { return $null }
+}
+
+function Confirm-FarmPairingReplacement {
+    # A computer that is paired is about to be paired with ANOTHER workspace
+    # (or another Blossom). That moves the farm: the hub login gets a new
+    # password, and the addresses, that password and the restart secret go to
+    # the new place. A genuine command made in somebody else's workspace would
+    # do exactly this, so it is never done without a yes from the keyboard,
+    # or the switch that says so (-ReplacePairing). Returns $true to go on.
+    param(
+        [Parameter(Mandatory = $true)][string]$OldOrigin,
+        [AllowEmptyString()][string]$OldWorkspace = '',
+        [Parameter(Mandatory = $true)][string]$NewOrigin,
+        [AllowEmptyString()][string]$NewWorkspace = ''
+    )
+    $old = '       ' + $OldOrigin; if ($OldWorkspace) { $old += '   (workspace "' + $OldWorkspace + '")' }
+    $new = '       ' + $NewOrigin; if ($NewWorkspace) { $new += '   (workspace "' + $NewWorkspace + '")' }
+    Write-Host ''
+    foreach ($line in @(
+            '   This computer is already paired with Blossom:', $old,
+            '   The command you ran pairs it with another workspace:', $new,
+            '   If you go on, the farm LEAVES the first one: its hub login gets a new',
+            '   password, and its addresses, that password and the restart secret are sent',
+            '   to the second. Whoever confirms the computer there controls the phones.',
+            '   A workspace name proves nothing: whoever owns a workspace chooses its name.',
+            '   Go on only if you copied this command yourself from your own Blossom, signed',
+            '   in. A command that somebody sent you is a reason to stop.')) {
+        Write-Host $line -ForegroundColor Yellow
+    }
+    $word = Read-FarmTypedWord -Prompt '   Type the word  replace  to go on (anything else keeps the pairing as it is)'
+    if ($null -eq $word) { return $false }
+    return (([string]$word).Trim().ToLowerInvariant() -eq 'replace')
+}
+
+function Get-PairingKeptMessage {
+    param([Parameter(Mandatory = $true)][string]$Origin)
+    return ('This computer stays paired with ' + $Origin + ': the new command would have moved the farm to another workspace, and nobody said yes to that at the keyboard. To move it on purpose, run the command again in an Administrator PowerShell window and answer the question, or add -ReplacePairing at its end.')
+}
+
 function Register-FarmPairing {
     # Hands the pairing code to Blossom together with a farm token made here.
     # Ok: Blossom knows this computer; pairing.json holds the token.
     # Otherwise Kind and Message say why, and an earlier pairing of this
-    # computer is left as it was.
+    # computer is left as it was. Kind 'declined': the computer is paired
+    # with another workspace and nobody agreed to move it
+    # (Confirm-FarmPairingReplacement).
     #
     # The token is written to disk BEFORE it is sent: if the answer is lost on
     # the way, running the same command again repeats the claim with the same
@@ -1562,7 +1711,8 @@ function Register-FarmPairing {
     param(
         [Parameter(Mandatory = $true)]$Paths,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Origin,
-        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Code
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Code,
+        [switch]$ReplacePairing
     )
     $out = New-BlossomResult
     $o = ConvertTo-AppOrigin -Origin $Origin
@@ -1577,6 +1727,15 @@ function Register-FarmPairing {
         # this very code was claimed by this computer before
         $out.Ok = $true; $out.Kind = 'ok'; $out.Workspace = $old.Workspace
         return $out
+    }
+    $agreed = [bool]$ReplacePairing
+    if ($old -and -not $agreed -and ($old.AppOrigin -cne $o)) {
+        # another Blossom altogether: asked before anything is sent to it
+        if (-not (Confirm-FarmPairingReplacement -OldOrigin $old.AppOrigin -OldWorkspace $old.Workspace -NewOrigin $o)) {
+            $out.Kind = 'declined'; $out.Message = Get-PairingKeptMessage -Origin $old.AppOrigin
+            return $out
+        }
+        $agreed = $true
     }
     $token = $null
     if (Test-Path -LiteralPath $Paths.PairingNew) {
@@ -1604,10 +1763,24 @@ function Register-FarmPairing {
         return $out
     }
     $out.Workspace = ConvertTo-RemoteText -Text ([string](Get-JsonProperty -Object $out.Json -Name 'workspace_name'))
+    $workspaceId = ConvertTo-WorkspaceId -Id ([string](Get-JsonProperty -Object $out.Json -Name 'workspace_id'))
+    if ($old -and -not $agreed -and -not (Test-SameWorkspace -OriginA $old.AppOrigin -IdA ([string]$old.WorkspaceId) -OriginB $o -IdB $workspaceId)) {
+        # The same Blossom, but the code belongs to another workspace (only
+        # the answer to the claim tells). So far that workspace has the name
+        # of this computer and nothing else.
+        if (-not (Confirm-FarmPairingReplacement -OldOrigin $old.AppOrigin -OldWorkspace $old.Workspace -NewOrigin $o -NewWorkspace $out.Workspace)) {
+            # give the claim up again, and keep the pairing this computer has
+            $null = Invoke-Blossom -Origin $o -Method 'DELETE' -Path '/api/farm/pair/token' -Token $token -Tries 2
+            if (Test-Path -LiteralPath $Paths.PairingNew) { Remove-Item -LiteralPath $Paths.PairingNew -Force }
+            $kept = New-BlossomResult
+            $kept.Kind = 'declined'; $kept.Message = Get-PairingKeptMessage -Origin $old.AppOrigin
+            return $kept
+        }
+    }
     $pairing = New-Object PSObject -Property @{
         AppOrigin = $o; FarmToken = $token; CodeSha256 = $codeSha
         PairingId = ConvertTo-RemoteText -Text ([string](Get-JsonProperty -Object $out.Json -Name 'pairing_id'))
-        Workspace = $out.Workspace; ClaimedAt = (Get-Date).ToUniversalTime().ToString('s') + 'Z'; SiteSentAt = ''
+        Workspace = $out.Workspace; WorkspaceId = $workspaceId; ClaimedAt = (Get-Date).ToUniversalTime().ToString('s') + 'Z'; SiteSentAt = ''
     }
     Write-FarmPairing -Paths $Paths -Pairing $pairing
     if (Test-Path -LiteralPath $Paths.PairingNew) { Remove-Item -LiteralPath $Paths.PairingNew -Force }

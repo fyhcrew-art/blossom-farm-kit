@@ -4,9 +4,12 @@
     computer, against the farm's public host names.
 .DESCRIPTION
         powershell -ExecutionPolicy Bypass -File .\scripts\self-test.ps1
-    Asks for the password of the hub user (hidden). Nothing is stored.
+    Asks for the password of a hub user (hidden). Nothing is stored.
 .PARAMETER HubUser
-    Hub user to sign in with (default: the one Blossom uses, "blossom").
+    Hub user to sign in with. Default: on a computer that is paired with
+    Blossom, the hub administrator "admin" (the password of "blossom" went to
+    Blossom and is stored nowhere on this computer); otherwise the user
+    Blossom uses, "blossom".
 #>
 [CmdletBinding()]
 param([string]$HubUser = '')
@@ -17,6 +20,7 @@ Import-Module (Join-Path $KitRoot 'lib\FarmKit.psm1') -Force -DisableNameCheckin
 
 try {
     Assert-Administrator
+    Protect-KitFolder -KitRoot $KitRoot
     $paths = Get-FarmPaths
     $farm = Read-FarmConfig -Paths $paths
     if (-not $farm) {
@@ -25,7 +29,12 @@ try {
     if (-not (Test-Path -LiteralPath $paths.RestartSecret)) {
         Stop-Farm -Problem 'The restart secret file is missing.' -WhatToDo 'Run scripts\rotate-secrets.ps1 -RestartSecret (on a computer that is not paired, enter the new secret in Blossom), then test again.'
     }
-    if (-not $HubUser) { $HubUser = [string]$farm.hubUser }
+    if (-not $HubUser) {
+        $HubUser = Get-SelfTestUser -Paths $paths -HubUser ([string]$farm.hubUser)
+        if ($HubUser -ne [string]$farm.hubUser) {
+            Write-Note ('The test signs in as "' + $HubUser + '", the hub administrator: this computer is paired, so the password of "' + [string]$farm.hubUser + '" went to Blossom and is not stored on this computer.')
+        }
+    }
     Write-Step ('Self-test of ' + $farm.hubHost + ', ' + $farm.providerHost + ', ' + $farm.restartHost)
     $password = ConvertFrom-SecureStringPlain -Secure (Read-Host -Prompt ('Password of the hub user "' + $HubUser + '" (hidden)') -AsSecureString)
     $secret = (Get-Content -LiteralPath $paths.RestartSecret -Raw).Trim()

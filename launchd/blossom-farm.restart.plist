@@ -12,7 +12,7 @@
         <string>/bin/bash</string>
         <string>@FARM_ROOT@/services/farm-run.sh</string>
         <string>--log</string>
-        <string>@FARM_ROOT@/logs/restart-server.log</string>
+        <string>@FARM_ROOT@/logs-root/restart-server.log</string>
         <string>--</string>
         <string>@FARM_ROOT@/bin/node/bin/node</string>
         <string>@FARM_ROOT@/services/restart-server.js</string>

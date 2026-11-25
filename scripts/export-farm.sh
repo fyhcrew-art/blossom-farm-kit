@@ -29,6 +29,7 @@ set -u
 KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib/farmkit.sh
 . "$KIT_ROOT/lib/farmkit.sh"
+SCRIPT_ARGS=("$@")
 
 OUT_FILE=''
 while [ $# -gt 0 ]; do
@@ -55,6 +56,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 
 assert_macos_root
+use_protected_kit_folder "scripts/export-farm.sh" ${SCRIPT_ARGS[@]+"${SCRIPT_ARGS[@]}"}
 get_farm_arch
 get_farm_paths /opt/farm
 read_farm_config

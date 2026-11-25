@@ -51,8 +51,7 @@ somewhere else or the customer passes `-ProviderExe` / `--provider-binary`.
      property lists against Apple's DTD;
    * macOS (`macos-15`, the job named "macOS scripts on macOS"): the same
      bash tests with the bash 3.2, awk and sed that macOS ships, `plutil
-     -lint` on the property lists, `pfctl -n` on the packet filter rule,
-     `newsyslog -n` on the log rotation file;
+     -lint` on the property lists, `pfctl -n` on the packet filter rule;
    * the Node tests on Windows, Linux and macOS;
    * on all three: the pairing client and the bootstrap files against
      `tests/fake-blossom.js`, a stand-in for Blossom's pairing API served
@@ -61,9 +60,8 @@ somewhere else or the customer passes `-ProviderExe` / `--provider-binary`.
      `tests/Bootstrap.Tests.ps1`). These prove the client against the
      contract, not against Blossom itself: the checklists below do that.
 
-   **The macOS job has never run before the first push that contains it.**
-   Read its log on that first run: it is the only place where the shell
-   scripts meet the real tools of macOS before a Mac does.
+   Read the log of the macOS job, not only its result: it is where the shell
+   scripts meet the tools of macOS before a Mac does.
 2. Run the *Build GADS-drag* workflow by hand (Actions → Build GADS-drag →
    Run workflow, "publish" off). It must end with "Reproduced the three
    pinned SHA-256 values". If it reports a different hash, do not publish:
@@ -135,68 +133,77 @@ What follows from that:
 
   Without `-AppOrigin`/`-PairingCode` (`--app-origin`/`--pairing-code`) the
   same command installs without pairing.
-* **What has run, and what has not.** The pairing client and the bootstrap
-  files were written against the contract and have run against the stand-in
-  only: under bash 5 and bash 3.2 and PowerShell 7 on Linux, and in CI under
-  Windows PowerShell 5.1 and on macOS. `install.sh` with a pairing code ran
-  to the end against stand-ins for the system tools of macOS; `install.ps1`
-  with a pairing code has not run at all, because it needs Windows services.
-  No Blossom deployment had the pairing API when this was written. The
-  pairing points of the two checklists below are therefore the first run
-  against a real Blossom, on a real PC and a real Mac: expect to correct
-  something, and correct the contract document with it.
+* The pairing tests run against a stand-in. The pairing points of the two
+  checklists below are run against a real Blossom deployment (staging)
+  before every kit release; when something differs there, correct the kit,
+  the stand-in and the contract document together.
 * The HTTP contract between the kit and Blossom is what `tests/fake-blossom.js`
   implements. When Blossom's side changes, change the stand-in first and let
   the tests of both systems say what the kit has to follow.
 
 ## Acceptance checklist for a kit release: Windows
 
-On a spare Windows PC (or a virtual machine), never the production farm:
+On a spare Windows PC (or a virtual machine), never the production farm. Do
+the points in this order.
 
-1. `install.ps1` to the end, with a new Cloudflare tunnel and three new host
+1. **The kit folder.** Unpack the kit inside `Downloads` and run
+   `install.ps1` there: it stops with "is not in a protected place" and
+   changes nothing. Move the folder to `C:\blossom-farm-kit` and run it
+   again: `icacls C:\blossom-farm-kit` and `icacls
+   C:\blossom-farm-kit\lib\FarmKit.psm1` then show Administrators and SYSTEM
+   with full control and Users with read only, and a standard user cannot
+   save a change to a file in it.
+2. `install.ps1` to the end, with a new Cloudflare tunnel and three new host
    names. Run it a second time: it must change nothing and ask only for the
    hub administrator password. During that second run `Get-Service
    GadsProvider, KeepAvailable` must stay *Running* the whole time; press
    Ctrl+C at the password prompt of a third run and check that all services
-   are still running afterwards.
-2. `scripts\status.ps1` reports no problem; `scripts\self-test.ps1` passes.
+   are still running afterwards. `install.ps1 -Nickname Logs` stops at step 2
+   with "a folder the kit itself uses".
+3. `scripts\status.ps1` reports no problem; `scripts\self-test.ps1` asks for
+   the password of `blossom` (the computer is not paired yet), passes, and
+   lists thirteen steps, among them "Hub refuses reports from outside". With
+   a wrong password it fails at Hub sign-in and names `-HubUser admin`.
    With a phone connected, `status.ps1` lists the provider's per-phone ports
    as "closed to other computers by the kit's firewall rule"; from a second
    computer on the same network, `Test-NetConnection <farm PC> -Port <one of
    those ports>` must fail, and the phone must still be live with picture in
    Blossom (the rule must not disturb the provider).
-3. "Test connection" in Blossom is green; the Services panel shows every
+4. "Test connection" in Blossom is green; the Services panel shows every
    program and "Restart Provider" works.
-4. One phone through `docs/phones.md`. In Blossom's Control page: picture,
+5. One phone through `docs/phones.md`. In Blossom's Control page: picture,
    tap, swipe, typing; with the AI assistant: `drag`, `source`, `open_url`.
-5. From another network, without signing in: `https://<provider host>/devices`
+6. From another network, without signing in: `https://<provider host>/devices`
    and `https://<restart host>/status` answer 401;
    `https://<hub host>/device/x/appium/status`, the same address with
-   `%61ppium`, and `https://<hub host>/admin/provider/Provider1/info` answer
-   403 (`curl --path-as-is`). With a valid hub token,
+   `%61ppium`, `https://<hub host>/admin/provider/Provider1/info` and
+   `https://<hub host>/provider-update` (GET and POST) answer 403 (`curl
+   --path-as-is`). With a valid hub token,
    `https://<provider host>/%64ebug/pprof/heap` answers 404, and any answer
    of the provider host carries the header `X-Source-Code`. After a Control
    session, `C:\farm\logs\provider.log` shows the `ios-webrtc` line
    without `token=`.
-6. Restart the PC and touch nothing, **without signing in to Windows**:
+7. Restart the PC and touch nothing, **without signing in to Windows**:
    everything comes back by itself, the phones included. (This is the check
    that Apple's USB support runs as a service; `docs/phones.md`, section 0.)
    In Blossom's Services panel, "Restart all" restarts the hub too:
    `C:\farm\logs\restart-server.log` shows `stop GadsHub -> 0` and no
-   "could NOT be stopped".
-7. `rotate-secrets.ps1 -All`; `update.ps1` and `update.ps1 -Rollback`;
+   "could NOT be stopped". By hand: `Stop-Service GadsHub` is refused by
+   PowerShell while its dependants run, `Restart-Service GadsHub -Force`
+   restarts the hub, `GadsProvider` and `KeepAvailable`, as the README says.
+8. `rotate-secrets.ps1 -All`; `update.ps1` and `update.ps1 -Rollback`;
    `export-farm.ps1`, then `import-farm.ps1` and `install.ps1` on a second
    machine; `uninstall.ps1 -RemoveData`.
-8. With `install.ps1 -WithAppium`: the provider starts, and an Appium session
+9. With `install.ps1 -WithAppium`: the provider starts, and an Appium session
    opens through the provider host name. In the registry,
    `HKLM:\SYSTEM\CurrentControlSet\Services\GadsProvider\Parameters`,
    `AppEnvironmentExtra` holds three separate entries (`APPIUM_HOME`,
    `NPM_CONFIG_PREFIX`, `PATH`), and the provider log does not show it
    installing the GADS Appium plugin by itself.
-9. As a standard (non-administrator) user create `C:\farm\bin` with a file in
-   it on a clean PC, then run `install.ps1` as Administrator: it must stop at
-   step 2 with "already exists and cannot be used".
-10. **Pairing** (against a staging Blossom, with the command written as in "A
+10. As a standard (non-administrator) user create `C:\farm\bin` with a file in
+    it on a clean PC, then run `install.ps1` as Administrator: it must stop at
+    step 2 with "already exists and cannot be used".
+11. **Pairing** (against a staging Blossom, with the command written as in "A
     kit release and Blossom CRM"):
     * on a clean PC the one command, pasted into an Administrator
       PowerShell, ends with "Blossom sees your farm"; the kit is in
@@ -214,11 +221,14 @@ On a spare Windows PC (or a virtual machine), never the production farm:
       the values for manual entry;
     * `rotate-secrets.ps1 -HubUser -RestartSecret` shows no value and Blossom
       keeps working (phone list, Services panel) without anybody typing;
+    * `scripts\self-test.ps1` now says that it signs in as "admin", asks for
+      the hub administrator's password, and passes;
     * `scripts\status.ps1` shows the pairing; after "Unpair computer" in
       Blossom it reports that Blossom no longer accepts this computer, and
       `rotate-secrets.ps1 -HubUser` then prints the new password;
     * `icacls C:\farm\config\pairing.json` shows Administrators and SYSTEM
-      only; nothing in `C:\farm\logs` contains `bft_`;
+      only, the file holds a `workspaceId`, and nothing in `C:\farm\logs`
+      contains `bft_`;
     * behind a proxy that opens https (or with the PC's clock set a year
       back) the installer says that the certificate could not be verified
       and sends nothing;
@@ -226,26 +236,52 @@ On a spare Windows PC (or a virtual machine), never the production farm:
       there still reaches Blossom (the pairing moved);
     * `uninstall.ps1 -RemoveData`, answer `y` to the unpair question: Blossom
       shows the computer as unpaired.
+12. **A command from another workspace** (a second workspace on the staging
+    Blossom, given the same name as the first). On the paired PC:
+    * a new command from the *first* workspace runs without a question;
+    * the command of the second workspace shows both workspaces and asks for
+      the word `replace`. Answer anything else: the installer stops with
+      "The pairing of this computer was not changed", the site in the first
+      workspace keeps working (phone list, `rotate-secrets.ps1 -HubUser`),
+      and the second workspace shows no computer waiting;
+    * the same command started without a keyboard (`powershell
+      -NonInteractive`, or through a scheduled task) stops the same way;
+    * a new command of the second workspace, with `replace` typed: the farm
+      moves, and the first workspace shows the computer as unpaired;
+      another one with `-ReplacePairing` appended moves it back without a
+      question.
+13. **What an admin confirms** (these are rules of Blossom; check them
+    against the staging deployment):
+    * with a computer waiting on the confirm card, run the installer again
+      with another `-HubHost`: the card changes, says that the computer sent
+      different addresses, and a Confirm pressed on the old card is refused;
+    * on a confirmed, working site, run the installer with another
+      `-HubHost`: the site stays *Connected* on its confirmed addresses, its
+      card offers "Review", and Decline leaves everything as it was;
+    * a second computer sends the hub address of a site that exists: Confirm
+      without ticking "This replaces your site" is refused; ticked, with a
+      failed check, it is refused; ticked, with a check that passed, the
+      site is replaced and the first computer shows as unpaired.
 
 ## Acceptance checklist for a kit release: macOS
 
-The macOS track was written and checked without a Mac: shellcheck, the test
-suite under bash 3.2.57, the property lists against Apple's DTD, and a run
-of every script against stand-ins for `launchctl`, `dscl`, `pfctl`, the hub
-and the downloads. **Everything below is what only a real Mac, and for most
-points a real iPhone, can confirm. Until a release has passed it, no
-statement about macOS in the README is proven.** Do it on a spare Mac with
-Apple Silicon and the macOS version named in `versions.json`
-(`macos.arm64.minimumMacOS`), and once on an Intel Mac if Intel is to stay
-supported. Write down every command that had to be changed.
+On a spare Mac with Apple Silicon and the macOS version named in
+`versions.json` (`macos.arm64.minimumMacOS`), and on an Intel Mac for point
+14. Most points need a real iPhone. Do the points in this order, and write
+down every command that had to be changed.
 
-*Before anything else, the CI job "macOS scripts on macOS" is green* (it
-proves bash 3.2, awk, sed, `plutil`, `pfctl -n`, `newsyslog -n`; nothing
-below).
+Before anything else, the CI job "macOS scripts on macOS" is green (it
+covers bash 3.2, awk, sed, `plutil` and `pfctl -n`; nothing below).
 
-1. **Installer, first run.** Homebrew installed as the normal user; then
-   `sudo bash install.sh` to the end with a new tunnel and three new host
-   names. Check on the way:
+1. **The kit folder and the installer, first run.** Homebrew installed as
+   the normal user. Unpack the kit to `~/blossom-farm-kit` and run `sudo
+   bash install.sh` there: it says that the kit is copied to
+   `/opt/blossom-farm-kit` and continues from there by itself; `ls -ld
+   /opt/blossom-farm-kit /opt/blossom-farm-kit/lib/farmkit.sh` shows `root`
+   and no write permission for group or others. Then to the end with a new
+   tunnel and three new host names. `sudo bash install.sh --nickname
+   Services` stops at step 2 with "a folder the kit itself uses". Check on
+   the way:
    * step 2: `dscl . -read /Users/_blossomfarm` shows the account (hidden,
      shell `/usr/bin/false`, home `/var/empty`, a number between 300 and
      499), and it does not appear in the login window or in System Settings →
@@ -255,20 +291,24 @@ below).
      `/opt/farm/bin/cloudflared --version` (no Gatekeeper dialog, no "killed");
      Homebrew ran as the normal user, not as root;
    * step 4: `/opt/farm/bin/GADS --help` and `/opt/farm/bin/GADS-drag --help`
-     run (the provider is cross-built on Linux without a C compiler: this is
-     the first time it runs on a Mac);
+     run (the provider is cross-built on Linux without a C compiler; a Mac
+     is where that is confirmed);
    * step 9: the Cloudflare sign-in opens a browser although the installer
      runs as root, or prints the address; afterwards
      `/opt/farm/config/cloudflared/cert.pem` exists and nothing is left in
      `/opt/farm/var/login`;
    * step 11: `sudo pfctl -a com.apple/blossom-farm -s rules` prints the rule
      and `sudo pfctl -s info` says "Status: Enabled"; `sudo launchctl print
-     system/blossom-farm.hub` says `state = running` (the restart service and
-     the scripts read exactly that line) and names `_blossomfarm` as its user;
+     system/blossom-farm.hub` says `state = running`, shows a line `pid =
+     <number>` (the restart service and the scripts read exactly these two
+     lines) and names `_blossomfarm` as its user; `ps -o command= -p
+     <number>` shows `/opt/farm/bin/GADS hub ...` and not `farm-run.sh`;
      `pmset -g` shows `sleep 0`.
 2. **Every service runs as the right account and can do its work.**
    `ps -axo user,command | grep /opt/farm`: only the restart service (node)
-   is root. `/opt/farm/logs` fills; `mongodb.log` shows MongoDB writing to
+   is root. `ls -ld /opt/farm/logs-root` is `drwx------ root`, it holds
+   `restart-server.log` and `firewall.log`, and nothing in `/opt/farm/logs`
+   belongs to root. `/opt/farm/logs` fills; `mongodb.log` shows MongoDB writing to
    `/opt/farm/data/mongodb`; `hub.log` shows the resource files unpacked into
    `/opt/farm/var/hub-files`; `keep-available.log` says "subscribed" and
    stays that way for an hour (one planned re-subscription every 15 minutes,
@@ -281,10 +321,16 @@ below).
 4. `sudo bash scripts/status.sh` reports no problem; `scripts/self-test.sh`
    passes; "Test connection" in Blossom is green; the Services panel shows
    every program; "Restart Provider" and "Restart all" work, and
-   `/opt/farm/logs/restart-server.log` shows `stop blossom-farm.hub -> 0` and
-   no "could NOT be stopped". (This is the first real use of the launchctl
-   controller: `bootout`, the wait until `print` fails, `bootstrap`,
-   `kickstart`.)
+   `/opt/farm/logs-root/restart-server.log` shows `stop blossom-farm.hub -> 0` and
+   no "could NOT be stopped" (the launchctl controller: `bootout`, the wait
+   until `print` fails, `bootstrap`, `kickstart`). Then **a service that
+   only waits is not "running"**: `sudo launchctl bootout
+   system/blossom-farm.mongodb` and restart the hub (`sudo launchctl
+   kickstart -k system/blossom-farm.hub`). `status.sh` must say that the hub
+   "waits for the service it needs", and the Services panel in Blossom must
+   show the hub as not running. `sudo launchctl bootstrap system
+   /Library/LaunchDaemons/blossom-farm.mongodb.plist`: within two minutes
+   everything reads running again.
 5. **One phone through `docs/phones.md`**, with the provider running as
    `_blossomfarm` and not as root: the phone asks "Trust This Computer?"
    once; WebDriverAgent is signed in the hub page (Apple Silicon: this needs
@@ -304,9 +350,9 @@ below).
    (WebRTC is UDP and must not be touched). Outgoing connections from the Mac
    still work (`curl https://example.org`). Then `sudo pfctl -F all` (remove
    every rule) and wait five minutes: the rule is back
-   (`/opt/farm/logs/firewall.log` says so).
-7. **From another network**, without signing in: the same checks as point 5
-   of the Windows list (401 on provider and restart, 403 on the three hub
+   (`/opt/farm/logs-root/firewall.log` says so).
+7. **From another network**, without signing in: the same checks as point 6
+   of the Windows list (401 on provider and restart, 403 on the four hub
    paths with `curl --path-as-is`, `X-Source-Code` on provider answers,
    `provider.log` without `token=`).
 8. **Restart, unattended.** With FileVault off: restart the Mac and touch
@@ -316,39 +362,67 @@ below).
    back: it starts by itself. With FileVault on: confirm that the farm stays
    off until the password is typed, as the README says. On a MacBook: confirm
    the "Allow accessories to connect" behaviour described in `docs/phones.md`.
-9. **Logs.** Let `provider.log` grow past 10 MB (or lower the size in
-   `/etc/newsyslog.d/blossom-farm.conf` for the test) and run `sudo newsyslog
-   -v`: the file is rotated and compressed, the provider was not restarted,
-   and new lines arrive in the new `provider.log` with owner `_blossomfarm`.
-10. `rotate-secrets.sh --all`; `update.sh` and `update.sh --rollback`;
+9. **Logs.** There is no `/etc/newsyslog.d/blossom-farm.conf`. Let
+   `provider.log` grow past 10 MB (to see it sooner, start a second wrapper
+   by hand as the service account: `sudo -u _blossomfarm /bin/bash
+   /opt/farm/services/farm-run.sh --log /opt/farm/logs/try.log --log-max-kb
+   64 --log-keep 2 -- /usr/bin/yes line` for a few seconds): the log is put
+   aside as `<log>.1.gz`, at most the number named is kept, the files
+   belong to `_blossomfarm`, the program was not restarted (same `pid`), and
+   new lines arrive in the new log.
+10. **Replacing the programs (Apple Silicon).** Note `ls -i /opt/farm/bin/GADS
+    /opt/farm/bin/GADS-drag`. Run `sudo bash scripts/update.sh` (the same
+    kit is enough: the script replaces both programs either way): both
+    numbers have changed, the script ends with "Updated and running", the
+    hub answers on port 10000, and neither `hub.log` nor `log show --last 5m
+    --predicate 'eventMessage CONTAINS "Code Signature Invalid"'` shows a
+    killed program. The same after `sudo bash scripts/update.sh --rollback`.
+    With the provider program downloaded **in a browser** from the `gads-…`
+    release: delete `/opt/farm/bin/GADS-drag`, run `sudo bash install.sh
+    --provider-binary ~/Downloads/GADS-drag-darwin-arm64`; `xattr
+    /opt/farm/bin/GADS-drag` lists no `com.apple.quarantine`, and the
+    provider starts.
+11. `rotate-secrets.sh --all`;
     `uninstall.sh` then `install.sh` again (the farm comes back);
     `uninstall.sh --remove-data` (afterwards: no `/opt/farm`, no
     `_blossomfarm` in `dscl . -list /Users`, no `blossom-farm.*` in
     `/Library/LaunchDaemons`, no rule in the pf anchor).
-11. **Moving a farm, all four ways**, each ending with a live phone and a
+12. **Moving a farm, all four ways**, each ending with a live phone and a
     green "Test connection" without touching Blossom: Mac → Mac, Windows →
     Mac, Mac → Windows, and (already in the Windows list) Windows → Windows.
     Note for each whether the phone asked "Trust This Computer?" again: the
     README says a phone that does not accept the provider's cached pairing
     asks once. For Windows → Mac, check that `import-farm.sh` unpacked an
     archive made by Windows PowerShell 5.1 (entry names with backslashes).
-12. With `install.sh --with-appium`: Appium is installed as `_blossomfarm`
+13. With `install.sh --with-appium`: Appium is installed as `_blossomfarm`
     under `/opt/farm/npm` and `/opt/farm/appium`, the provider starts, an
     Appium session opens through the provider host name, and the Appium port
     is inside the packet filter's range.
-13. **Intel Mac** (if Intel stays supported): points 1 to 5; signing in the
-    hub page fails as the README says and signing with zsign outside the hub
-    works; FFmpeg from Homebrew is found in `/usr/local/bin`.
-14. **Pairing** (against a staging Blossom, with the command written as in "A
-    kit release and Blossom CRM"): the same points as number 10 of the
-    Windows list, with these differences. The command is pasted into
+14. **Intel Mac**: points 1 to 5; signing in the hub page fails as the README
+    says and signing with zsign outside the hub works. FFmpeg both ways:
+    from Homebrew it is found in `/usr/local/bin`; without Homebrew's, a
+    static FFmpeg downloaded in a browser to `~/Downloads` and named once
+    with `--ffmpeg` is copied to `/opt/farm/bin/tools/ffmpeg` (`ls -l`:
+    `root _blossomfarm`, mode 750, a file and not a link; `xattr` lists no
+    `com.apple.quarantine`), the installer says "FFmpeg with the libx264
+    encoder", Control shows a picture, and a later `sudo bash install.sh`
+    without the option keeps that file and asks Homebrew for nothing.
+15. **Pairing** (against a staging Blossom, with the command written as in "A
+    kit release and Blossom CRM"): the same points as numbers 11, 12 and 13
+    of the Windows list, with these differences. The command is pasted into
     Terminal; `shasum -a 256 -c` prints "OK" before `sudo` asks for the
     password. The kit is in `/opt/blossom-farm-kit`, owned by root and not
     writable by anybody else (`ls -ld`). `/opt/farm/config/pairing.json` is
     `-rw------- root`. While the installer sends the farm, `ps axww | grep
     curl` in a second Terminal window shows no password, secret or token
     (they go to curl through its standard input). The curl of macOS refuses
-    a certificate it cannot verify: check it with the clock set back.
+    a certificate it cannot verify: check it with the clock set back. The
+    question about another workspace is asked in the Terminal window
+    although the installer was started through `sudo bash
+    blossom-bootstrap.sh`; "without a keyboard" is `sudo bash
+    /opt/blossom-farm-kit/install.sh --app-origin … --pairing-code … <
+    /dev/null` started through `ssh -T` or `launchctl asuser`, where there
+    is no terminal.
 
 ## A new patched provider (patch changed, or a newer GADS)
 

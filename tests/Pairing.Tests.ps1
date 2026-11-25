@@ -228,6 +228,13 @@ Describe 'Pairing against the stand-in for Blossom' {
         # The module locks its files with icacls; the tests work in a temporary folder.
         Mock -ModuleName FarmKit Protect-FarmPath { }
         Mock -ModuleName FarmKit Write-Host { }
+        # Nobody is at a keyboard in a test: what "the person" types is said
+        # through an environment variable (the mock runs inside the module).
+        $env:FARMKIT_TEST_WORD = '<nobody>'
+        Mock -ModuleName FarmKit Read-FarmTypedWord {
+            if ($env:FARMKIT_TEST_WORD -eq '<nobody>') { return $null }
+            return [string]$env:FARMKIT_TEST_WORD
+        }
         InModuleScope FarmKit { $script:BlossomRetryDelaySec = 0; $script:BlossomTries = 3 }
     }
 
@@ -240,6 +247,7 @@ Describe 'Pairing against the stand-in for Blossom' {
             } catch { Write-Warning 'The certificate of the run could not be removed from the trusted roots.' }
         }
         InModuleScope FarmKit { $script:BlossomRetryDelaySec = 2; $script:BlossomTries = 4 }
+        Remove-Item Env:\FARMKIT_TEST_WORD -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $script:Work -Recurse -Force -ErrorAction SilentlyContinue
     }
 
@@ -405,10 +413,10 @@ Describe 'Pairing against the stand-in for Blossom' {
         Should -Invoke -ModuleName FarmKit Write-Host -ParameterFilter { [string]$Object -match 'Confirmed in Blossom as "Milan"\. Blossom sees your farm: 3 phones\.' }
         Should -Invoke -ModuleName FarmKit Write-Host -Exactly -Times 0 -ParameterFilter { [string]$Object -match 'bft_' }
         $null = Invoke-Switch -Name 'set-check' -With @{ ok = $false; devices = 0; failed_step = 'signin'; detail = 'The hub refused the user name or password.' }
-        $null = Invoke-Switch -Name 'confirm' -With (Get-Mine -Paths $paths)
+        $null = Invoke-Switch -Name 'recheck' -With (Get-Mine -Paths $paths)
         Get-PairingCheckText -Status (Get-FarmPairingStatus -Paths $paths) | Should -Match 'could not use the farm yet \(step: signin\): The hub refused'
         $null = Invoke-Switch -Name 'set-check' -With @{ ok = $true; devices = 1 }
-        $null = Invoke-Switch -Name 'confirm' -With (Get-Mine -Paths $paths)
+        $null = Invoke-Switch -Name 'recheck' -With (Get-Mine -Paths $paths)
         Get-PairingCheckText -Status (Get-FarmPairingStatus -Paths $paths) | Should -BeExactly 'Blossom sees your farm: 1 phone.'
     }
 
@@ -437,7 +445,21 @@ Describe 'Pairing against the stand-in for Blossom' {
         $r = Send-TestSite -Paths $paths -HubPassword 'hub-password-3' -RestartSecret '' -HubHost 'farm-hub.other.io'
         $r.Ok | Should -BeTrue
         $r.NeedsConfirmation | Should -BeTrue
-        (Get-FakeState -Paths $paths).pairing.confirmed | Should -BeFalse
+        # until an admin has confirmed, Blossom goes on using the confirmed
+        # address: the token cannot take its site out of service
+        $held = (Get-FakeState -Paths $paths).pairing
+        $held.awaiting | Should -BeTrue
+        $held.confirmed | Should -BeTrue
+        $held.confirmedSite.hub_url | Should -BeExactly 'https://farm-hub.agency.io'
+        $null = Get-FarmPairingStatus -Paths $paths
+        $s = Get-FarmPairingStatus -Paths $paths
+        $s.State | Should -BeExactly 'awaiting_confirmation'
+        $s.NeedsConfirmation | Should -BeTrue
+        # declined new addresses leave the site and the pairing as they were
+        $null = Invoke-Switch -Name 'reject' -With (Get-Mine -Paths $paths)
+        $s = Get-FarmPairingStatus -Paths $paths
+        $s.Ok | Should -BeTrue
+        $s.State | Should -BeExactly 'active'
     }
 
     It 'tells Blossom the versions after an update' {
@@ -528,18 +550,102 @@ Describe 'Pairing against the stand-in for Blossom' {
         Test-Path -LiteralPath $paths.Pairing | Should -BeTrue
     }
 
-    It 'lets a new code replace an earlier pairing, and a failing code change nothing' {
+    It 'lets a new code of the same workspace replace an earlier pairing, and a failing code change nothing' {
         if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+        $env:FARMKIT_TEST_WORD = '<nobody>'
         $paths = Use-Farm 'farm9'
         (Register-FarmPairing -Paths $paths -Origin $script:Fake.Origin -Code (New-Code)).Ok | Should -BeTrue
-        $old = (Read-FarmPairing -Paths $paths).FarmToken
-        (Register-FarmPairing -Paths $paths -Origin $script:Fake.Origin -Code (New-Code @{ workspace = 'Agency Two' })).Ok | Should -BeTrue
+        $first = Read-FarmPairing -Paths $paths
+        $first.WorkspaceId | Should -Match '^[0-9a-f-]{36}$'
+        (Register-FarmPairing -Paths $paths -Origin $script:Fake.Origin -Code (New-Code)).Ok | Should -BeTrue
+        Should -Invoke -ModuleName FarmKit Read-FarmTypedWord -Exactly -Times 0
         $now = Read-FarmPairing -Paths $paths
-        $now.Workspace | Should -BeExactly 'Agency Two'
-        $now.FarmToken | Should -Not -BeExactly $old
-        (Invoke-Switch -Name 'state' -With @{ token = $old }).pairing.revoked | Should -BeExactly 'revoked'
+        $now.FarmToken | Should -Not -BeExactly $first.FarmToken
+        (Invoke-Switch -Name 'state' -With @{ token = $first.FarmToken }).pairing.revoked | Should -BeExactly 'revoked'
         (Register-FarmPairing -Paths $paths -Origin $script:Fake.Origin -Code 'ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ').Ok | Should -BeFalse
         (Read-FarmPairing -Paths $paths).FarmToken | Should -BeExactly $now.FarmToken
+    }
+
+    It 'compares workspaces by their identifier, never by their name' {
+        Test-SameWorkspace -OriginA 'https://a.example' -IdA 'id-1' -OriginB 'https://a.example' -IdB 'id-1' | Should -BeTrue
+        Test-SameWorkspace -OriginA 'https://a.example' -IdA 'id-1' -OriginB 'https://a.example' -IdB 'id-2' | Should -BeFalse
+        Test-SameWorkspace -OriginA 'https://a.example' -IdA 'id-1' -OriginB 'https://b.example' -IdB 'id-1' | Should -BeFalse
+        Test-SameWorkspace -OriginA 'https://a.example' -IdA '' -OriginB 'https://a.example' -IdB '' | Should -BeFalse
+        ConvertTo-WorkspaceId -Id '0B0E6C1E-AAAA-4BBB-8CCC-000000000001' | Should -BeExactly '0b0e6c1e-aaaa-4bbb-8ccc-000000000001'
+        ConvertTo-WorkspaceId -Id 'Agency "One"' | Should -BeExactly ''
+    }
+
+    It 'does not move the farm to another workspace without a yes at the keyboard' {
+        if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+        # a genuine Blossom, and a workspace that gave itself the same name
+        $other = @{ workspace = 'Test Agency'; workspaceId = '11111111-2222-4333-8444-555555555555' }
+        $env:FARMKIT_TEST_WORD = '<nobody>'
+        $paths = Use-Farm 'farm9'
+        $mine = Read-FarmPairing -Paths $paths
+        $r = Register-FarmPairing -Paths $paths -Origin $script:Fake.Origin -Code (New-Code -With $other)
+        $r.Ok | Should -BeFalse
+        $r.Kind | Should -BeExactly 'declined'
+        $r.Message | Should -Match 'stays paired with'
+        Should -Invoke -ModuleName FarmKit Read-FarmTypedWord -Exactly -Times 1
+        Should -Invoke -ModuleName FarmKit Write-Host -ParameterFilter { [string]$Object -match 'A workspace name proves nothing' }
+        $kept = Read-FarmPairing -Paths $paths
+        $kept.FarmToken | Should -BeExactly $mine.FarmToken
+        $kept.WorkspaceId | Should -BeExactly $mine.WorkspaceId
+        (Get-FarmPairingStatus -Paths $paths).Ok | Should -BeTrue
+        Test-Path -LiteralPath $paths.PairingNew | Should -BeFalse
+        # the claim made in the other workspace was given up again, and it never got an address or a secret
+        $latest = (Invoke-Switch -Name 'state').pairing
+        $latest.workspaceId | Should -BeExactly '11111111-2222-4333-8444-555555555555'
+        $latest.revoked | Should -BeExactly 'revoked'
+        $latest.site | Should -BeNullOrEmpty
+
+        # any answer but the word that is asked for is a no
+        $env:FARMKIT_TEST_WORD = 'yes'
+        (Register-FarmPairing -Paths $paths -Origin $script:Fake.Origin -Code (New-Code -With $other)).Kind | Should -BeExactly 'declined'
+        (Read-FarmPairing -Paths $paths).FarmToken | Should -BeExactly $mine.FarmToken
+    }
+
+    It 'moves the farm when the word is typed, or the switch is given' {
+        if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+        $other = @{ workspace = 'Test Agency'; workspaceId = '11111111-2222-4333-8444-555555555555' }
+        $paths = Use-Farm 'farm9'
+        $mine = Read-FarmPairing -Paths $paths
+        $env:FARMKIT_TEST_WORD = ' Replace '
+        (Register-FarmPairing -Paths $paths -Origin $script:Fake.Origin -Code (New-Code -With $other)).Ok | Should -BeTrue
+        $moved = Read-FarmPairing -Paths $paths
+        $moved.WorkspaceId | Should -BeExactly '11111111-2222-4333-8444-555555555555'
+        $moved.SiteSentAt | Should -BeNullOrEmpty
+        (Invoke-Switch -Name 'state' -With @{ token = $mine.FarmToken }).pairing.revoked | Should -BeExactly 'revoked'
+        # -ReplacePairing answers the question in advance, for a run without a keyboard
+        $env:FARMKIT_TEST_WORD = '<nobody>'
+        (Register-FarmPairing -Paths $paths -Origin $script:Fake.Origin -Code (New-Code) -ReplacePairing).Ok | Should -BeTrue
+        Should -Invoke -ModuleName FarmKit Read-FarmTypedWord -Exactly -Times 1
+        (Read-FarmPairing -Paths $paths).FarmToken | Should -Not -BeExactly $moved.FarmToken
+    }
+
+    It 'asks before anything is sent to another Blossom' {
+        if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+        $env:FARMKIT_TEST_WORD = '<nobody>'
+        $paths = Use-Farm 'farm9'
+        $mine = Read-FarmPairing -Paths $paths
+        $null = Invoke-Switch -Name 'reset-hits' -Fake $script:Stranger
+        $r = Register-FarmPairing -Paths $paths -Origin $script:Stranger.Origin -Code 'K7QM-2XVD-9HTR-4BWN-6CPA'
+        $r.Kind | Should -BeExactly 'declined'
+        Should -Invoke -ModuleName FarmKit Read-FarmTypedWord -Exactly -Times 1
+        @((Invoke-Switch -Name 'state' -Fake $script:Stranger).hits).Count | Should -Be 0
+        (Read-FarmPairing -Paths $paths).FarmToken | Should -BeExactly $mine.FarmToken
+        Test-Path -LiteralPath $paths.PairingNew | Should -BeFalse
+    }
+
+    It 'tests with the hub administrator once Blossom alone has the password of its user' {
+        if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+        $paths = Use-Farm 'farm10'
+        Get-SelfTestUser -Paths $paths -HubUser 'blossom' | Should -BeExactly 'blossom'
+        (Register-FarmPairing -Paths $paths -Origin $script:Fake.Origin -Code (New-Code)).Ok | Should -BeTrue
+        Get-SelfTestUser -Paths $paths -HubUser 'blossom' | Should -BeExactly 'blossom'
+        (Send-TestSite -Paths $paths -HubPassword 'hub-password-1' -RestartSecret 'restart-secret-1').Ok | Should -BeTrue
+        Get-SelfTestUser -Paths $paths -HubUser 'blossom' | Should -BeExactly 'admin'
+        (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\scripts\self-test.ps1') -Raw) | Should -Match 'Get-SelfTestUser'
     }
 }
 

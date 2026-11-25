@@ -329,11 +329,11 @@ matches "$out" 'Blossom sees your farm: 3 phones\.' 'with the sentence the insta
 matches "$out" 'Milan' 'and the name the site got in Blossom'
 not_matches "$out" 'bft_' 'the token is never printed'
 ctl set-check '{"ok":false,"devices":0,"failed_step":"signin","detail":"The hub refused the user name or password."}' > /dev/null
-ctl confirm "$(mine)" > /dev/null
+ctl recheck "$(mine)" > /dev/null
 pair_get_status
 matches "$(describe_pairing_check)" 'could not use the farm yet \(step: signin\): The hub refused' 'a failed check is described'
 ctl set-check '{"ok":true,"devices":1}' > /dev/null
-ctl confirm "$(mine)" > /dev/null; pair_get_status
+ctl recheck "$(mine)" > /dev/null; pair_get_status
 is "$(describe_pairing_check)" 'Blossom sees your farm: 1 phone.' 'one phone is not "1 phones"'
 
 # ---------------------------------------------------------------------------
@@ -358,7 +358,14 @@ is "$(fake pairing.site.hub_url)" 'https://farm-hub.agency.io' 'and nothing chan
 send_site 'hub-password-3' '' 'farm-hub.other.io'; code=$?
 is "$code" 0 'with its password the new address is accepted'
 is "$PAIR_NEEDS_CONFIRMATION" true 'but an admin has to confirm it again'
-is "$(fake pairing.confirmed)" false 'until then the site is not active'
+state=$(ctl state "$(mine)")
+is "$(json_get "$state" pairing.awaiting)" true 'the new address waits for it'
+is "$(json_get "$state" pairing.confirmed)$(json_get "$state" pairing.confirmedSite.hub_url)" 'truehttps://farm-hub.agency.io' 'and until then Blossom goes on using the confirmed one: the token cannot take the site out of service'
+pair_get_status; pair_get_status
+is "$PAIR_STATE$PAIR_NEEDS_CONFIRMATION" awaiting_confirmationtrue 'the status says that a confirmation is awaited'
+ctl reject "$(mine)" > /dev/null
+pair_get_status; code=$?
+is "$code$PAIR_STATE" 0active 'declined new addresses leave the site and the pairing as they were'
 
 describe 'the versions after an update'
 printf '{"kit":"9.9.10","gads":{"version":"v6.0.1"},"gadsDrag":{"version":"v6.0.1-drag.1"}}' > "$FARM_CONFIG/versions.json"
@@ -366,7 +373,7 @@ pair_send_computer; code=$?
 state=$(ctl state "$(mine)")
 is "$code$(json_get "$state" pairing.computer.kit_version)" '09.9.10' 'Blossom learns the new kit version'
 is "$(json_get "$state" pairing.computer.gads_version)" 'v6.0.1' 'and the GADS version'
-is "$(json_get "$state" pairing.site.hub_url)" 'https://farm-hub.other.io' 'the site itself is untouched'
+is "$(json_get "$state" pairing.site.hub_url)" 'https://farm-hub.agency.io' 'the site itself is untouched'
 
 # ---------------------------------------------------------------------------
 describe 'retries'
@@ -445,12 +452,15 @@ is "$code" 1 'when Blossom cannot be told, it says so'
 ok test -f "$FARM_PAIRING"
 FK_APP_TRIES=3
 
-describe 'a new code replaces an earlier pairing'
+describe 'a new code of the same workspace replaces an earlier pairing'
 use_farm farm9
+ASKED=0
+read_typed_word() { ASKED=$((ASKED + 1)); return 1; }   # nobody is at the keyboard
 pair_claim "$ORIGIN" "$(new_code)"; read_farm_pairing; OLD=$PAIR_TOKEN
-pair_claim "$ORIGIN" "$(new_code '{"workspace":"Agency Two"}')"; code=$?
+matches "$PAIR_WORKSPACE_ID" '^[0-9a-f-]{36}$' 'the identifier of the workspace is kept with the pairing'
+pair_claim "$ORIGIN" "$(new_code)"; code=$?
 read_farm_pairing
-is "$code$PAIR_WORKSPACE" '0Agency Two' 'the new code wins'
+is "$code$ASKED" 00 'the new code wins, and nothing is asked: it is the same workspace'
 ok test "$PAIR_TOKEN" != "$OLD"
 is "$(fake pairing.revoked "{\"token\":\"$OLD\"}")" revoked 'and the token of the earlier pairing was given up'
 pair_claim "$ORIGIN" 'ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ'; code=$?
@@ -458,6 +468,74 @@ KEPT=$PAIR_TOKEN
 read_farm_pairing
 is "$code$FARM_IS_PAIRED" 11 'a code that fails leaves the pairing as it was'
 is "$PAIR_TOKEN" "$KEPT" 'with its token'
+
+describe 'a command made in another workspace does not move the farm by itself'
+# A genuine Blossom, and a workspace that gave itself the same name: only its
+# identifier tells it from the one this computer is paired with.
+ok test_same_workspace https://a.example id-1 https://a.example id-1
+not_ok test_same_workspace https://a.example id-1 https://a.example id-2
+not_ok test_same_workspace https://a.example id-1 https://b.example id-1
+not_ok test_same_workspace https://a.example '' https://a.example ''
+is "$(clean_workspace_id '0B0E6C1E-AAAA-4BBB-8CCC-000000000001')" '0b0e6c1e-aaaa-4bbb-8ccc-000000000001' 'an identifier is kept in lower case'
+empty "$(clean_workspace_id 'Agency "One"')" 'a name is not an identifier'
+OTHER='{"workspace":"Test Agency","workspaceId":"11111111-2222-4333-8444-555555555555"}'
+read_farm_pairing; MINE=$PAIR_TOKEN; MINE_ID=$PAIR_WORKSPACE_ID
+ASKED=0
+pair_claim "$ORIGIN" "$(new_code "$OTHER")" > "$WORK/out" 2>&1; code=$?
+out=$(cat "$WORK/out")
+is "$code$APP_KIND$ASKED" 1declined1 'without somebody at the keyboard the answer is no'
+matches "$APP_MESSAGE" 'stays paired with' 'and the reason is said'
+matches "$out" 'already paired with Blossom' 'the question names what is about to happen'
+matches "$out" 'A workspace name proves nothing' 'and that the name is no proof'
+read_farm_pairing
+is "$PAIR_TOKEN$PAIR_WORKSPACE_ID" "$MINE$MINE_ID" 'the pairing is as it was'
+pair_get_status; code=$?
+is "$code" 0 'and Blossom still accepts it'
+not_ok test -e "$FARM_PAIRING_NEW"
+latest=$(ctl state)
+is "$(json_get "$latest" pairing.workspaceId)$(json_get "$latest" pairing.revoked)" '11111111-2222-4333-8444-555555555555revoked' 'the claim made in the other workspace was given up again'
+is "$(json_get "$latest" pairing.site)" null 'which never received an address or a secret'
+read_typed_word() { ASKED=$((ASKED + 1)); REPLY_WORD='yes'; return 0; }
+pair_claim "$ORIGIN" "$(new_code "$OTHER")" > /dev/null 2>&1; code=$?
+read_farm_pairing
+is "$code$APP_KIND$PAIR_TOKEN" "1declined$MINE" 'any answer but the word that is asked for is a no'
+read_typed_word() { REPLY_WORD=' Replace '; return 0; }
+pair_claim "$ORIGIN" "$(new_code "$OTHER")" > /dev/null 2>&1; code=$?
+read_farm_pairing
+is "$code$PAIR_WORKSPACE_ID" '011111111-2222-4333-8444-555555555555' 'the typed word moves the farm'
+is "$(fake pairing.revoked "{\"token\":\"$MINE\"}")" revoked 'and only then is the earlier token given up'
+empty "$PAIR_SITE_SENT_AT" 'the farm has not been sent to the new workspace yet'
+# the option says yes in advance, for a run without a keyboard
+read_typed_word() { ASKED=$((ASKED + 1)); return 1; }
+ASKED=0; MINE=$PAIR_TOKEN
+FK_REPLACE_PAIRING=1
+pair_claim "$ORIGIN" "$(new_code)" > /dev/null 2>&1; code=$?
+FK_REPLACE_PAIRING=0
+read_farm_pairing
+is "$code$ASKED" 00 '--replace-pairing answers the question in advance'
+ok test "$PAIR_TOKEN" != "$MINE"
+# another Blossom altogether: asked before anything is sent there
+MINE=$PAIR_TOKEN
+before=$(hits)
+pair_claim 'https://127.0.0.1:1' "$(normalize_pairing_code K7QM-2XVD-9HTR-4BWN-6CPA)" > "$WORK/out" 2>&1; code=$?
+read_farm_pairing
+is "$code$APP_KIND$ASKED$PAIR_TOKEN" "1declined1$MINE" 'a command that names another Blossom is not followed without a yes'
+matches "$(cat "$WORK/out")" 'https://127\.0\.0\.1:1' 'the other address is shown'
+not_ok test -e "$FARM_PAIRING_NEW"
+unset -f read_typed_word
+. "$KIT_ROOT/lib/farmkit.sh"
+protect_farm_path() { chmod 600 "$1" 2> /dev/null; return 0; }
+FK_APP_RETRY_DELAY=0; FK_APP_TRIES=3
+matches "$FK_PAIR_HELP" 'Only ever run a command you took from your own Blossom' 'the hint for a new command says whose command to run'
+
+describe 'self-test: whose password is asked for'
+use_farm farm10
+is "$(default_self_test_user blossom)" blossom 'a computer that is not paired tests with the user whose password was shown'
+pair_claim "$ORIGIN" "$(new_code)"
+is "$(default_self_test_user blossom)" blossom 'paired, but the farm was never sent: still that user'
+send_site 'hub-password-1' 'restart-secret-1' > /dev/null 2>&1
+is "$(default_self_test_user blossom)" admin 'once Blossom has the password, nobody else does: the test asks for the administrator'
+matches "$(cat "$KIT_ROOT/scripts/self-test.sh")" 'default_self_test_user' 'scripts/self-test.sh uses it'
 
 # ---------------------------------------------------------------------------
 describe 'the source'

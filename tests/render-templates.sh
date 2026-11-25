@@ -1,5 +1,5 @@
 #!/bin/bash
-# Fills in the launchd, packet filter and newsyslog templates with the values
+# Fills in the launchd and packet filter templates with the values
 # install.sh uses on a Mac and writes the results into a folder, so that they
 # can be checked with the tools of macOS:
 #
@@ -32,7 +32,6 @@ for name in mongodb hub provider gate keep-available restart cloudflared firewal
     fi
 done
 render_template "$KIT_ROOT/launchd/pf.rules.template" 'PORT_FIRST=49152' 'PORT_LAST=65535' > "$OUT/pf.rules" || failed=1
-render_template "$KIT_ROOT/launchd/newsyslog.conf.template" "FARM_ROOT=$FARM_ROOT" "SERVICE_USER=$FARM_SERVICE_USER" "SERVICE_GROUP=$FARM_SERVICE_GROUP" > "$OUT/newsyslog.conf" || failed=1
 get_cloudflared_config_text 00000000-0000-0000-0000-000000000000 "$FARM_TUNNEL_CREDENTIALS" farm-hub.yourdomain.com farm-provider.yourdomain.com farm-restart.yourdomain.com > "$OUT/config.yml" || failed=1
 ls -l "$OUT"
 exit "$failed"

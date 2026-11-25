@@ -34,8 +34,12 @@
 #   --provider-binary PATH   A GADS-drag program for this Mac that you already have, used instead of
 #                            downloading it. Only accepted when its SHA-256 is the one pinned in
 #                            versions.json.
-#   --ffmpeg PATH            The FFmpeg program to use, when it is not in /opt/homebrew/bin or
-#                            /usr/local/bin.
+#   --ffmpeg PATH            An FFmpeg program of your own (with the libx264 encoder), when there
+#                            is none from Homebrew. It is copied into /opt/farm/bin/tools and used
+#                            from there; later runs keep it.
+#   --replace-pairing        Needed, together with a pairing code, when this Mac is already paired
+#                            with another Blossom workspace and nobody is at the keyboard to say yes:
+#                            the farm leaves that workspace for the one of the new command.
 #   --skip-firewall-rules    Do not load the packet filter rule that keeps other computers on your
 #                            network away from the ports the provider opens for each phone. Only for
 #                            a Mac whose firewall is managed elsewhere (docs/security.md, section 1).
@@ -51,7 +55,10 @@ KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 HUB_HOST=''; PROVIDER_HOST=''; RESTART_HOST=''; NICKNAME=''; TUNNEL_NAME='blossom-farm'
 OVERWRITE_DNS=0; RESET_HUB_USER=0; WITH_APPIUM=0; PROVIDER_BINARY=''; FFMPEG_OPTION=''
-SKIP_FIREWALL=0; SKIP_POWER=0; SKIP_SELF_TEST=0
+SKIP_FIREWALL=0; SKIP_POWER=0; SKIP_SELF_TEST=0; REPLACE_PAIRING=0
+# The options as they were given, for the case that the kit moves itself to
+# its protected folder and starts again from there (step 1).
+ORIGINAL_ARGS=("$@")
 PAIRING_CODE=''; APP_ORIGIN=''; DOMAIN=''
 
 need_value() { [ $# -ge 2 ] || stop_farm "The option $1 needs a value." 'See the list of options at the top of install.sh.'; }
@@ -83,6 +90,7 @@ while [ $# -gt 0 ]; do
         --skip-firewall-rules) SKIP_FIREWALL=1 ;;
         --skip-power-settings) SKIP_POWER=1 ;;
         --skip-self-test) SKIP_SELF_TEST=1 ;;
+        --replace-pairing) REPLACE_PAIRING=1 ;;
         -h | --help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) stop_farm "Unknown option: $1" 'See the list of options at the top of install.sh, or run:   bash install.sh --help' ;;
     esac
@@ -176,7 +184,7 @@ show_final_values() {
     fi
     echo
     write_color "$FK_CYAN" '======================================================================'
-    write_color "$FK_CYAN" ' Enter these in Blossom CRM -> Phone Farm -> Farm setup -> Advanced'
+    write_color "$FK_CYAN" ' Enter these in Blossom CRM -> Phone Farm -> Farm setup (the address form)'
     write_color "$FK_CYAN" '======================================================================'
     echo "   Hub address ............ https://$HUB_HOST"
     echo "   Provider address ....... https://$PROVIDER_HOST"
@@ -197,9 +205,10 @@ show_final_values() {
         write_color "$FK_YELLOW" ' Nothing secret was changed in this run. Lost a value? scripts/rotate-secrets.sh'
         write_color "$FK_YELLOW" ' makes new ones.'
     fi
-    write_color "$FK_YELLOW" ' The way without copying: Blossom -> Phone Farm -> Farm setup -> Connect a'
-    write_color "$FK_YELLOW" ' computer shows one command for this computer; it is safe to run on a farm'
-    write_color "$FK_YELLOW" ' that is already installed.'
+    write_color "$FK_YELLOW" ' The form is behind "Connect a farm"; where Blossom offers "Connect a'
+    write_color "$FK_YELLOW" ' computer", it is behind "Advanced: enter the addresses yourself", and'
+    write_color "$FK_YELLOW" ' "Connect a computer" itself shows one command that does this without'
+    write_color "$FK_YELLOW" ' copying; it keeps a farm that is already installed.'
     echo
 }
 
@@ -294,8 +303,11 @@ find_brew() {
 }
 
 find_ffmpeg() {
+    # The FFmpeg to use: the one named with --ffmpeg; else the one an earlier
+    # run put into /opt/farm/bin/tools (a copy, or a link that still leads
+    # to a program); else Homebrew's.
     local c
-    for c in "$FFMPEG_OPTION" /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg; do
+    for c in "$FFMPEG_OPTION" "$FARM_TOOLS_DIR/ffmpeg" /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg; do
         if [ -n "$c" ] && [ -x "$c" ] && [ ! -d "$c" ]; then echo "$c"; return 0; fi
     done
     return 0
@@ -320,6 +332,9 @@ echo 'Safe to run again: it keeps what is already set up.'
 write_step '1/12  Checking this Mac'
 # ----------------------------------------------------------------------
 assert_macos_root
+# The kit runs with full rights now and at every later maintenance run: it
+# works from a folder only root can change (lib/farmkit.sh, "the kit folder").
+use_protected_kit_folder install.sh ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 get_farm_arch
 if [ -n "$PAIRING_CODE" ] || [ -n "$APP_ORIGIN" ]; then
     # A slip in the command is cheaper to find now than after the installation.
@@ -338,7 +353,7 @@ fi
 RUN_USER=${SUDO_USER:-}
 [ "$RUN_USER" = root ] && RUN_USER=''
 for needed in versions.json lib/json.awk services/restart-server.js services/provider-gate.js services/keep-available.sh \
-    services/farm-run.sh services/farm-firewall.sh launchd/newsyslog.conf.template launchd/pf.rules.template \
+    services/farm-run.sh services/farm-firewall.sh launchd/pf.rules.template \
     launchd/blossom-farm.mongodb.plist launchd/blossom-farm.hub.plist launchd/blossom-farm.provider.plist \
     launchd/blossom-farm.gate.plist launchd/blossom-farm.keep-available.plist launchd/blossom-farm.restart.plist \
     launchd/blossom-farm.cloudflared.plist launchd/blossom-farm.firewall.plist; do
@@ -363,7 +378,7 @@ if [ "$FREE_KB" -lt 10485760 ]; then
     stop_farm "Only $((FREE_KB / 1048576)) GB free on the startup disk." 'Free at least 10 GB (the programs, the database and the logs need room), then run the script again.'
 fi
 for name in $(get_farm_service_names); do
-    farm_service_running "$name" && WAS_RUNNING="$WAS_RUNNING$name "
+    farm_service_alive "$name" && WAS_RUNNING="$WAS_RUNNING$name "
 done
 write_ok "macOS $MACOS_VERSION, $FARM_ARCH, $((FREE_KB / 1048576)) GB free, running as root."
 if [ -z "$RUN_USER" ]; then
@@ -387,9 +402,6 @@ fi
 [ "$FARM_CFG_WITH_APPIUM" = true ] && WITH_APPIUM=1
 reason=$(test_provider_nickname "$NICKNAME")
 [ -n "$reason" ] && stop_farm "The provider nickname \"$NICKNAME\" cannot be used." "$reason"
-case $NICKNAME in bin | config | logs | services | downloads | data | var | npm | appium | export | previous | export-stage | import-stage)
-    stop_farm "The provider nickname \"$NICKNAME\" cannot be used." 'It is the name of a folder the kit itself uses. Choose another, for example Provider1.' ;;
-esac
 
 ensure_service_account
 ensure_farm_layout "$NICKNAME"
@@ -407,10 +419,15 @@ write_ok "$FARM_ROOT is ready: root owns it, the service account $FARM_SERVICE_U
 read_farm_pairing
 if [ -n "$PAIRING_CODE" ]; then
     write_note "Telling Blossom ($(normalize_app_origin "$APP_ORIGIN")) about this computer..."
+    FK_REPLACE_PAIRING=$REPLACE_PAIRING
     if pair_claim "$APP_ORIGIN" "$PAIRING_CODE"; then
         PAIRING=1
         read_farm_pairing
         write_ok "Blossom knows this computer now${PAIR_WORKSPACE:+ (workspace \"$PAIR_WORKSPACE\")}. The farm is sent to it when the installation has finished."
+    elif [ "$APP_KIND" = declined ]; then
+        # Not a failure to work around: the person at the keyboard (or nobody)
+        # did not agree to move the farm to another workspace.
+        stop_farm 'The pairing of this computer was not changed.' "$APP_MESSAGE Nothing about the farm, its passwords or its pairing was changed in this run. If you did not get this command from your own Blossom yourself, do not run it again."
     else
         write_warn "Pairing with Blossom did not work: $APP_MESSAGE"
         write_warn "The installation continues. At the end the values are shown for you to enter in Blossom by hand; or get a new command there and run it afterwards. $FK_PAIR_HELP"
@@ -459,6 +476,9 @@ fi
 
 # FFmpeg has no publisher's build for macOS; Homebrew is where it comes from.
 BREW=$(find_brew)
+if [ -n "$FFMPEG_OPTION" ] && { [ ! -f "$FFMPEG_OPTION" ] || [ ! -x "$FFMPEG_OPTION" ]; }; then
+    stop_farm "--ffmpeg: $FFMPEG_OPTION is not a program." 'Give the full path of the FFmpeg program itself (the file called ffmpeg), or leave --ffmpeg out to use the one from Homebrew.'
+fi
 FFMPEG=$(find_ffmpeg)
 if [ -z "$FFMPEG" ]; then
     if ! brew_install "$(kit_version macos.homebrew.ffmpeg)"; then
@@ -467,13 +487,27 @@ if [ -z "$FFMPEG" ]; then
     FFMPEG=$(find_ffmpeg)
     [ -n "$FFMPEG" ] || stop_farm 'Homebrew ran, but FFmpeg is still not in /opt/homebrew/bin or /usr/local/bin.' 'Read Homebrew'"'"'s own message above, run   brew install ffmpeg   yourself as your normal user, then run install.sh again.'
 fi
-# The provider finds FFmpeg through one link in a folder root owns, not
-# through the whole Homebrew folder.
-ln -sfn "$FFMPEG" "$FARM_TOOLS_DIR/ffmpeg" || stop_farm "Could not create $FARM_TOOLS_DIR/ffmpeg." 'Run install.sh again with sudo.'
-if as_service "$FARM_TOOLS_DIR/ffmpeg" -hide_banner -encoders 2> /dev/null | grep -q libx264; then
-    write_ok "FFmpeg with the libx264 encoder ($FFMPEG; the provider encodes the live video with it)."
+# The provider finds FFmpeg at one place in a folder root owns, not through
+# the whole Homebrew folder. Homebrew's FFmpeg is linked there (it needs its
+# libraries next to it, and "brew upgrade" keeps it current). A program named
+# with --ffmpeg is COPIED there: the farm's service account cannot open a
+# home folder, and a later run without the option must still find it.
+ffmpeg_place=$FARM_TOOLS_DIR/ffmpeg
+case $FFMPEG in
+    "$ffmpeg_place") ffmpeg_shown="$ffmpeg_place, from an earlier run" ;;
+    /opt/homebrew/bin/ffmpeg | /usr/local/bin/ffmpeg)
+        ln -sfn "$FFMPEG" "$ffmpeg_place" || stop_farm "Could not create $ffmpeg_place." 'Run install.sh again with sudo.'
+        ffmpeg_shown=$FFMPEG ;;
+    *)
+        install_one_file "$FFMPEG" "$ffmpeg_place"
+        ffmpeg_shown="$ffmpeg_place, a copy of $FFMPEG" ;;
+esac
+if ! as_service "$ffmpeg_place" -version > /dev/null 2>&1; then
+    write_warn "The farm's service account cannot run FFmpeg ($ffmpeg_shown). Without it the Control page shows no picture. If it is a program of your own: it must be built for this Mac's processor ($FARM_ARCH) and be one file that needs nothing next to it (a static build); name it again with   sudo bash install.sh --ffmpeg /path/to/ffmpeg   . If it is Homebrew's:   brew reinstall ffmpeg   as your normal user, then run install.sh again."
+elif as_service "$ffmpeg_place" -hide_banner -encoders 2> /dev/null | grep -q libx264; then
+    write_ok "FFmpeg with the libx264 encoder ($ffmpeg_shown; the provider encodes the live video with it)."
 else
-    write_warn "$FFMPEG did not list the libx264 encoder when asked. Without it the Control page shows no picture. Homebrew's FFmpeg includes it:   brew install ffmpeg"
+    write_warn "FFmpeg ($ffmpeg_shown) runs, but did not list the libx264 encoder when asked. Without it the Control page shows no picture. Homebrew's FFmpeg includes it:   brew install ffmpeg"
 fi
 
 if [ "$FARM_ARCH" = arm64 ]; then
@@ -1003,7 +1037,7 @@ else
     elif [ "$FW_AVAILABLE" = 0 ]; then
         write_warn 'The packet filter of macOS (pf) could not be asked. If another firewall product manages this Mac, block incoming TCP connections to this Mac there (docs/security.md, section 1).'
     else
-        write_warn "The packet filter rule could not be loaded. Other computers on your network may reach the ports the provider opens for each phone. Read /opt/farm/logs/firewall.log and docs/security.md, section 1; scripts/status.sh shows the state."
+        write_warn "The packet filter rule could not be loaded. Other computers on your network may reach the ports the provider opens for each phone. Read /opt/farm/logs-root/firewall.log and docs/security.md, section 1; scripts/status.sh shows the state."
     fi
 fi
 
@@ -1013,27 +1047,26 @@ render_service keep-available "$FARM_SERVICES/keep-available.sh" "$FARM_SERVICES
 render_service restart "$FARM_SERVICES/restart-server.js" "$FARM_NODE_EXE" "$FARM_RESTART_SECRET"
 render_service cloudflared "$FARM_CLOUDFLARED_EXE" "$FARM_CLOUDFLARED_YML" "$FARM_TUNNEL_CREDENTIALS"
 
-# Log rotation by the newsyslog of macOS.
-newsyslog_text=$(render_template "$KIT_ROOT/launchd/newsyslog.conf.template" "FARM_ROOT=$FARM_ROOT" "SERVICE_USER=$FARM_SERVICE_USER" "SERVICE_GROUP=$FARM_SERVICE_GROUP")
-if [ -n "$newsyslog_text" ] && { [ ! -f "$FARM_NEWSYSLOG_FILE" ] || [ "$(cat "$FARM_NEWSYSLOG_FILE")" != "$newsyslog_text" ]; }; then
-    mkdir -p "$(dirname "$FARM_NEWSYSLOG_FILE")"
-    if ! { printf '%s\n' "$newsyslog_text" > "$FARM_NEWSYSLOG_FILE" && chown 0:0 "$FARM_NEWSYSLOG_FILE" && chmod 644 "$FARM_NEWSYSLOG_FILE"; }; then
-        write_warn "Could not write $FARM_NEWSYSLOG_FILE: the logs in /opt/farm/logs will not be rotated."
-    fi
-fi
+# The logs are rotated by the wrapper that starts each service
+# (services/farm-run.sh), as the account of that service. A rotation file an
+# earlier kit wrote for macOS' own newsyslog is removed: newsyslog runs as
+# root, and root does not work in a folder the service account can write to.
+[ -f "$FARM_NEWSYSLOG_FILE" ] && rm -f "$FARM_NEWSYSLOG_FILE"
+# The logs of the two root services are in /opt/farm/logs-root now.
+rm -f "$FARM_LOGS"/restart-server.log "$FARM_LOGS"/restart-server.log.* "$FARM_LOGS"/firewall.log "$FARM_LOGS"/firewall.log.*
 
 # The tunnel is started last, and only now: the default password is gone,
 # the provider sits behind its gate, the restart service has its secret.
 started=''
 for name in $(get_farm_start_order); do
     if start_farm_service "$name" 40; then started="$started $name"
-    else write_warn "The service $(farm_label "$name") did not reach \"running\" within 40 seconds. See /opt/farm/logs."; fi
+    else write_warn "The program of the service $(farm_label "$name") did not start within 40 seconds. See /opt/farm/logs."; fi
 done
 if ! wait_tcp_port "$GATE_PORT" 20; then
     stop_farm "The provider gate does not listen on 127.0.0.1:$GATE_PORT." 'Read the end of /opt/farm/logs/provider-gate.log, then run install.sh again.'
 fi
 if ! wait_tcp_port "$RESTART_PORT" 20; then
-    stop_farm "The restart service does not listen on 127.0.0.1:$RESTART_PORT." 'Read the end of /opt/farm/logs/restart-server.log, then run install.sh again.'
+    stop_farm "The restart service does not listen on 127.0.0.1:$RESTART_PORT." 'Read the end of /opt/farm/logs-root/restart-server.log, then run install.sh again.'
 fi
 if ! wait_tcp_port "$PROVIDER_PORT" 30; then
     write_warn 'The GADS provider is not listening yet. Read /opt/farm/logs/provider.log; the self-test below will say more.'

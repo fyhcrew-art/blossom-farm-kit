@@ -24,6 +24,7 @@ set -u
 KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib/farmkit.sh
 . "$KIT_ROOT/lib/farmkit.sh"
+SCRIPT_ARGS=("$@")
 
 HUB_URL='http://127.0.0.1:10000'
 DO_RESTART=0; DO_HUB_USER=0; DO_KEEP=0; DO_ADMIN=0
@@ -65,6 +66,7 @@ hub_call() {
 }
 
 assert_macos_root
+use_protected_kit_folder "scripts/rotate-secrets.sh" ${SCRIPT_ARGS[@]+"${SCRIPT_ARGS[@]}"}
 if [ "$DO_RESTART$DO_HUB_USER$DO_KEEP$DO_ADMIN" = 0000 ]; then
     stop_farm 'Nothing was chosen.' 'Add --restart-secret, --hub-user, --keep-available, --admin-password or --all.'
 fi
@@ -136,7 +138,7 @@ if [ "$DO_RESTART" = 1 ]; then
     write_secret_file "$FARM_RESTART_SECRET" "$NEW_RESTART_SECRET" private
     launchctl kickstart -k "system/$(farm_label restart)" > /dev/null 2>&1
     sleep 2
-    if ! wait_tcp_port 19999 20; then write_warn 'The restart service did not come back. Read /opt/farm/logs/restart-server.log.'
+    if ! wait_tcp_port 19999 20; then write_warn 'The restart service did not come back. Read /opt/farm/logs-root/restart-server.log.'
     else write_ok 'Done, and the restart service was restarted with the new secret.'; fi
 fi
 

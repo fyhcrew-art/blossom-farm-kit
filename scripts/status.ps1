@@ -25,6 +25,7 @@ Import-Module (Join-Path $KitRoot 'lib\FarmKit.psm1') -Force -DisableNameCheckin
 
 try {
     Assert-Administrator
+    Protect-KitFolder -KitRoot $KitRoot
     $paths = Get-FarmPaths
     $farm = Read-FarmConfig -Paths $paths
     $problems = 0
@@ -43,7 +44,7 @@ try {
     Write-Step 'Pairing with Blossom CRM'
     $pairing = Read-FarmPairing -Paths $paths
     if (-not $pairing) {
-        Write-Note 'Not paired: Blossom has the values that were entered there by hand, if any. To pair, Blossom shows one command under Phone Farm -> Farm setup -> Connect a computer.'
+        Write-Note 'Not paired: Blossom has the values that were entered there by hand, if any. To pair: where Blossom offers "Connect a computer" under Phone Farm -> Farm setup, it shows one command for this computer.'
     } else {
         $state = Get-FarmPairingStatus -Paths $paths
         $where = $pairing.AppOrigin

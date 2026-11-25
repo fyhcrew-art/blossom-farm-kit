@@ -103,6 +103,110 @@ Describe 'Test-ProviderNickname' {
     ) {
         Test-ProviderNickname -Nickname $Nickname | Should -Not -BeNullOrEmpty
     }
+    # the nickname becomes a folder below the farm folder, on a disk that does
+    # not tell upper case from lower case
+    It 'refuses the kit''s own folder name <Nickname>' -ForEach @(
+        @{ Nickname = 'logs' }
+        @{ Nickname = 'Logs' }
+        @{ Nickname = 'CONFIG' }
+        @{ Nickname = 'Services' }
+        @{ Nickname = 'bin' }
+        @{ Nickname = 'export-stage' }
+    ) {
+        Test-ProviderNickname -Nickname $Nickname | Should -Match 'a folder the kit itself uses'
+    }
+    It 'accepts a name that only starts like one' { Test-ProviderNickname -Nickname 'Services2' | Should -BeNullOrEmpty }
+}
+
+Describe 'Test-KitFolderPlace (the kit''s scripts run as Administrator: nobody else may change them)' {
+    It 'accepts <Folder>' -ForEach @(
+        @{ Folder = 'C:\blossom-farm-kit' }
+        @{ Folder = 'C:\blossom-farm-kit\' }
+        @{ Folder = 'D:\kit' }
+    ) {
+        Test-KitFolderPlace -KitRoot $Folder | Should -BeNullOrEmpty
+    }
+    It 'refuses <Folder>' -ForEach @(
+        @{ Folder = 'C:\Users\ada\Downloads\blossom-farm-kit' }
+        @{ Folder = 'C:\Users\ada\blossom-farm-kit' }
+        @{ Folder = 'C:\' }
+        @{ Folder = '\\server\share\blossom-farm-kit' }
+        @{ Folder = '' }
+    ) {
+        Test-KitFolderPlace -KitRoot $Folder | Should -Match 'not directly on a drive'
+    }
+    It 'is asked by the installer and by every script before anything else' {
+        $root = Join-Path $PSScriptRoot '..'
+        foreach ($file in @('install.ps1') + @(Get-ChildItem -LiteralPath (Join-Path $root 'scripts') -Filter '*.ps1' | ForEach-Object { 'scripts\' + $_.Name })) {
+            $text = Get-Content -LiteralPath (Join-Path $root $file) -Raw
+            $text | Should -Match 'Assert-Administrator\s+Protect-KitFolder -KitRoot \$KitRoot' -Because $file
+        }
+    }
+}
+
+Describe 'Invoke-FarmSelfTest against stand-in answers' {
+    BeforeAll {
+        # The mocks run inside the module: what a test wants from them is said
+        # through an environment variable.
+        $env:FARMKIT_TEST_MODE = 'good'
+        Mock -ModuleName FarmKit Resolve-FarmHostName { return @('104.16.0.1') }
+        Mock -ModuleName FarmKit Invoke-FarmHttp {
+            $mode = $env:FARMKIT_TEST_MODE
+            $status = 200
+            $json = New-Object PSObject
+            if ($Url -like '*/authenticate') {
+                if ($mode -eq 'badlogin') { $status = 401 } else { $json = ('{"result":{"access_token":"tok"}}' | ConvertFrom-Json) }
+            } elseif ($Url -like '*/admin/devices') {
+                $json = ('{"result":{"devices":[{"udid":"U1"}]}}' | ConvertFrom-Json)
+            } elseif ($Url -like '*appium*' -or $Url -like '*/admin/provider/*/info') {
+                $status = 403
+            } elseif ($Url -like '*/provider-update') {
+                $status = 403
+                if ($mode -eq 'no-update-rule') { $status = 404 }
+            } elseif ($Url -like 'https://p.yourdomain.com/devices') {
+                $status = 401
+            }
+            return New-Object PSObject -Property @{ Status = $status; Text = '{}'; Json = $json; Error = $null; Challenge = $false; ErrorKind = $null; RetryAfter = $null }
+        }
+        function Invoke-TestSelfTest {
+            param([string]$HubUser = 'blossom')
+            return @(Invoke-FarmSelfTest -HubHost 'h.yourdomain.com' -ProviderHost 'p.yourdomain.com' -RestartHost 'r.yourdomain.com' -Nickname 'Provider1' -HubUser $HubUser -HubPassword 'pw' -RestartSecret 'secret')
+        }
+    }
+    AfterAll { Remove-Item Env:\FARMKIT_TEST_MODE -ErrorAction SilentlyContinue }
+
+    It 'checks all three paths the tunnel must refuse' {
+        $env:FARMKIT_TEST_MODE = 'good'
+        $steps = Invoke-TestSelfTest
+        foreach ($id in @('hub-appium', 'hub-provider-info', 'hub-provider-update')) {
+            ($steps | Where-Object { $_.Id -eq $id }).State | Should -BeExactly 'ok' -Because $id
+        }
+        Should -Invoke -ModuleName FarmKit Invoke-FarmHttp -ParameterFilter { $Url -eq 'https://h.yourdomain.com/provider-update' -and (-not $Headers -or -not $Headers.ContainsKey('Authorization')) }
+    }
+    It 'fails when only the /provider-update rule is missing from the tunnel' {
+        $env:FARMKIT_TEST_MODE = 'no-update-rule'
+        $steps = Invoke-TestSelfTest
+        $step = $steps | Where-Object { $_.Id -eq 'hub-provider-update' }
+        $step.State | Should -BeExactly 'fail'
+        $step.Detail | Should -Match '/provider-update is not refused by the tunnel \(HTTP 404\)'
+        ($steps | Where-Object { $_.Id -eq 'hub-appium' }).State | Should -BeExactly 'ok'
+    }
+    It 'tells a refused login of Blossom''s user from a refused administrator password' {
+        $env:FARMKIT_TEST_MODE = 'badlogin'
+        $step = (Invoke-TestSelfTest -HubUser 'blossom') | Where-Object { $_.Id -eq 'signin' }
+        $step.State | Should -BeExactly 'fail'
+        $step.Detail | Should -Match 'the user "blossom"'
+        $step.Fix | Should -Match 'self-test\.ps1 -HubUser admin'
+        $step = (Invoke-TestSelfTest -HubUser 'admin') | Where-Object { $_.Id -eq 'signin' }
+        $step.Detail | Should -Match 'its administrator'
+        $step.Fix | Should -Not -Match 'rotate-secrets'
+    }
+    It 'has a title for every step' {
+        $env:FARMKIT_TEST_MODE = 'good'
+        Mock -ModuleName FarmKit Write-Host { }
+        $null = Write-SelfTestReport -Steps (Invoke-TestSelfTest)
+        Should -Invoke -ModuleName FarmKit Write-Host -ParameterFilter { [string]$Object -match 'Hub refuses reports from outside: ' }
+    }
 }
 
 Describe 'Test-PublicIpAddress' {

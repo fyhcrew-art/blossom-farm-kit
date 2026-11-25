@@ -24,6 +24,7 @@ set -u
 KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib/farmkit.sh
 . "$KIT_ROOT/lib/farmkit.sh"
+SCRIPT_ARGS=("$@")
 
 ARCHIVE=''; FORCE=0
 while [ $# -gt 0 ]; do
@@ -44,6 +45,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 
 assert_macos_root
+use_protected_kit_folder "scripts/import-farm.sh" ${SCRIPT_ARGS[@]+"${SCRIPT_ARGS[@]}"}
 get_farm_arch
 [ -n "$ARCHIVE" ] || stop_farm 'No archive was named.' 'Run:   sudo bash scripts/import-farm.sh --archive <path of the .zip file written by export-farm>'
 [ -f "$ARCHIVE" ] || stop_farm "Archive not found: $ARCHIVE" 'Give the full path of the .zip file written by export-farm.'

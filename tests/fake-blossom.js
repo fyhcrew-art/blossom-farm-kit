@@ -8,6 +8,15 @@
 //   GET    /api/farm/pair/status   (farm token)
 //   DELETE /api/farm/pair/token    (farm token) the computer unpairs itself
 //
+// It also holds to the rules of the admin's side that decide what a farm
+// token can bring about (the contract, sections 3.3 and 5):
+//   * a confirmed site stays in use, on its confirmed addresses, while new
+//     addresses sent by its computer wait for an admin;
+//   * a confirmation names the revision of the description the admin read,
+//     and is refused when the computer sent another one in the meantime;
+//   * a site that exists is only replaced when the admin names it, and only
+//     by a computer whose check passed (it proved it has the hub's login).
+//
 // The API is served over https only, with a certificate made for this run
 // (the openssl program is needed for that). A second, plain http port carries
 // the switches the tests use (/__test/...): making a code, confirming a
@@ -100,10 +109,20 @@ function addressProblem(raw, kind) {
 
 const hostOf = raw => { try { return new URL(raw).host.toLowerCase() } catch (_) { return '' } }
 
+/** True when two descriptions name the same three hosts. */
+const sameHosts = (a, b) => !!a && !!b && hostOf(a.hub_url) === hostOf(b.hub_url) && hostOf(a.provider_url) === hostOf(b.provider_url) && hostOf(a.restart_url || '') === hostOf(b.restart_url || '')
+
+/** A workspace has an identifier nobody chooses; two workspaces may carry the same name. */
+const workspaceIdOf = name => { const h = sha256('workspace ' + name); return [h.slice(0, 8), h.slice(8, 12), h.slice(12, 16), h.slice(16, 20), h.slice(20, 32)].join('-') }
+
+/** What a confirmation must name: changes with every description the computer sends. */
+const revisionOf = p => (p.pending ? sha256(p.id + ' ' + p.revision + ' ' + JSON.stringify(p.pending)).slice(0, 32) : null)
+
 function createState() {
   return {
-    codes: new Map(),      // sha256(code) -> { id, workspace, expiresAt, tokenHash, cancelled }
+    codes: new Map(),      // sha256(code) -> { id, workspace, workspaceId, expiresAt, tokenHash, cancelled }
     pairings: new Map(),   // sha256(token) -> pairing
+    sites: [],             // the sites of the workspaces: { id, workspaceId, label, hubUrl }
     hits: [],              // every API call that arrived: { secure, method, path, bearer, body }
     plainApiHits: 0,       // API calls that arrived on the plain http port (must stay 0)
     redirectHits: 0,       // calls that arrived at the place a redirect points to (must stay 0)
@@ -122,17 +141,24 @@ function publicStatus(p, state) {
   if ((s === 'installing' || s === 'checking' || s === 'awaiting_confirmation') && !p.siteId && now > p.expiresAt) s = 'expired'
   if (s === 'checking' && state.autoCheck) {
     // the first read after a site arrived still says "checking"; the next one has the result
-    if (p.checkReads > 0) { p.state = p.confirmed ? 'active' : 'awaiting_confirmation'; s = p.state; p.check = Object.assign({ checked_at: new Date().toISOString() }, state.check) }
+    if (p.checkReads > 0) { finishCheck(p, state); s = p.state }
     p.checkReads++
   }
   return {
     state: s,
     needs_confirmation: s === 'awaiting_confirmation',
     workspace_name: p.workspace,
+    workspace_id: p.workspaceId,
     site_label: p.siteLabel || null,
     check: (s === 'awaiting_confirmation' || s === 'active') ? (p.check || null) : null,
     poll_after_seconds: state.pollAfter || 1
   }
+}
+
+/** The check of what the computer sent ends: with something waiting for an admin, or back on the confirmed site. */
+function finishCheck(p, state) {
+  p.state = p.pending ? 'awaiting_confirmation' : 'active'
+  p.check = Object.assign({ checked_at: new Date().toISOString() }, state.check)
 }
 
 function handleApi(state, req, res, body, secure) {
@@ -181,18 +207,20 @@ function handleApi(state, req, res, body, secure) {
       // a repeat of the claim that succeeded (the answer was lost on the way) is answered again; anybody else is refused
       if (entry.tokenHash !== tokenHash) return refuse(409, 'pairing_code_used', 'This pairing code was already used.')
       const again = state.pairings.get(tokenHash)
-      return send(200, { pairing_id: again.id, state: publicStatus(again, state).state, workspace_name: again.workspace, expires_at: new Date(again.expiresAt).toISOString(), poll_after_seconds: 1 })
+      return send(200, { pairing_id: again.id, state: publicStatus(again, state).state, workspace_name: again.workspace, workspace_id: again.workspaceId, expires_at: new Date(again.expiresAt).toISOString(), poll_after_seconds: 1 })
     }
     if (Date.now() > entry.expiresAt) return refuse(410, 'pairing_code_expired', 'This pairing code has expired.')
     if (state.pairings.has(tokenHash)) return fail(409, 'farm_token_in_use', 'This farm token is already registered.')
     entry.tokenHash = tokenHash
     const pairing = {
-      id: crypto.randomUUID(), workspace: entry.workspace, state: 'installing', expiresAt: Date.now() + UNCONFIRMED_TTL_MS,
+      id: crypto.randomUUID(), workspace: entry.workspace, workspaceId: entry.workspaceId, state: 'installing', expiresAt: Date.now() + UNCONFIRMED_TTL_MS,
       computer: { label: c.label, platform: c.platform, os_version: String(c.os_version || ''), kit_version: String(c.kit_version || '') },
-      site: null, secrets: null, pending: null, siteId: null, siteLabel: null, confirmed: false, check: null, checkReads: 0, revoked: null, reports: 0
+      // pending: what the computer sent and no admin has confirmed; confirmedSite: what Blossom uses
+      pending: null, pendingSecrets: null, revision: 0, confirmedSite: null, confirmedSecrets: null,
+      siteId: null, siteLabel: null, check: null, checkReads: 0, revoked: null, revokedReason: null, reports: 0
     }
     state.pairings.set(tokenHash, pairing)
-    return send(200, { pairing_id: pairing.id, state: 'installing', workspace_name: pairing.workspace, expires_at: new Date(pairing.expiresAt).toISOString(), poll_after_seconds: 1 })
+    return send(200, { pairing_id: pairing.id, state: 'installing', workspace_name: pairing.workspace, workspace_id: pairing.workspaceId, expires_at: new Date(pairing.expiresAt).toISOString(), poll_after_seconds: 1 })
   }
 
   // ---- everything else needs the farm token
@@ -209,7 +237,7 @@ function handleApi(state, req, res, body, secure) {
 
   if (url.pathname === '/api/farm/pair/token') {
     if (req.method !== 'DELETE') return fail(405, 'method_not_allowed', 'Use DELETE.')
-    p.revoked = 'revoked'
+    p.revoked = 'revoked'; p.revokedReason = 'computer'
     p.unpairedByComputer = true
     return send(200, { unpaired: true })
   }
@@ -245,30 +273,50 @@ function handleApi(state, req, res, body, secure) {
     for (const k of ['hub_password', 'restart_secret']) {
       if (s[k] !== undefined && (typeof s[k] !== 'string' || s[k].length > 500)) return fail(400, 'bad_request', 'A secret is not text.', { field: 'site.' + k })
     }
-    const before = p.site
-    const secrets = Object.assign({}, p.secrets || {})
-    const hubMoved = !before || hostOf(before.hub_url) !== hostOf(s.hub_url) || hostOf(before.provider_url) !== hostOf(s.provider_url) || before.hub_user !== s.hub_user
-    const restartMoved = !before || hostOf(before.restart_url || '') !== hostOf(s.restart_url || '')
-    if (s.hub_password) secrets.hub_password = s.hub_password
-    else if (hubMoved || !secrets.hub_password) return fail(422, 'credentials_required', 'Send the hub password: Blossom has none for this hub address and user.', { field: 'site.hub_password' })
-    if (!s.restart_url) delete secrets.restart_secret
-    else if (s.restart_secret) secrets.restart_secret = s.restart_secret
-    else if (restartMoved || !secrets.restart_secret) return fail(422, 'credentials_required', 'Send the restart secret: Blossom has none for this restart service address.', { field: 'site.restart_secret' })
     const next = { hub_url: s.hub_url, provider_url: s.provider_url, provider_nickname: s.provider_nickname, hub_user: s.hub_user, restart_url: s.restart_url || '' }
-    const addressesMoved = !before || hostOf(before.hub_url) !== hostOf(next.hub_url) || hostOf(before.provider_url) !== hostOf(next.provider_url) || hostOf(before.restart_url) !== hostOf(next.restart_url)
-    siteChanged = JSON.stringify(before) !== JSON.stringify(next) || JSON.stringify(p.secrets) !== JSON.stringify(secrets)
-    p.site = next
-    p.secrets = secrets
-    if (addressesMoved) {
-      // new addresses are never used before an admin has seen them
-      p.confirmed = false
+    // Which stored description this one continues: the confirmed site when
+    // the three hosts are its hosts, otherwise the one that waits for an admin.
+    const onConfirmed = sameHosts(p.confirmedSite, next)
+    const before = onConfirmed ? p.confirmedSite : p.pending
+    const stored = onConfirmed ? p.confirmedSecrets : p.pendingSecrets
+    // A stored secret is only reused for the hosts and the user it was stored
+    // for. It is looked for in what waits for an admin first, then in what
+    // is confirmed: new hub addresses with the restart address that was
+    // confirmed keep the confirmed restart secret.
+    const held = [[p.pending, p.pendingSecrets], [p.confirmedSite, p.confirmedSecrets]].filter(x => x[0] && x[1])
+    const sameHub = x => hostOf(x[0].hub_url) === hostOf(s.hub_url) && hostOf(x[0].provider_url) === hostOf(s.provider_url) && x[0].hub_user === s.hub_user && x[1].hub_password
+    const sameRestart = x => hostOf(x[0].restart_url || '') === hostOf(s.restart_url || '') && x[1].restart_secret
+    const secrets = {}
+    const hubSource = held.find(sameHub)
+    const restartSource = held.find(sameRestart)
+    if (s.hub_password) secrets.hub_password = s.hub_password
+    else if (hubSource) secrets.hub_password = hubSource[1].hub_password
+    else return fail(422, 'credentials_required', 'Send the hub password: Blossom has none for this hub address and user.', { field: 'site.hub_password' })
+    if (s.restart_url) {
+      if (s.restart_secret) secrets.restart_secret = s.restart_secret
+      else if (restartSource) secrets.restart_secret = restartSource[1].restart_secret
+      else return fail(422, 'credentials_required', 'Send the restart secret: Blossom has none for this restart service address.', { field: 'site.restart_secret' })
+    }
+    const differs = JSON.stringify(before) !== JSON.stringify(next) || JSON.stringify(stored) !== JSON.stringify(secrets)
+    if (onConfirmed) {
+      // The confirmed addresses: applied at once, no new confirmation. A
+      // description for other addresses that was still waiting is dropped:
+      // the computer is back where the admin confirmed it.
+      siteChanged = differs || !!p.pending
+      p.confirmedSite = next; p.confirmedSecrets = secrets
+      p.pending = null; p.pendingSecrets = null
+      if (siteChanged) { p.state = 'checking'; p.checkReads = 0 }
+    } else if (differs) {
+      // Other addresses (or the first description): they wait for an admin.
+      // What is confirmed is NOT touched: the site stays enabled, on its
+      // confirmed addresses and with its confirmed credentials, meanwhile.
+      siteChanged = true
+      p.pending = next; p.pendingSecrets = secrets; p.revision++
       p.state = 'checking'; p.checkReads = 0; p.check = null
-    } else if (siteChanged && p.confirmed) {
-      p.state = 'checking'; p.checkReads = 0
     }
   }
   const out = publicStatus(Object.assign({}, p, { checkReads: 0 }), Object.assign({}, state, { autoCheck: false }))
-  return send(200, { state: out.state, needs_confirmation: !p.confirmed, site_changed: siteChanged, poll_after_seconds: state.pollAfter || 1 })
+  return send(200, { state: out.state, needs_confirmation: !!p.pending, site_changed: siteChanged, poll_after_seconds: state.pollAfter || 1 })
 }
 
 function handleTest(state, req, res, body) {
@@ -282,7 +330,8 @@ function handleTest(state, req, res, body) {
     case '/__test/new-code': {
       const code = newCode()
       const ttl = typeof json.ttlSeconds === 'number' ? json.ttlSeconds * 1000 : CODE_TTL_MS
-      state.codes.set(sha256(code), { id: crypto.randomUUID(), workspace: json.workspace || 'Test Agency', expiresAt: Date.now() + ttl, tokenHash: null, cancelled: false })
+      const workspace = json.workspace || 'Test Agency'
+      state.codes.set(sha256(code), { id: crypto.randomUUID(), workspace, workspaceId: json.workspaceId || workspaceIdOf(workspace), expiresAt: Date.now() + ttl, tokenHash: null, cancelled: false })
       return send(200, { code: formatCode(code) })
     }
     case '/__test/cancel-code': {
@@ -290,15 +339,75 @@ function handleTest(state, req, res, body) {
       if (entry) entry.cancelled = true
       return send(200, { ok: !!entry })
     }
-    case '/__test/confirm': {
+    case '/__test/add-site': {
+      // a site of the workspace that exists already (entered by hand, or paired earlier)
+      const workspace = json.workspace || 'Test Agency'
+      const site = { id: crypto.randomUUID(), workspaceId: json.workspaceId || workspaceIdOf(workspace), label: json.label || 'Site', hubUrl: json.hubUrl }
+      state.sites.push(site)
+      return send(200, { ok: true, site_id: site.id })
+    }
+    case '/__test/pending': {
+      // what the admin's page reads before it shows the confirm card (contract, section 5)
       const p = pick()
-      if (!p || !p.site) return send(409, { error: 'no site to confirm' })
-      p.confirmed = true; p.siteId = p.siteId || crypto.randomUUID(); p.siteLabel = json.label || p.computer.label
+      if (!p) return send(404, { error: 'no pairing' })
+      if (p.state === 'checking') finishCheck(p, state)
+      const same = p.pending ? state.sites.find(x => x.workspaceId === p.workspaceId && x.id !== p.siteId && hostOf(x.hubUrl) === hostOf(p.pending.hub_url)) : null
+      return send(200, { state: p.state, pendingRevision: revisionOf(p), pending: p.pending, current: p.confirmedSite, computer: p.computer, check: p.check, replaces: same ? { id: same.id, label: same.label } : null })
+    }
+    case '/__test/confirm': {
+      // The admin presses Confirm: { label, replaceSiteId?, revision }. A test
+      // that sends no revision confirms what is there now, as an admin does
+      // who has just loaded the page.
+      const p = pick()
+      if (!p || !p.pending) return send(409, { error: 'no site to confirm', code: 'nothing_pending' })
+      if (p.state === 'checking') finishCheck(p, state)
+      if (p.state !== 'awaiting_confirmation') return send(409, { error: 'the pairing does not wait for a confirmation', code: 'not_awaiting_confirmation' })
+      if (json.revision !== undefined && json.revision !== revisionOf(p)) {
+        return send(409, { error: 'The computer sent different addresses. Read them again.', code: 'pending_changed' })
+      }
+      let target = p.siteId ? state.sites.find(x => x.id === p.siteId) : null
+      if (!p.siteId && json.replaceSiteId) {
+        target = state.sites.find(x => x.id === json.replaceSiteId && x.workspaceId === p.workspaceId)
+        if (!target) return send(404, { error: 'no such site', code: 'site_unknown' })
+      }
+      if (!target && state.sites.some(x => x.workspaceId === p.workspaceId && hostOf(x.hubUrl) === hostOf(p.pending.hub_url))) {
+        // the server never picks the site to replace by itself
+        return send(409, { error: 'A site of yours already uses this hub address. Tick "This replaces your site", or decline.', code: 'hub_address_in_use' })
+      }
+      if (target && !(p.check && p.check.ok)) {
+        // a site that exists is only changed by a computer that proved it has the hub's login
+        return send(409, { error: 'The check of these addresses did not pass. A site that exists is only changed when it does.', code: 'check_required' })
+      }
+      if (target) {
+        for (const other of state.pairings.values()) {
+          if (other !== p && other.siteId === target.id && !other.revoked) { other.revoked = 'revoked'; other.revokedReason = 'replaced' }
+        }
+        target.hubUrl = p.pending.hub_url
+        if (json.label) target.label = json.label
+      } else {
+        target = { id: crypto.randomUUID(), workspaceId: p.workspaceId, label: json.label || p.computer.label, hubUrl: p.pending.hub_url }
+        state.sites.push(target)
+      }
+      p.siteId = target.id; p.siteLabel = json.label || target.label
+      p.confirmedSite = p.pending; p.confirmedSecrets = p.pendingSecrets
+      p.pending = null; p.pendingSecrets = null
       p.state = 'active'; p.check = Object.assign({ checked_at: new Date().toISOString() }, state.check)
       return send(200, { ok: true, site_id: p.siteId })
     }
-    case '/__test/reject': { const p = pick(); if (p) { p.state = 'rejected' } return send(200, { ok: !!p }) }
-    case '/__test/revoke': { const p = pick(); if (p) { p.revoked = 'revoked' } return send(200, { ok: !!p }) }
+    case '/__test/reject': {
+      // The admin declines. A computer that was never confirmed is refused
+      // for good; for a confirmed site only the new addresses are dropped.
+      const p = pick()
+      if (p) { p.pending = null; p.pendingSecrets = null; p.state = p.confirmedSite ? 'active' : 'rejected' }
+      return send(200, { ok: !!p })
+    }
+    case '/__test/recheck': {
+      // Blossom checks a confirmed site again (as "Test connection" does)
+      const p = pick()
+      if (p && p.confirmedSite && !p.pending) p.check = Object.assign({ checked_at: new Date().toISOString() }, state.check)
+      return send(200, { ok: !!p })
+    }
+    case '/__test/revoke': { const p = pick(); if (p) { p.revoked = 'revoked'; p.revokedReason = 'admin' } return send(200, { ok: !!p }) }
     case '/__test/expire-pairing': { const p = pick(); if (p) { p.expiresAt = Date.now() - 1000 } return send(200, { ok: !!p }) }
     case '/__test/set-check': state.check = Object.assign({ ok: true, devices: 0, failed_step: null, detail: null }, json); return send(200, { ok: true })
     case '/__test/fail-next': {
@@ -313,7 +422,15 @@ function handleTest(state, req, res, body) {
       return send(200, {
         hits: state.hits, plainApiHits: state.plainApiHits, redirectHits: state.redirectHits,
         pairings: state.pairings.size,
-        pairing: p ? { id: p.id, state: p.state, confirmed: p.confirmed, revoked: p.revoked, unpairedByComputer: !!p.unpairedByComputer, site: p.site, secrets: p.secrets, computer: p.computer, reports: p.reports } : null
+        // site and secrets: what the computer sent last. confirmedSite: what Blossom uses
+        // (null until an admin confirmed). awaiting: a description waits for an admin.
+        pairing: p ? {
+          id: p.id, state: p.state, confirmed: !!p.confirmedSite, awaiting: !!p.pending, revision: revisionOf(p),
+          revoked: p.revoked, revokedReason: p.revokedReason, unpairedByComputer: !!p.unpairedByComputer,
+          site: p.pending || p.confirmedSite, secrets: p.pendingSecrets || p.confirmedSecrets,
+          confirmedSite: p.confirmedSite, confirmedSecrets: p.confirmedSecrets,
+          siteId: p.siteId, workspaceId: p.workspaceId, computer: p.computer, reports: p.reports
+        } : null
       })
     }
     default: return send(404, { error: 'unknown switch' })

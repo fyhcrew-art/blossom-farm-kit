@@ -34,6 +34,7 @@ Import-Module (Join-Path $KitRoot 'lib\FarmKit.psm1') -Force -DisableNameCheckin
 
 try {
     Assert-Administrator
+    Protect-KitFolder -KitRoot $KitRoot
     $paths = Get-FarmPaths
     $farm = Read-FarmConfig -Paths $paths
     if (-not $farm) { Stop-Farm -Problem 'This computer has no farm installation.' -WhatToDo 'There is nothing to export. Run this on the computer that runs the farm.' }

@@ -18,6 +18,7 @@ set -u
 KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib/farmkit.sh
 . "$KIT_ROOT/lib/farmkit.sh"
+SCRIPT_ARGS=("$@")
 trap farm_http_cleanup EXIT
 
 LOGS=0
@@ -30,6 +31,7 @@ for arg in "$@"; do
 done
 
 assert_macos_root
+use_protected_kit_folder "scripts/status.sh" ${SCRIPT_ARGS[@]+"${SCRIPT_ARGS[@]}"}
 get_farm_paths /opt/farm
 read_farm_config
 problems=0
@@ -48,7 +50,7 @@ fi
 write_step 'Pairing with Blossom CRM'
 read_farm_pairing
 if [ "$FARM_IS_PAIRED" = 0 ]; then
-    write_note 'Not paired: Blossom has the values that were entered there by hand, if any. To pair, Blossom shows one command under Phone Farm -> Farm setup -> Connect a computer.'
+    write_note 'Not paired: Blossom has the values that were entered there by hand, if any. To pair: where Blossom offers "Connect a computer" under Phone Farm -> Farm setup, it shows one command for this computer.'
 elif pair_get_status; then
     where="$PAIR_ORIGIN${PAIR_WORKSPACE:+, workspace \"$PAIR_WORKSPACE\"}${PAIR_SITE_LABEL:+, site \"$PAIR_SITE_LABEL\"}"
     case $PAIR_STATE in
@@ -72,6 +74,7 @@ for name in mongodb hub provider gate keep-available restart cloudflared; do
     label=$(printf '%-28s' "$(farm_label "$name")")
     if [ ! -f "$(farm_plist_path "$name")" ]; then note_problem "$label not installed"
     elif farm_service_running "$name"; then write_ok "$label running   (starts with the Mac)"
+    elif farm_service_alive "$name"; then note_problem "$label started, but its program is not running yet: it waits for the service it needs (mongodb for the hub; the hub for the provider and keep-available). Look at that one first."
     elif farm_service_loaded "$name"; then note_problem "$label loaded, but its program is not running (see /opt/farm/logs)"
     else note_problem "$label stopped (not loaded). Start it:  sudo launchctl bootstrap system $(farm_plist_path "$name")"; fi
 done
@@ -114,7 +117,7 @@ fi
 if [ "$FW_AVAILABLE" = 0 ]; then
     note_problem 'The packet filter of macOS (pf) could not be asked. Make sure whatever firewall manages this Mac blocks incoming connections to it.'
 elif [ -z "$FW_FIRST" ]; then
-    note_problem "The kit's packet filter rule is not loaded. Run install.sh again (it loads the rule), and read /opt/farm/logs/firewall.log."
+    note_problem "The kit's packet filter rule is not loaded. Run install.sh again (it loads the rule), and read /opt/farm/logs-root/firewall.log."
 elif [ "$FW_ENABLED" = 0 ]; then
     note_problem "The packet filter of macOS (pf) is switched OFF. The kit's rule does nothing while it is off (docs/security.md, section 1). Run install.sh again."
 else
@@ -169,6 +172,7 @@ if [ "$LOGS" = 1 ]; then
     write_color "$FK_YELLOW" '   When asking for help, copy THIS output. Never post a log file itself.'
     for log in mongodb.log hub.log provider.log provider-gate.log keep-available.log restart-server.log cloudflared.log firewall.log; do
         file=$FARM_LOGS/$log
+        case $log in restart-server.log | firewall.log) file=$FARM_ROOT_LOGS/$log ;; esac
         write_step "Last lines of $file"
         if [ -f "$file" ]; then tail -n 15 "$file" | hide_log_secret "$FARM_CFG_HUB_HOST" "$FARM_CFG_PROVIDER_HOST" "$FARM_CFG_RESTART_HOST" | sed 's/^/   /'
         else write_note '(no such file yet)'; fi

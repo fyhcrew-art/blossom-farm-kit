@@ -25,6 +25,7 @@ Import-Module (Join-Path $KitRoot 'lib\FarmKit.psm1') -Force -DisableNameCheckin
 
 try {
     Assert-Administrator
+    Protect-KitFolder -KitRoot $KitRoot
     if (-not (Test-Path -LiteralPath $Archive)) { Stop-Farm -Problem ('Archive not found: ' + $Archive) -WhatToDo 'Give the full path of the .zip file written by export-farm.ps1.' }
     $paths = Get-FarmPaths
     # A C:\farm that this kit did not create and lock is not adopted.

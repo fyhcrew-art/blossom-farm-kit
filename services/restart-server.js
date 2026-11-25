@@ -26,7 +26,8 @@
  *   - sends no CORS headers: it is called server to server, never by a browser;
  *   - runs only fixed commands with fixed service names (Windows: sc.exe
  *     start|stop|query; macOS: /bin/launchctl print|bootstrap|kickstart|
- *     bootout); nothing from a request ever reaches a command line;
+ *     bootout, and /bin/ps for a process number launchctl printed); nothing
+ *     from a request ever reaches a command line;
  *   - never logs the secret or request headers.
  *
  * The same file runs on Windows and on macOS. What differs is the service
@@ -66,6 +67,9 @@ const MACOS_SERVICES = Object.freeze({
   keep_available: 'blossom-farm.keep-available',
   cloudflare: 'blossom-farm.cloudflared',
 })
+
+// The script every launchd service of the farm is started through.
+const WRAPPER = 'farm-run.sh'
 
 const servicesFor = platform => (platform === 'darwin' ? MACOS_SERVICES : SERVICES)
 
@@ -133,20 +137,38 @@ function scController(runner) {
  * "stop" means taking the service out of launchd (bootout) and "start" means
  * putting it back from its property list (bootstrap) and starting it
  * (kickstart). A service is stopped when launchd no longer knows it.
+ *
+ * "Running" is more than launchd's word for it. Every farm service is started
+ * through services/farm-run.sh, which first waits for the service it depends
+ * on (the hub for MongoDB, the provider and keep-available for the hub), and
+ * launchd reports "running" for that wait as well. So the process launchd
+ * names is looked at: while its command line is still the wrapper, the
+ * program has not started. "commandOf" is how a process number becomes a
+ * command line; the tests replace it.
  */
-function launchctlController(runner) {
+function launchctlController(runner, commandOf) {
   const run = runner || ((args) => new Promise(resolve => {
     execFile('/bin/launchctl', args, { timeout: 60000 }, (err, stdout, stderr) => {
       resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, out: String(stdout || '') + String(stderr || '') })
     })
   }))
+  const command = commandOf || (pid => new Promise(resolve => {
+    execFile('/bin/ps', ['-o', 'command=', '-p', String(pid)], { timeout: 10000 }, (err, stdout) => {
+      resolve(err ? '' : String(stdout || '').trim())
+    })
+  }))
   const target = name => `system/${name}`
   const print = name => run(['print', target(name)])
   return {
-    // "launchctl print" shows a line "state = running" for a running service.
+    // "launchctl print" shows a line "state = running" for a service that has
+    // a process, and "pid = <number>" for that process.
     isRunning: async name => {
       const r = await print(name)
-      return r.code === 0 && /^\s*state = running\s*$/m.test(r.out)
+      if (r.code !== 0 || !/^\s*state = running\s*$/m.test(r.out)) return false
+      const pid = /^\s*pid = (\d+)\s*$/m.exec(r.out)
+      if (!pid) return true // no process number shown: launchd's word is all there is
+      const line = await command(pid[1])
+      return line !== '' && !line.includes(WRAPPER)
     },
     // bootout removes the service; "print" then fails (113, not found).
     isStopped: async name => (await print(name)).code !== 0,
@@ -162,7 +184,7 @@ function launchctlController(runner) {
 }
 
 /** The controller for the system this runs on. */
-const controllerFor = (platform, runner) => (platform === 'darwin' ? launchctlController(runner) : scController(runner))
+const controllerFor = (platform, runner, commandOf) => (platform === 'darwin' ? launchctlController(runner, commandOf) : scController(runner))
 
 function createApp(options) {
   const secret = options && options.secret
@@ -171,7 +193,7 @@ function createApp(options) {
   }
   const platform = options.platform || process.platform
   const SERVICES = options.services || servicesFor(platform)
-  const sc = options.controller || controllerFor(platform, options.run)
+  const sc = options.controller || controllerFor(platform, options.run, options.commandOf)
   const log = options.log || (msg => console.log(`[restart-server] ${new Date().toISOString()} ${msg}`))
   const wait = options.wait || (ms => new Promise(r => setTimeout(r, ms)))
   // Time between answering and touching the tunnel, so the answer gets out.

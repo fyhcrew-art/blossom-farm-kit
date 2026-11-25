@@ -12,7 +12,11 @@
         <string>/bin/bash</string>
         <string>@FARM_ROOT@/services/farm-run.sh</string>
         <string>--log</string>
-        <string>@FARM_ROOT@/logs/firewall.log</string>
+        <string>@FARM_ROOT@/logs-root/firewall.log</string>
+        <string>--log-max-kb</string>
+        <string>1024</string>
+        <string>--log-keep</string>
+        <string>5</string>
         <string>--</string>
         <string>/bin/bash</string>
         <string>@FARM_ROOT@/services/farm-firewall.sh</string>

@@ -29,6 +29,7 @@ FARM_SERVICE_GROUP='_blossomfarm'
 FARM_LABEL_PREFIX='blossom-farm'
 FARM_PF_ANCHOR='com.apple/blossom-farm'
 FARM_LAUNCHD_DIR='/Library/LaunchDaemons'
+# Written by an earlier kit (log rotation by macOS); removed when found.
 FARM_NEWSYSLOG_FILE='/etc/newsyslog.d/blossom-farm.conf'
 
 # ---------------------------------------------------------------------------
@@ -181,7 +182,14 @@ test_provider_nickname() {
     local re='^[A-Za-z][A-Za-z0-9_-]{1,31}$'
     if ! [[ $1 =~ $re ]]; then
         echo 'Use 2 to 32 characters: letters, digits, "-" and "_", starting with a letter (for example Provider1). It becomes a folder name and part of an address.'
+        return 0
     fi
+    # The nickname becomes a folder below the farm folder, and the disk of a
+    # Mac does not tell upper case from lower case: "Services" IS "services".
+    case $(to_lower "$1") in
+        bin | config | logs | logs-root | services | downloads | data | var | npm | appium | export | previous | export-stage | import-stage)
+            echo 'It is the name of a folder the kit itself uses. Choose another, for example Provider1.' ;;
+    esac
     return 0
 }
 
@@ -758,6 +766,11 @@ file_mode() {
     if _fk_stat_bsd; then stat -f '%Lp' "$1" 2> /dev/null; else stat -c '%a' "$1" 2> /dev/null; fi
 }
 
+file_mode_bits() {
+    # Like file_mode, with the sticky, set-user and set-group bits (1777).
+    if _fk_stat_bsd; then stat -f '%Mp%Lp' "$1" 2> /dev/null | sed 's/^0*\([0-7]\)/\1/'; else stat -c '%a' "$1" 2> /dev/null; fi
+}
+
 file_size() {
     if _fk_stat_bsd; then stat -f '%z' "$1" 2> /dev/null; else stat -c '%s' "$1" 2> /dev/null; fi
 }
@@ -787,6 +800,7 @@ get_farm_paths() {
     FARM_BIN=$FARM_ROOT/bin
     FARM_CONFIG=$FARM_ROOT/config
     FARM_LOGS=$FARM_ROOT/logs
+    FARM_ROOT_LOGS=$FARM_ROOT/logs-root
     FARM_SERVICES=$FARM_ROOT/services
     FARM_DOWNLOADS=$FARM_ROOT/downloads
     FARM_DATA=$FARM_ROOT/data
@@ -833,6 +847,104 @@ protect_farm_path() {
     fi
     if [ -d "$path" ]; then fmode=$dmode; fi
     chmod "$fmode" "$path" || stop_farm "Could not restrict access to $path." 'Run the script again with sudo.'
+}
+
+# --- the kit folder itself ----------------------------------------------------
+# install.sh and the scripts run as root, today and at every later maintenance
+# run. Whoever can change a file of the kit, or put another folder in its
+# place, therefore becomes root the next time. The command from Blossom
+# unpacks the kit to /opt/blossom-farm-kit, owned by root; a kit that was
+# unpacked by hand (into a home folder, say) is moved to the same place.
+
+FARM_KIT_HOME='/opt/blossom-farm-kit'
+
+test_kit_folder_trust() {
+    # "<what> <owner uid> <octal mode> <path>" lines on standard input, where
+    # <what> is: kit (the kit folder), above (a folder that contains it, up
+    # to /), inside (a file or folder in it), link (a link in it).
+    # Prints nothing when only root can change the kit or replace it,
+    # otherwise the first reason why not.
+    LC_ALL=C awk '
+        function open_to_others(mode,   n, g, o) {
+            n = length(mode); g = substr(mode, n - 1, 1); o = substr(mode, n, 1)
+            return (g ~ /[2367]/ || o ~ /[2367]/)
+        }
+        function sticky(mode) { return (length(mode) == 4 && substr(mode, 1, 1) ~ /[1357]/) }
+        {
+            what = $1; uid = $2; mode = $3; path = $0
+            sub(/^[^ ]+ [^ ]+ [^ ]+ /, "", path)
+            if (what == "link") { print path " is a link to another place."; exit }
+            if (uid !~ /^[0-9]+$/ || mode !~ /^[0-7]+$/) { print path " cannot be examined."; exit }
+            if (uid != 0) { print path " belongs to an account other than root."; exit }
+            # a folder above the kit may be open to others when it is "sticky"
+            # (like /tmp): there, only root can rename or delete what root owns
+            if (open_to_others(mode) && !(what == "above" && sticky(mode))) { print path " can be changed by accounts other than root."; exit }
+        }'
+}
+
+list_kit_folder() {
+    # list_kit_folder <folder>   prints the lines test_kit_folder_trust reads.
+    local dir=$1 f
+    printf 'kit %s %s %s\n' "$(file_owner_uid "$dir")" "$(file_mode_bits "$dir")" "$dir"
+    f=$dir
+    while [ "$f" != / ]; do
+        f=$(dirname "$f")
+        printf 'above %s %s %s\n' "$(file_owner_uid "$f")" "$(file_mode_bits "$f")" "$f"
+    done
+    find "$dir" -mindepth 1 \( -type l -o ! -user 0 -o -perm -020 -o -perm -002 \) -print 2> /dev/null | head -n 20 | while IFS= read -r f; do
+        if [ -L "$f" ]; then printf 'link 0 0 %s\n' "$f"
+        else printf 'inside %s %s %s\n' "$(file_owner_uid "$f")" "$(file_mode_bits "$f")" "$f"; fi
+    done
+}
+
+use_protected_kit_folder() {
+    # use_protected_kit_folder <this script, relative to the kit folder> [its arguments...]
+    # Called by install.sh and by every script, as root, before they do
+    # anything else. Returns when the kit folder is one only root can change.
+    # A kit in /opt/blossom-farm-kit with wrong owners is put right. A kit
+    # anywhere else is copied to /opt/blossom-farm-kit, and the script starts
+    # again from there: this call then does not return.
+    local entry=$1 here problem
+    shift
+    here=$(cd -P "$KIT_ROOT" 2> /dev/null && pwd -P) || stop_farm "The kit folder $KIT_ROOT cannot be opened." 'Run the script from inside the unpacked kit folder.'
+    problem=$(list_kit_folder "$here" | test_kit_folder_trust)
+    [ -z "$problem" ] && return 0
+    if [ "$here" = "$FARM_KIT_HOME" ]; then
+        chown -R 0:0 "$here" 2> /dev/null && chmod -R go-w "$here" 2> /dev/null
+        problem=$(list_kit_folder "$here" | test_kit_folder_trust)
+        if [ -n "$problem" ]; then
+            stop_farm "The kit folder $here cannot be protected: $problem" "The scripts of the kit run with full rights, so nobody but root may be able to change them. Download the kit again and unpack it to a new folder, then run the script from there: it moves itself to $FARM_KIT_HOME."
+        fi
+        write_note "The kit folder $here was locked: only root can change it now."
+        return 0
+    fi
+    write_note "This kit folder is not protected ($problem)"
+    write_note "The scripts of the kit run with full rights, now and at every later maintenance run, so the kit is copied to $FARM_KIT_HOME, which only root can change."
+    if [ ! -d "$(dirname "$FARM_KIT_HOME")" ]; then
+        if ! { mkdir -p "$(dirname "$FARM_KIT_HOME")" && chown 0:0 "$(dirname "$FARM_KIT_HOME")" && chmod 755 "$(dirname "$FARM_KIT_HOME")"; }; then
+            stop_farm "Could not create $(dirname "$FARM_KIT_HOME")." 'Run the script again with sudo.'
+        fi
+    fi
+    rm -rf "$FARM_KIT_HOME.new"
+    if ! { cp -R "$here" "$FARM_KIT_HOME.new" && chown -R 0:0 "$FARM_KIT_HOME.new" && chmod -R u=rwX,go=rX "$FARM_KIT_HOME.new"; }; then
+        rm -rf "$FARM_KIT_HOME.new"
+        stop_farm "Could not copy the kit to $FARM_KIT_HOME." 'Check the free space on the disk and run the script again with sudo.'
+    fi
+    if command -v xattr > /dev/null 2>&1; then xattr -dr com.apple.quarantine "$FARM_KIT_HOME.new" > /dev/null 2>&1; fi
+    problem=$(list_kit_folder "$FARM_KIT_HOME.new" | test_kit_folder_trust)
+    if [ -n "$problem" ]; then
+        rm -rf "$FARM_KIT_HOME.new"
+        stop_farm "The kit could not be put into a protected folder: $problem" 'Download the kit again from its releases page, unpack it, and run the script from the new folder. A kit folder contains no links.'
+    fi
+    if [ -e "$FARM_KIT_HOME" ] || [ -L "$FARM_KIT_HOME" ]; then
+        rm -rf "$FARM_KIT_HOME.previous"
+        mv "$FARM_KIT_HOME" "$FARM_KIT_HOME.previous" || stop_farm "Could not put the kit that was in $FARM_KIT_HOME aside." 'Run the script again with sudo.'
+    fi
+    mv "$FARM_KIT_HOME.new" "$FARM_KIT_HOME" || stop_farm "Could not move the kit to $FARM_KIT_HOME." 'Run the script again with sudo.'
+    write_ok "The kit is in $FARM_KIT_HOME now, and this script continues from there. Run the scripts of the kit from that folder from now on (cd $FARM_KIT_HOME); the folder you started from is no longer needed."
+    # shellcheck disable=SC2093  # the line after it is only reached when exec failed
+    exec /bin/bash "$FARM_KIT_HOME/$entry" "$@"
+    stop_farm "Could not start $FARM_KIT_HOME/$entry." "Run it yourself:   cd $FARM_KIT_HOME && sudo bash $entry"
 }
 
 dir_is_empty() { [ -z "$(find "$1" -mindepth 1 -maxdepth 1 -print 2> /dev/null | head -n 1)" ]; }
@@ -1192,8 +1304,26 @@ ensure_farm_layout() {
     for d in "$FARM_BIN" "$FARM_TOOLS_DIR" "$FARM_SERVICES" "$FARM_CONFIG" "$FARM_CLOUDFLARED"; do _fk_make_dir "$d" service; done
     for d in "$FARM_DOWNLOADS" "$FARM_FINGERPRINTS"; do _fk_make_dir "$d" private; done
     for d in "$FARM_DATA" "$FARM_DATA/mongodb" "$FARM_VAR" "$FARM_VAR/home" "$FARM_VAR/tmp" "$FARM_VAR/hub-files"; do _fk_make_dir "$d" service-write; done
-    if [ -n "${1:-}" ]; then _fk_make_dir "$FARM_ROOT/$1" service-write; fi
-    # Logs: the services append to them (the restart service as root).
+    # Logs of the two services that run as root (the restart service and the
+    # packet filter job). They have a folder of their own that only root can
+    # touch: root must never write through a path the service account could
+    # replace with a link to another file.
+    _fk_make_dir "$FARM_ROOT_LOGS" private
+    if [ -n "${1:-}" ]; then
+        # The provider's own folder is handed to the service account. It must
+        # be a folder of its own, never one of the kit's (see
+        # test_provider_nickname; this is the same rule, checked on the disk).
+        if [ -e "$FARM_ROOT/$1" ]; then
+            for d in "$FARM_BIN" "$FARM_SERVICES" "$FARM_CONFIG" "$FARM_LOGS" "$FARM_ROOT_LOGS" "$FARM_DOWNLOADS" "$FARM_DATA" "$FARM_VAR" \
+                "$FARM_ROOT/npm" "$FARM_ROOT/appium" "$FARM_ROOT/export" "$FARM_ROOT/previous" "$FARM_ROOT/export-stage" "$FARM_ROOT/import-stage"; do
+                if [ "$FARM_ROOT/$1" -ef "$d" ]; then
+                    stop_farm "The provider nickname \"$1\" cannot be used: $FARM_ROOT/$1 is a folder the kit itself uses." 'Choose another nickname, for example Provider1.'
+                fi
+            done
+        fi
+        _fk_make_dir "$FARM_ROOT/$1" service-write
+    fi
+    # Logs: the services append to them, each as the service account.
     if [ ! -d "$FARM_LOGS" ]; then mkdir "$FARM_LOGS" || stop_farm "Could not create $FARM_LOGS." 'Run the script again with sudo.'; fi
     if ! { chown "0:$FARM_SERVICE_GROUP" "$FARM_LOGS" && chmod 770 "$FARM_LOGS"; }; then
         stop_farm "Could not restrict access to $FARM_LOGS." 'Run the script again with sudo.'
@@ -1206,8 +1336,41 @@ farm_plist_path() { printf '%s/%s.plist' "$FARM_LAUNCHD_DIR" "$(farm_label "$1")
 
 farm_service_loaded() { launchctl print "system/$(farm_label "$1")" > /dev/null 2>&1; }
 
+launchd_process_id() {
+    # The output of "launchctl print" on standard input -> the number of the
+    # service's process, when launchd says the service is running; nothing
+    # otherwise. "0" when it is running but no process number is shown.
+    LC_ALL=C awk '
+        /^[[:space:]]*state = running[[:space:]]*$/ { running = 1 }
+        /^[[:space:]]*pid = [0-9]+[[:space:]]*$/ { if (pid == "") pid = $3 }
+        END { if (running) print (pid == "" ? 0 : pid) }'
+}
+
+test_program_started() {
+    # test_program_started <command line of a process>
+    # Status 0 when it is a farm program, 1 when it is still the wrapper
+    # (services/farm-run.sh) waiting for another service, or nothing at all.
+    case $1 in '' | *farm-run.sh*) return 1 ;; esac
+    return 0
+}
+
+farm_service_alive() {
+    # Status 0 when launchd has a process for the service. That process may
+    # still be the wrapper, waiting for the port of the service it needs.
+    [ -n "$(launchctl print "system/$(farm_label "$1")" 2> /dev/null | launchd_process_id)" ]
+}
+
 farm_service_running() {
-    launchctl print "system/$(farm_label "$1")" 2> /dev/null | LC_ALL=C grep -q '^[[:space:]]*state = running'
+    # Status 0 when the program of the service itself runs: launchd has a
+    # process for it AND that process is no longer the wrapper. Every service
+    # is started through services/farm-run.sh, which waits for the service it
+    # depends on; "launchd has a process" alone would call a hub that waits
+    # for a MongoDB that never comes "running".
+    local pid
+    pid=$(launchctl print "system/$(farm_label "$1")" 2> /dev/null | launchd_process_id)
+    [ -n "$pid" ] || return 1
+    [ "$pid" = 0 ] && return 0
+    test_program_started "$(ps -o command= -p "$pid" 2> /dev/null)"
 }
 
 stop_farm_service() {
@@ -1323,10 +1486,35 @@ install_archive_program() {
     write_ok "$what installed ($dir/$program), SHA-256 verified."
 }
 
+copy_as_new_file() {
+    # copy_as_new_file <source> <destination> [<owner:group> <mode>]
+    # Puts a copy of the source at the destination as a NEW file: it is
+    # written under another name in the same folder and then moved over the
+    # destination. Never write a program onto the file it replaces: macOS
+    # remembers the code signature of a program per file, and on Apple Silicon
+    # a program that was rewritten in place is killed when it starts ("Code
+    # Signature Invalid") until the Mac is restarted. A script that is
+    # running is not changed under the shell that reads it, either.
+    # Without owner and mode, those of the source are kept.
+    # The quarantine mark macOS puts on files that came through a browser is
+    # taken off the copy: it would stop a service from starting the program.
+    # Callers check the pinned SHA-256 of a program before they call this.
+    local tmp="$2.new.$$"
+    rm -f "$tmp"
+    if [ $# -ge 4 ]; then
+        if ! { cp -f "$1" "$tmp" && chown "$3" "$tmp" && chmod "$4" "$tmp"; }; then rm -f "$tmp"; return 1; fi
+    else
+        if ! cp -pf "$1" "$tmp"; then rm -f "$tmp"; return 1; fi
+    fi
+    if command -v xattr > /dev/null 2>&1; then xattr -d com.apple.quarantine "$tmp" > /dev/null 2>&1; fi
+    if ! mv -f "$tmp" "$2"; then rm -f "$tmp"; return 1; fi
+    return 0
+}
+
 install_one_file() {
     # install_one_file <source> <destination>   (root owns it; the service account may run it)
-    if ! { cp -f "$1" "$2" && chown "0:$FARM_SERVICE_GROUP" "$2" && chmod 750 "$2"; }; then
-        stop_farm "Could not write $2." 'A farm program may still hold the file. Restart the Mac and run install.sh again.'
+    if ! copy_as_new_file "$1" "$2" "0:$FARM_SERVICE_GROUP" 750; then
+        stop_farm "Could not write $2." 'Check the free space on the disk and run the script again with sudo.'
     fi
 }
 
@@ -1401,11 +1589,11 @@ copy_service_files() {
     # The service scripts of this kit folder, into /opt/farm/services.
     local file
     for file in restart-server.js provider-gate.js keep-available.sh farm-run.sh farm-firewall.sh; do
-        if ! { cp -f "$KIT_ROOT/services/$file" "$FARM_SERVICES/$file" && chown "0:$FARM_SERVICE_GROUP" "$FARM_SERVICES/$file" && chmod 640 "$FARM_SERVICES/$file"; }; then
+        if ! copy_as_new_file "$KIT_ROOT/services/$file" "$FARM_SERVICES/$file" "0:$FARM_SERVICE_GROUP" 640; then
             stop_farm "Could not write $FARM_SERVICES/$file." 'Run the script again with sudo.'
         fi
     done
-    if ! { cp -f "$KIT_ROOT/lib/json.awk" "$FARM_SERVICES/json.awk" && chown "0:$FARM_SERVICE_GROUP" "$FARM_SERVICES/json.awk" && chmod 640 "$FARM_SERVICES/json.awk"; }; then
+    if ! copy_as_new_file "$KIT_ROOT/lib/json.awk" "$FARM_SERVICES/json.awk" "0:$FARM_SERVICE_GROUP" 640; then
         stop_farm "Could not write $FARM_SERVICES/json.awk." 'Run the script again with sudo.'
     fi
 }
@@ -1556,7 +1744,11 @@ invoke_farm_self_test() {
         return 0
     fi
     if [ "$HTTP_STATUS" -eq 401 ] || [ "$HTTP_STATUS" -eq 403 ]; then
-        _fk_step signin fail 'The hub refused the user name or password.' 'Reset the login with scripts/rotate-secrets.sh --hub-user. A paired computer hands the new password to Blossom by itself; otherwise enter it there.'
+        if [ "$hub_user" = admin ]; then
+            _fk_step signin fail 'The hub refused the password of its administrator "admin".' 'Run the test again and type the password you chose for the hub administrator when the farm was installed. If it is lost: README, section Troubleshooting, "Lost hub administrator password".'
+        else
+            _fk_step signin fail "The hub refused the password of the user \"$hub_user\"." "If you typed it by hand, run the test again as the hub administrator instead:   sudo bash scripts/self-test.sh --hub-user admin   . If Blossom reports the same for this user, give it a new password:   sudo bash scripts/rotate-secrets.sh --hub-user   . A paired computer hands the new password to Blossom by itself and does not show it; otherwise it is shown once, to be entered in Blossom."
+        fi
         return 0
     fi
     if [ -z "$token" ]; then
@@ -1601,6 +1793,16 @@ invoke_farm_self_test() {
         _fk_step hub-provider-info ok 'The provider record of the hub is refused at the tunnel (403), as it must be.' ''
     else
         _fk_step hub-provider-info fail "The hub path /admin/provider/<nickname>/info is not refused by the tunnel (HTTP $HTTP_STATUS). GADS serves it without a login." 'Run install.sh again: it rewrites the tunnel configuration and restarts the tunnel. If it stays like this, report it on the kit repository (privately: Security -> Report a vulnerability); see docs/security.md, section 3.'
+    fi
+
+    # extra check, not part of the product's test: the provider reports the
+    # state of the phones to the hub on this path, from this computer, and
+    # GADS 6.0.0 asks for no login there.
+    invoke_farm_http "$hub/provider-update" --like-blossom --timeout 8
+    if [ "$HTTP_STATUS" -eq 403 ]; then
+        _fk_step hub-provider-update ok 'The path the provider reports to the hub on is refused at the tunnel (403), as it must be.' ''
+    else
+        _fk_step hub-provider-update fail "The hub path /provider-update is not refused by the tunnel (HTTP $HTTP_STATUS). GADS accepts reports about the phones there without a login." 'Run install.sh again: it rewrites the tunnel configuration and restarts the tunnel. If it stays like this, report it on the kit repository (privately: Security -> Report a vulnerability); see docs/security.md, section 3.'
     fi
 
     # 6 phones
@@ -1654,7 +1856,7 @@ invoke_farm_self_test() {
     elif [ "$HTTP_STATUS" -eq 401 ] || [ "$HTTP_STATUS" -eq 403 ]; then
         _fk_step restart fail 'The restart service refused the secret.' 'Run scripts/rotate-secrets.sh --restart-secret. A paired computer hands the new secret to Blossom by itself; otherwise enter it there.'
     elif test_looks_down "$HTTP_STATUS" "$HTTP_TEXT" || [ "$HTTP_STATUS" -ne 200 ] || ! printf '%s' "$HTTP_TEXT" | json_flatten > /dev/null 2>&1; then
-        _fk_step restart fail "The restart service did not answer its status (HTTP $HTTP_STATUS)." 'Check the restart service and read /opt/farm/logs/restart-server.log.'
+        _fk_step restart fail "The restart service did not answer its status (HTTP $HTTP_STATUS)." 'Check the restart service and read /opt/farm/logs-root/restart-server.log.'
     else
         off=''
         for k in hub provider cloudflare keep_available mongodb; do
@@ -1665,7 +1867,7 @@ invoke_farm_self_test() {
     fi
     invoke_farm_http "$restart/status" --like-blossom --timeout 15
     if [ "$HTTP_STATUS" -ne 401 ]; then
-        _fk_step restart-locked fail "Without the secret the restart service answered HTTP $HTTP_STATUS (expected 401)." 'Do not use this farm until this is understood: read /opt/farm/logs/restart-server.log and docs/security.md.'
+        _fk_step restart-locked fail "Without the secret the restart service answered HTTP $HTTP_STATUS (expected 401)." 'Do not use this farm until this is understood: read /opt/farm/logs-root/restart-server.log and docs/security.md.'
     else
         _fk_step restart-locked ok 'Without the secret the restart service answers 401, as it must.' ''
     fi
@@ -1681,6 +1883,7 @@ _fk_step_title() {
         hub) echo 'Hub answers like GADS' ;;
         hub-appium) echo 'Hub refuses unauthenticated Appium paths' ;;
         hub-provider-info) echo 'Hub refuses the open provider record' ;;
+        hub-provider-update) echo 'Hub refuses reports from outside' ;;
         devices) echo 'Phones' ;;
         provider) echo 'Provider' ;;
         provider-locked) echo 'Provider refuses strangers' ;;
@@ -1724,7 +1927,7 @@ EOF
 
 FK_APP_TRIES=${FK_APP_TRIES:-4}
 FK_APP_RETRY_DELAY=${FK_APP_RETRY_DELAY:-2}
-FK_PAIR_HELP='In Blossom open Phone Farm -> Farm setup -> Connect a computer, copy the new command and run it on this computer. That is safe: it keeps what is already set up.'
+FK_PAIR_HELP='In Blossom open Phone Farm -> Farm setup -> Connect a computer, copy the new command yourself and run it on this computer: it keeps what is already set up. Only ever run a command you took from your own Blossom, signed in.'
 
 farm_kit_version() {
     local v=''
@@ -1757,14 +1960,16 @@ _fk_computer_json() {
 
 _fk_pair_clear() {
     FARM_IS_PAIRED=0
-    PAIR_ORIGIN=''; PAIR_TOKEN=''; PAIR_CODE_SHA=''; PAIR_ID=''; PAIR_WORKSPACE=''; PAIR_CLAIMED_AT=''; PAIR_SITE_SENT_AT=''
+    PAIR_ORIGIN=''; PAIR_TOKEN=''; PAIR_CODE_SHA=''; PAIR_ID=''; PAIR_WORKSPACE=''; PAIR_WORKSPACE_ID=''; PAIR_CLAIMED_AT=''; PAIR_SITE_SENT_AT=''
 }
 
 read_farm_pairing() {
     # Sets FARM_IS_PAIRED (0|1) and, when this computer holds a pairing,
-    # PAIR_ORIGIN, PAIR_TOKEN, PAIR_CODE_SHA, PAIR_ID, PAIR_WORKSPACE,
-    # PAIR_CLAIMED_AT and PAIR_SITE_SENT_AT (empty until Blossom has accepted
-    # the description of the farm once).
+    # PAIR_ORIGIN, PAIR_TOKEN, PAIR_CODE_SHA, PAIR_ID, PAIR_WORKSPACE (the name
+    # the workspace gives itself), PAIR_WORKSPACE_ID (the identifier Blossom
+    # gives it, which nobody can choose), PAIR_CLAIMED_AT and
+    # PAIR_SITE_SENT_AT (empty until Blossom has accepted the description of
+    # the farm once).
     local text
     _fk_pair_clear
     [ -f "$FARM_PAIRING" ] || return 0
@@ -1775,6 +1980,7 @@ read_farm_pairing() {
     PAIR_CODE_SHA=$(json_get "$text" codeSha256)
     PAIR_ID=$(json_get "$text" pairingId)
     PAIR_WORKSPACE=$(json_get "$text" workspace)
+    PAIR_WORKSPACE_ID=$(clean_workspace_id "$(json_get "$text" workspaceId)")
     PAIR_CLAIMED_AT=$(json_get "$text" claimedAt)
     PAIR_SITE_SENT_AT=$(json_get "$text" siteSentAt)
     FARM_IS_PAIRED=1
@@ -1788,6 +1994,7 @@ write_farm_pairing() {
   \"codeSha256\": $(json_string "$PAIR_CODE_SHA"),
   \"pairingId\": $(json_string "$PAIR_ID"),
   \"workspace\": $(json_string "$PAIR_WORKSPACE"),
+  \"workspaceId\": $(json_string "$PAIR_WORKSPACE_ID"),
   \"claimedAt\": $(json_string "$PAIR_CLAIMED_AT"),
   \"siteSentAt\": $(json_string "$PAIR_SITE_SENT_AT")
 }
@@ -1881,17 +2088,86 @@ invoke_blossom() {
 
 _fk_now() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
+clean_workspace_id() {
+    # The identifier of a workspace as Blossom sends it: letters, digits and
+    # hyphens, at most 64 (a UUID). Anything else prints nothing.
+    local LC_ALL=C
+    case $1 in '' | *[!A-Za-z0-9-]*) return 0 ;; esac
+    [ "${#1}" -le 64 ] && to_lower "$1"
+    return 0
+}
+
+test_same_workspace() {
+    # test_same_workspace <origin a> <workspace id a> <origin b> <workspace id b>
+    # Status 0 only when both pairings are with the same Blossom AND the same
+    # workspace, by its identifier. A workspace NAME is never compared: the
+    # owner of a workspace chooses it, so it proves nothing.
+    [ -n "$2" ] && [ -n "$4" ] && [ "$1" = "$3" ] && [ "$2" = "$4" ]
+}
+
+read_typed_word() {
+    # read_typed_word <prompt>   sets REPLY_WORD. Status 1 when nobody is at a
+    # keyboard (no terminal): the caller must then take that as "no".
+    REPLY_WORD=''
+    if ! { : < /dev/tty; } 2> /dev/null; then return 1; fi
+    IFS= read -r -p "$1" REPLY_WORD < /dev/tty || return 1
+    return 0
+}
+
+confirm_pairing_replacement() {
+    # confirm_pairing_replacement <old origin> <old workspace name> <new origin> <new workspace name or ''>
+    # A computer that is paired is about to be paired with ANOTHER workspace
+    # (or another Blossom). That moves the farm: the hub login gets a new
+    # password, and the addresses, that password and the restart secret go to
+    # the new place. A genuine command made in somebody else's workspace would
+    # do exactly this, so it is never done without a yes from the keyboard,
+    # or the option that says so (--replace-pairing sets FK_REPLACE_PAIRING).
+    # Status 0: go on. 1: keep the pairing as it is.
+    if [ "${FK_REPLACE_PAIRING:-0}" = 1 ]; then return 0; fi
+    echo
+    write_color "$FK_YELLOW" '   This computer is already paired with Blossom:'
+    write_color "$FK_YELLOW" "       $1${2:+   (workspace \"$2\")}"
+    write_color "$FK_YELLOW" '   The command you ran pairs it with another workspace:'
+    write_color "$FK_YELLOW" "       $3${4:+   (workspace \"$4\")}"
+    write_color "$FK_YELLOW" '   If you go on, the farm LEAVES the first one: its hub login gets a new'
+    write_color "$FK_YELLOW" '   password, and its addresses, that password and the restart secret are sent'
+    write_color "$FK_YELLOW" '   to the second. Whoever confirms the computer there controls the phones.'
+    write_color "$FK_YELLOW" '   A workspace name proves nothing: whoever owns a workspace chooses its name.'
+    write_color "$FK_YELLOW" '   Go on only if you copied this command yourself from your own Blossom, signed'
+    write_color "$FK_YELLOW" '   in. A command that somebody sent you is a reason to stop.'
+    if ! read_typed_word '   Type the word  replace  to go on (anything else keeps the pairing as it is): '; then return 1; fi
+    [ "$(to_lower "$(trim_text "$REPLY_WORD")")" = replace ]
+}
+
+_fk_pairing_kept() {
+    # $1 the Blossom the computer stays paired with
+    APP_KIND=declined; APP_CODE=''; APP_STATUS=0
+    APP_MESSAGE="This computer stays paired with $1: the new command would have moved the farm to another workspace, and nobody said yes to that at the keyboard. To move it on purpose, run the command again in a Terminal window and answer the question, or add --replace-pairing at its end."
+}
+
+default_self_test_user() {
+    # default_self_test_user <the hub user Blossom uses>
+    # Prints the hub user scripts/self-test.sh signs in with when none is
+    # named. On a paired computer nobody has the password of Blossom's own
+    # user (it was sent to Blossom and never shown), so the test uses the hub
+    # administrator, whose password the owner chose.
+    read_farm_pairing
+    if [ "$FARM_IS_PAIRED" = 1 ] && [ -n "$PAIR_SITE_SENT_AT" ]; then echo admin; else printf '%s\n' "${1:-blossom}"; fi
+}
+
 pair_claim() {
     # pair_claim <origin> <pairing code>
     # Hands the pairing code to Blossom together with a farm token made here.
     # Status 0: Blossom knows this computer; pairing.json holds the token.
     # Status 1: APP_KIND and APP_MESSAGE say why; an earlier pairing of this
-    # computer is left as it was.
+    # computer is left as it was. APP_KIND "declined": the computer is paired
+    # with another workspace and nobody agreed to move it
+    # (confirm_pairing_replacement).
     #
     # The token is written to disk BEFORE it is sent: if the answer is lost on
     # the way, running the same command again repeats the claim with the same
     # token, which Blossom accepts as the same claim.
-    local origin code code_sha token='' text old_origin='' old_token='' body
+    local origin code code_sha token='' text old_origin='' old_token='' old_workspace='' old_workspace_id='' agreed=0 body new_workspace new_workspace_id
     origin=$(normalize_app_origin "$1")
     code=$(normalize_pairing_code "$2")
     APP_STATUS=0; APP_TEXT=''; APP_CODE=''; APP_KIND=''; APP_MESSAGE=''
@@ -1907,7 +2183,12 @@ pair_claim() {
             APP_KIND=ok
             return 0   # this very code was claimed by this computer before
         fi
-        old_origin=$PAIR_ORIGIN; old_token=$PAIR_TOKEN
+        old_origin=$PAIR_ORIGIN; old_token=$PAIR_TOKEN; old_workspace=$PAIR_WORKSPACE; old_workspace_id=$PAIR_WORKSPACE_ID
+        if [ "$old_origin" != "$origin" ]; then
+            # another Blossom altogether: asked before anything is sent to it
+            if ! confirm_pairing_replacement "$old_origin" "$old_workspace" "$origin" ''; then _fk_pairing_kept "$old_origin"; return 1; fi
+            agreed=1
+        fi
     fi
     if [ -f "$FARM_PAIRING_NEW" ]; then
         text=$(cat "$FARM_PAIRING_NEW" 2> /dev/null)
@@ -1926,9 +2207,26 @@ pair_claim() {
         return 1
     fi
     body=''
+    new_workspace=$(clean_remote_text "$(json_get "$APP_TEXT" workspace_name)")
+    new_workspace_id=$(clean_workspace_id "$(json_get "$APP_TEXT" workspace_id)")
+    if [ -n "$old_token" ] && [ "$agreed" = 0 ] && ! test_same_workspace "$old_origin" "$old_workspace_id" "$origin" "$new_workspace_id"; then
+        # The same Blossom, but the code belongs to another workspace (only
+        # the answer to the claim tells). So far that workspace has the name
+        # of this computer and nothing else.
+        text=$APP_TEXT
+        if ! confirm_pairing_replacement "$old_origin" "$old_workspace" "$origin" "$new_workspace"; then
+            # give the claim up again, and keep the pairing this computer has
+            invoke_blossom "$origin" DELETE /api/farm/pair/token --bearer "$token" --tries 2 || true
+            rm -f "$FARM_PAIRING_NEW"
+            read_farm_pairing
+            _fk_pairing_kept "$old_origin"
+            return 1
+        fi
+        APP_TEXT=$text; APP_KIND=ok; APP_MESSAGE=''; APP_CODE=''
+    fi
     PAIR_ORIGIN=$origin; PAIR_TOKEN=$token; PAIR_CODE_SHA=$code_sha
     PAIR_ID=$(clean_remote_text "$(json_get "$APP_TEXT" pairing_id)")
-    PAIR_WORKSPACE=$(clean_remote_text "$(json_get "$APP_TEXT" workspace_name)")
+    PAIR_WORKSPACE=$new_workspace; PAIR_WORKSPACE_ID=$new_workspace_id
     PAIR_CLAIMED_AT=$(_fk_now); PAIR_SITE_SENT_AT=''
     write_farm_pairing
     rm -f "$FARM_PAIRING_NEW"

@@ -27,6 +27,7 @@ set -u
 KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib/farmkit.sh
 . "$KIT_ROOT/lib/farmkit.sh"
+SCRIPT_ARGS=("$@")
 trap farm_http_cleanup EXIT
 
 REMOVE_DATA=0; SERVICES_ONLY=0; UNPAIR=0
@@ -41,6 +42,7 @@ for arg in "$@"; do
 done
 
 assert_macos_root
+use_protected_kit_folder "scripts/uninstall.sh" ${SCRIPT_ARGS[@]+"${SCRIPT_ARGS[@]}"}
 if [ "$REMOVE_DATA" = 1 ] && [ "$SERVICES_ONLY" = 1 ]; then
     stop_farm '--remove-data and --services-only contradict each other.' 'Use one of them.'
 fi

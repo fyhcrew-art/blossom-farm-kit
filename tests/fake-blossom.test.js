@@ -61,6 +61,7 @@ test('claim: once, idempotent for the same token, refused for another, expired, 
     assert.strictEqual(r.status, 200)
     assert.strictEqual(r.json.state, 'installing')
     assert.strictEqual(r.json.workspace_name, 'Agency')
+    assert.match(r.json.workspace_id, /^[0-9a-f-]{36}$/, 'the workspace is named by an identifier nobody chooses')
     assert.strictEqual(r.headers['cache-control'], 'no-store')
     assert.ok(!JSON.stringify(r.json).includes(token), 'the answer does not repeat the token')
     const first = r.json.pairing_id
@@ -134,7 +135,28 @@ test('the farm token: its own site only, credentials at once, addresses after a 
     assert.strictEqual(r.json.code, 'credentials_required')
     r = await call(fake, 'PUT', '/api/farm/pair/site', { token, body: { protocol: 1, site: Object.assign({}, moved, { hub_password: 'pw-3' }) } })
     assert.deepStrictEqual([r.status, r.json.needs_confirmation], [200, true])
-    assert.strictEqual((await flip(fake, 'state', { token })).pairing.confirmed, false)
+    // ... and until an admin has, the site stays in use on the addresses that were confirmed:
+    // a farm token cannot take its site out of service
+    let held = (await flip(fake, 'state', { token })).pairing
+    assert.deepStrictEqual([held.confirmed, held.awaiting], [true, true])
+    assert.strictEqual(held.confirmedSite.hub_url, site.hub_url, 'the confirmed addresses are untouched')
+    assert.strictEqual(held.confirmedSecrets.hub_password, 'pw-2', 'and so are the confirmed credentials')
+    assert.strictEqual(held.site.hub_url, 'https://farm-hub.other.io', 'the new ones wait')
+    await call(fake, 'GET', '/api/farm/pair/status', { token })
+    r = await call(fake, 'GET', '/api/farm/pair/status', { token })
+    assert.deepStrictEqual([r.json.state, r.json.needs_confirmation], ['awaiting_confirmation', true])
+    // the admin declines the new addresses: the site goes on as it was, the computer stays paired
+    await flip(fake, 'reject', { token })
+    r = await call(fake, 'GET', '/api/farm/pair/status', { token })
+    assert.deepStrictEqual([r.status, r.json.state, r.json.needs_confirmation], [200, 'active', false])
+    held = (await flip(fake, 'state', { token })).pairing
+    assert.deepStrictEqual([held.confirmed, held.awaiting, held.confirmedSite.hub_url], [true, false, site.hub_url])
+    // new addresses again, then the computer goes back to the confirmed ones: nothing is left waiting
+    await call(fake, 'PUT', '/api/farm/pair/site', { token, body: { protocol: 1, site: Object.assign({}, moved, { hub_password: 'pw-3' }) } })
+    r = await call(fake, 'PUT', '/api/farm/pair/site', { token, body: { protocol: 1, site: withoutPassword } })
+    assert.deepStrictEqual([r.status, r.json.needs_confirmation, r.json.site_changed], [200, false, true])
+    held = (await flip(fake, 'state', { token })).pairing
+    assert.deepStrictEqual([held.awaiting, held.confirmedSecrets.hub_password], [false, 'pw-2'], 'the password of the confirmed addresses was kept for them')
 
     // the computer gives its token up; afterwards it is refused
     r = await call(fake, 'DELETE', '/api/farm/pair/token', { token })
@@ -172,5 +194,112 @@ test('declined, expired, too many wrong codes, and the plain port', { skip }, as
     r = await call(fake, 'GET', '/api/farm/pair/status', { token, plain: true })
     assert.strictEqual(r.status, 400)
     assert.strictEqual((await flip(fake, 'state')).plainApiHits, 1, 'a call on the plain port is counted')
+  } finally { await fake.close() }
+})
+
+test('a confirmation is bound to the description the admin read', { skip }, async () => {
+  const fake = await startFakeBlossom()
+  try {
+    const token = newToken()
+    await call(fake, 'POST', '/api/farm/pair/claim', { body: { protocol: 1, pairing_code: (await flip(fake, 'new-code')).code, farm_token: token, computer } })
+    // whoever holds the token sends addresses the admin will recognise ...
+    await call(fake, 'PUT', '/api/farm/pair/site', { token, body: { protocol: 1, site } })
+    const shown = await flip(fake, 'pending', { token })
+    assert.strictEqual(shown.state, 'awaiting_confirmation')
+    assert.strictEqual(shown.pending.hub_url, site.hub_url)
+    assert.match(shown.pendingRevision, /^[0-9a-f]{32}$/)
+    // ... and swaps them while the admin types the name of the site
+    const swapped = Object.assign({}, site, { hub_url: 'https://hub.attacker.example', provider_url: 'https://provider.attacker.example', restart_url: 'https://restart.attacker.example', hub_password: 'his-own', restart_secret: 'his-own' })
+    let r = await call(fake, 'PUT', '/api/farm/pair/site', { token, body: { protocol: 1, site: swapped } })
+    assert.strictEqual(r.status, 200)
+    await call(fake, 'GET', '/api/farm/pair/status', { token })
+    r = await call(fake, 'GET', '/api/farm/pair/status', { token })
+    assert.strictEqual(r.json.state, 'awaiting_confirmation', 'the state reads the same as when the card was shown')
+    // the admin presses Confirm on the card that was read
+    r = await call(fake, 'POST', '/__test/confirm', { plain: true, body: { token, label: 'Milan', revision: shown.pendingRevision } })
+    assert.deepStrictEqual([r.status, r.json.code], [409, 'pending_changed'])
+    let held = (await flip(fake, 'state', { token })).pairing
+    assert.deepStrictEqual([held.confirmed, held.state], [false, 'awaiting_confirmation'], 'nothing was confirmed')
+    // a change of credentials alone is another revision as well
+    const now = await flip(fake, 'pending', { token })
+    assert.notStrictEqual(now.pendingRevision, shown.pendingRevision)
+    await call(fake, 'PUT', '/api/farm/pair/site', { token, body: { protocol: 1, site: Object.assign({}, swapped, { hub_password: 'another' }) } })
+    r = await call(fake, 'POST', '/__test/confirm', { plain: true, body: { token, revision: now.pendingRevision } })
+    assert.deepStrictEqual([r.status, r.json.code], [409, 'pending_changed'])
+    // sending the same description again is not a change
+    const again = await flip(fake, 'pending', { token })
+    await call(fake, 'PUT', '/api/farm/pair/site', { token, body: { protocol: 1, site: Object.assign({}, swapped, { hub_password: 'another' }) } })
+    assert.strictEqual((await flip(fake, 'pending', { token })).pendingRevision, again.pendingRevision)
+    // the revision of what is shown now is accepted
+    r = await call(fake, 'POST', '/__test/confirm', { plain: true, body: { token, label: 'Milan', revision: again.pendingRevision } })
+    assert.strictEqual(r.status, 200)
+    held = (await flip(fake, 'state', { token })).pairing
+    assert.deepStrictEqual([held.confirmed, held.confirmedSite.hub_url], [true, 'https://hub.attacker.example'])
+  } finally { await fake.close() }
+})
+
+test('a site that exists is replaced only when the admin names it, and only after a check that passed', { skip }, async () => {
+  const fake = await startFakeBlossom()
+  try {
+    // the agency has a working, paired site
+    const first = newToken()
+    await call(fake, 'POST', '/api/farm/pair/claim', { body: { protocol: 1, pairing_code: (await flip(fake, 'new-code')).code, farm_token: first, computer } })
+    await call(fake, 'PUT', '/api/farm/pair/site', { token: first, body: { protocol: 1, site } })
+    const siteId = (await flip(fake, 'confirm', { token: first, label: 'Milan' })).site_id
+    // a new command leaks; a stranger claims it and sends the agency's own host names with a password that is not the hub's
+    const stranger = newToken()
+    await call(fake, 'POST', '/api/farm/pair/claim', { body: { protocol: 1, pairing_code: (await flip(fake, 'new-code')).code, farm_token: stranger, computer: Object.assign({}, computer, { label: 'FARM-PC' }) } })
+    await flip(fake, 'set-check', { ok: false, failed_step: 'signin', detail: 'Hub sign-in: the hub refused the user name or password.' })
+    await call(fake, 'PUT', '/api/farm/pair/site', { token: stranger, body: { protocol: 1, site: Object.assign({}, site, { hub_password: 'garbage', restart_secret: 'garbage' }) } })
+    const shown = await flip(fake, 'pending', { token: stranger })
+    assert.deepStrictEqual(shown.replaces, { id: siteId, label: 'Milan' }, 'the page is told which site has the same hub address')
+    assert.strictEqual(shown.check.ok, false)
+    // Confirm without naming the site: the server does not pick it by itself
+    let r = await call(fake, 'POST', '/__test/confirm', { plain: true, body: { token: stranger, revision: shown.pendingRevision } })
+    assert.deepStrictEqual([r.status, r.json.code], [409, 'hub_address_in_use'])
+    // Confirm naming the site, with a check that failed: refused
+    r = await call(fake, 'POST', '/__test/confirm', { plain: true, body: { token: stranger, revision: shown.pendingRevision, replaceSiteId: siteId } })
+    assert.deepStrictEqual([r.status, r.json.code], [409, 'check_required'])
+    // the working site and its computer are untouched
+    r = await call(fake, 'GET', '/api/farm/pair/status', { token: first })
+    assert.deepStrictEqual([r.status, r.json.state], [200, 'active'])
+    let held = (await flip(fake, 'state', { token: first })).pairing
+    assert.deepStrictEqual([held.revoked, held.confirmedSecrets.hub_password], [null, 'pw-1'])
+    // the legitimate case: the owner's new computer, with the hub's real login, and the box ticked
+    await flip(fake, 'set-check', { ok: true, devices: 3 })
+    const mine = newToken()
+    await call(fake, 'POST', '/api/farm/pair/claim', { body: { protocol: 1, pairing_code: (await flip(fake, 'new-code')).code, farm_token: mine, computer } })
+    await call(fake, 'PUT', '/api/farm/pair/site', { token: mine, body: { protocol: 1, site: Object.assign({}, site, { hub_password: 'pw-new' }) } })
+    const card = await flip(fake, 'pending', { token: mine })
+    r = await call(fake, 'POST', '/__test/confirm', { plain: true, body: { token: mine, revision: card.pendingRevision, replaceSiteId: 'not-a-site' } })
+    assert.strictEqual(r.status, 404)
+    r = await call(fake, 'POST', '/__test/confirm', { plain: true, body: { token: mine, revision: card.pendingRevision, replaceSiteId: siteId } })
+    assert.deepStrictEqual([r.status, r.json.site_id], [200, siteId], 'the same site row is kept')
+    held = (await flip(fake, 'state', { token: first })).pairing
+    assert.deepStrictEqual([held.revoked, held.revokedReason], ['revoked', 'replaced'], 'only now is the earlier computer unpaired')
+    r = await call(fake, 'GET', '/api/farm/pair/status', { token: first })
+    assert.deepStrictEqual([r.status, r.json.code], [401, 'farm_token_revoked'])
+    // a site of another workspace is never offered and cannot be named
+    const foreign = (await flip(fake, 'add-site', { workspace: 'Somebody Else', hubUrl: 'https://farm-hub.elsewhere.io' })).site_id
+    const t4 = newToken()
+    await call(fake, 'POST', '/api/farm/pair/claim', { body: { protocol: 1, pairing_code: (await flip(fake, 'new-code')).code, farm_token: t4, computer } })
+    await call(fake, 'PUT', '/api/farm/pair/site', { token: t4, body: { protocol: 1, site: Object.assign({}, site, { hub_url: 'https://farm-hub.elsewhere.io' }) } })
+    assert.strictEqual((await flip(fake, 'pending', { token: t4 })).replaces, null)
+    r = await call(fake, 'POST', '/__test/confirm', { plain: true, body: { token: t4, replaceSiteId: foreign } })
+    assert.strictEqual(r.status, 404)
+  } finally { await fake.close() }
+})
+
+test('two workspaces with the same name are still two workspaces', { skip }, async () => {
+  const fake = await startFakeBlossom()
+  try {
+    const a = newToken(); const b = newToken()
+    let r = await call(fake, 'POST', '/api/farm/pair/claim', { body: { protocol: 1, pairing_code: (await flip(fake, 'new-code', { workspace: 'Agency' })).code, farm_token: a, computer } })
+    const real = r.json.workspace_id
+    r = await call(fake, 'POST', '/api/farm/pair/claim', { body: { protocol: 1, pairing_code: (await flip(fake, 'new-code', { workspace: 'Agency', workspaceId: '11111111-2222-3333-4444-555555555555' })).code, farm_token: b, computer } })
+    assert.deepStrictEqual([r.json.workspace_name, r.json.workspace_id], ['Agency', '11111111-2222-3333-4444-555555555555'])
+    assert.notStrictEqual(r.json.workspace_id, real)
+    r = await call(fake, 'GET', '/api/farm/pair/status', { token: a })
+    assert.strictEqual(r.json.workspace_id, real)
   } finally { await fake.close() }
 })

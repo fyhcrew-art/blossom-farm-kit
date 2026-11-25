@@ -46,6 +46,7 @@ function Start-FarmPrograms {
 
 try {
     Assert-Administrator
+    Protect-KitFolder -KitRoot $KitRoot
     $paths = Get-FarmPaths
     $farm = Read-FarmConfig -Paths $paths
     if (-not $farm) { Stop-Farm -Problem 'This computer has no farm installation.' -WhatToDo 'Run install.ps1 instead.' }

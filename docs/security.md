@@ -323,9 +323,25 @@ How the kit handles them:
   sits in a folder others can change, stops the installer. Root owns
   everything the services run and everything they read as configuration
   (files `600` or `640`, folders `700` or `750`); the service account can
-  read what it needs and can write only to the logs, the database, its
-  temporary folder and the provider's own folder. It cannot change its own
-  programs, scripts or settings.
+  read what it needs and can write only to its logs (`/opt/farm/logs`), the
+  database, its temporary folder and the provider's own folder. It cannot
+  change its own programs, scripts or settings. A provider nickname that is
+  the name of one of the kit's own folders, in any letter case, is refused:
+  it would hand that folder to the service account.
+* On macOS, **root never writes into a folder the service account can
+  write to.** The two services that run as root keep their logs in
+  `/opt/farm/logs-root`, which only root can open. The logs in
+  `/opt/farm/logs` are rotated by the wrapper that starts each service
+  (`services/farm-run.sh`), running as that service's own account, not by a
+  system job with root's rights: in a folder another account can write to,
+  a file name can be made to lead elsewhere.
+* The kit's own folder is protected the same way, because its scripts run
+  with full rights at every maintenance run: `C:\blossom-farm-kit` is
+  locked by the installer (Administrators and SYSTEM may change it), and a
+  kit in a folder that cannot be protected is refused; on macOS the kit is
+  copied to `/opt/blossom-farm-kit`, owned by root, before anything else is
+  done, wherever it was unpacked. A kit folder with a link in it, or with a
+  file somebody else owns, is not accepted.
 * Passwords you type are read hidden and are not kept in the console history.
 * The two values meant for Blossom are sent to it by the installer when the
   computer is paired (section 9), and are then not printed at all. Without a
@@ -351,7 +367,9 @@ dependencies):
   nothing else. No part of a request ever reaches a command line: the service
   runs `sc.exe start|stop|query` on Windows and
   `/bin/launchctl print|bootstrap|kickstart|bootout` on macOS, with service
-  names that are constants in the file;
+  names that are constants in the file (on macOS also `/bin/ps`, for the
+  process number launchd names: a service whose start wrapper still waits
+  for another service is not reported as running);
 * every request needs the secret, including unknown paths (they get 401, not
   404, so a stranger learns nothing);
 * it sends no CORS headers: it is called by Blossom's servers, never by a
@@ -384,7 +402,9 @@ leaked.
   belongs to the Mac user who installed it, not to root. Whoever can act as
   that user can replace FFmpeg, and the provider runs FFmpeg (as the service
   account, never as root). Everything else the farm runs is in `/opt/farm`
-  and belongs to root. This is one more reason not to use the farm Mac, or
+  and belongs to root; so does an FFmpeg of your own that you name with
+  `--ffmpeg`, which the installer copies there. Nothing pins that file: the
+  kit has no checksum for an FFmpeg you bring. This is one more reason not to use the farm Mac, or
   that user, for anything else.
 * **On macOS, an unattended restart needs FileVault off** (README, step 6).
   With FileVault off, the disk is readable by whoever takes the Mac: the
@@ -402,7 +422,11 @@ leaked.
   Node.js, MongoDB and cloudflared, which the installer downloads from their
   publishers and checks against pinned SHA-256 values; a file fetched by the
   installer carries no "quarantine" mark, so Gatekeeper is not asked about
-  it. The checksum is the check.
+  it. A file you bring yourself (`--provider-binary`, `--ffmpeg`) carries
+  that mark when it came through a browser, and a service could not start
+  it; the installer takes the mark off its own copy in `/opt/farm/bin`, for
+  the provider only after the pinned checksum matched. The checksum is the
+  check.
 * **With Appium (`-WithAppium`, `--with-appium`), npm packages are not checksum-pinned.** The kit pins
   the *versions* of three packages (`appium`, `appium-xcuitest-driver`,
   `appium-gads`, in `versions.json`). Each of them pulls in hundreds of other
@@ -483,13 +507,20 @@ says what is sent, what each party can do, and what can go wrong.
   workspace; sign in to Blossom; delete the site.
 * New **credentials** for the addresses an admin confirmed are accepted at
   once: this is how `rotate-secrets` works without anybody typing. New
-  **addresses** are not: a change of a host name puts the site back to
-  "waiting for confirmation", and Blossom stops using it until an admin has
-  looked at the new addresses and confirmed them.
+  **addresses** are not: a changed host name waits until an admin has looked
+  at the new addresses and confirmed them. Until then Blossom goes on using
+  the addresses that were confirmed; the token cannot switch a site off or
+  point it elsewhere by itself. If the admin declines, the new addresses are
+  dropped and the computer stays paired.
+* What an admin confirms is exactly what was on the page: a confirmation
+  names the description it was given for, and Blossom refuses it when the
+  computer has sent another one in the meantime, and shows the new one.
 * It does not expire by itself. It ends when an admin unpairs the computer or
   removes the site in Blossom, when the computer unpairs itself
   (`uninstall` with `-Unpair` / `--unpair`), or when a new pairing code is
-  used on the same computer (the old token is given up).
+  used on the same computer (the old token is given up). For a code of
+  another workspace that takes a typed yes: "A genuine command from another
+  workspace", below.
 * It travels with an export archive (`export-farm`), so that a farm moved to
   another computer keeps its pairing. That is one more reason to treat the
   archive like a master key.
@@ -537,11 +568,38 @@ says what is sent, what each party can do, and what can go wrong.
   command from Blossom itself, signed in, and not from a message, a document
   or a helpful stranger. The installer prints the address it is about to
   talk to, and shows it again at the end.
+* **A genuine command from another workspace.** Anybody can open a
+  workspace in Blossom, give it your agency's name, make a command there and
+  send it to you ("run this to repair your farm"). The command is real: the
+  address is Blossom's, every checksum matches. Run on your paired farm
+  computer it would move the farm: a new password for the hub login, and
+  the addresses, that password and the restart secret sent to *their*
+  workspace, where they confirm and control your phones. So a paired
+  computer does not follow such a command by itself. The installer compares
+  the address of Blossom and the **identifier** of the workspace (which
+  Blossom assigns and nobody chooses; the name is not compared) with the
+  pairing it holds. When they differ it shows both, says what moving means,
+  and goes on only when the word `replace` is typed at the keyboard, or the
+  command carries `-ReplacePairing` / `--replace-pairing`. With no keyboard
+  and no switch it stops and changes nothing; a claim it had already made in
+  the other workspace is given up again, and that workspace has received the
+  computer's name and nothing else. This stops the command, not you: do not
+  type `replace` for a command you did not take from your own Blossom.
+* **The command is swapped under the admin's eyes.** Whoever used a leaked
+  command could send addresses the admin recognises, wait for the confirm
+  page to open, and send their own. A confirmation is therefore bound to
+  the description the page showed: when the computer has sent another one
+  since, Blossom refuses the confirmation and shows the new addresses.
+* **Somebody uses a leaked command to push your own site aside.** A computer
+  that sends the addresses of a site you already have does not replace that
+  site unless the admin says so on the confirm page, and only when
+  Blossom's check of what it sent passed, which takes the hub's real login.
+  Until then the existing site and its paired computer are untouched.
 * **The farm token is stolen** (somebody had Administrator or root on the
-  farm computer). With it they can point your site at another hub, which
-  Blossom will not use until an admin confirms the new addresses, or replace
-  the stored hub password with a wrong one, which breaks the site until you
-  rotate. They can read nothing from Blossom. But somebody with those rights
+  farm computer). With it they can propose another hub for your site, which
+  waits for an admin while Blossom goes on using the confirmed addresses, or
+  replace the stored hub password with a wrong one, which breaks the site
+  until you rotate. They can read nothing from Blossom. But somebody with those rights
   on the farm computer already controls the farm itself; unpair the computer
   in Blossom, then deal with the computer.
 * **Blossom is unreachable or says no** at the end of the installation. The
@@ -569,7 +627,9 @@ checks every program it downloads against `versions.json`, as before.
 
 The kit is unpacked to `C:\blossom-farm-kit` or `/opt/blossom-farm-kit`,
 writable by Administrators or root only: these scripts run with full rights
-later, so nobody else may change them.
+later, so nobody else may change them. A kit you download and unpack by hand
+ends up protected in the same way: the installer and every script check the
+kit folder before they do anything else (section 6).
 
 What this chain does not do: it does not prove that the release itself is
 good. That rests on this repository, as it does for a kit you download by

@@ -23,6 +23,7 @@ set -u
 KIT_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib/farmkit.sh
 . "$KIT_ROOT/lib/farmkit.sh"
+SCRIPT_ARGS=("$@")
 trap farm_http_cleanup EXIT
 
 ROLLBACK=0; PROVIDER_BINARY=''
@@ -42,6 +43,14 @@ stop_farm_programs() {
     for name in cloudflared keep-available restart gate provider hub; do stop_farm_service "$name"; done
 }
 
+farm_ports_missing() {
+    # Prints what does not answer on its local port after a start. A service
+    # that launchd runs is not yet a program that works.
+    wait_tcp_port 10000 90 || printf 'hub (port 10000) '
+    wait_tcp_port 10002 20 || printf 'gate (port 10002) '
+    wait_tcp_port 19999 20 || printf 'restart (port 19999) '
+}
+
 start_farm_programs() {
     # Prints the services that did not start.
     local name
@@ -52,6 +61,7 @@ start_farm_programs() {
 }
 
 assert_macos_root
+use_protected_kit_folder "scripts/update.sh" ${SCRIPT_ARGS[@]+"${SCRIPT_ARGS[@]}"}
 get_farm_arch
 get_farm_paths /opt/farm
 read_farm_config
@@ -75,10 +85,15 @@ if [ "$ROLLBACK" = 1 ]; then
     fi
     stop_farm_programs
     printf '%s\n' "$FILES" | while IFS='|' read -r target saved; do
-        [ -f "$BACKUP/$saved" ] && cp -pf "$BACKUP/$saved" "$target"
+        # as a new file, never onto the program it replaces (lib/farmkit.sh, copy_as_new_file)
+        if [ -f "$BACKUP/$saved" ] && ! copy_as_new_file "$BACKUP/$saved" "$target"; then
+            write_warn "Could not put back $target."
+        fi
     done
     bad=$(start_farm_programs)
-    [ -z "$bad" ] || stop_farm "After the rollback these services did not start: $bad" 'Run scripts/status.sh --logs and read the log of the first one.'
+    [ -n "$bad" ] || bad=$(farm_ports_missing)
+    [ -z "$bad" ] || stop_farm "After the rollback these services did not start or do not answer: $bad" 'Run scripts/status.sh --logs and read the log of the first one.'
+    wait_tcp_port 10001 30 || write_warn 'The GADS provider is not listening yet. Read /opt/farm/logs/provider.log.'
     write_ok 'The previous programs are back and running.'
     exit 0
 fi
@@ -141,9 +156,11 @@ fi
 rm -f "$new_hub" "$new_provider"
 
 bad=$(start_farm_programs)
+[ -n "$bad" ] || bad=$(farm_ports_missing)
 if [ -n "$bad" ]; then
-    stop_farm "After the update these services did not start: $bad" 'Go back with   sudo bash scripts/update.sh --rollback   . To report it on the kit repository, copy the output of   sudo bash scripts/status.sh --logs   (it masks session tokens and your host names). Never post a file from /opt/farm/logs itself: GADS writes request addresses into its logs, and they can contain a login token.'
+    stop_farm "After the update these services did not start or do not answer: $bad" 'Go back with   sudo bash scripts/update.sh --rollback   . To report it on the kit repository, copy the output of   sudo bash scripts/status.sh --logs   (it masks session tokens and your host names). Never post a file from /opt/farm/logs itself: GADS writes request addresses into its logs, and they can contain a login token.'
 fi
+wait_tcp_port 10001 30 || write_warn 'The GADS provider is not listening yet. Read /opt/farm/logs/provider.log; scripts/status.sh says more.'
 write_ok 'Updated and running. Check with scripts/status.sh, then "Test connection" in Blossom.'
 read_farm_pairing
 if [ "$FARM_IS_PAIRED" = 1 ]; then

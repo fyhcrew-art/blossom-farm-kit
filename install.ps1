@@ -48,6 +48,10 @@
     Path of a GADS-drag.exe you already have (for example copied from another
     farm computer), used instead of downloading it. It is only accepted when
     its SHA-256 is the one pinned in versions.json.
+.PARAMETER ReplacePairing
+    Needed, together with a pairing code, when this computer is already
+    paired with another Blossom workspace and nobody is at the keyboard to
+    say yes: the farm leaves that workspace for the one of the new command.
 .PARAMETER SkipFirewallRules
     Do not create the Windows Firewall rules that keep other computers on
     your network away from the ports the provider opens for each phone. Only
@@ -74,7 +78,8 @@ param(
     [string]$ProviderExe = '',
     [switch]$SkipFirewallRules,
     [switch]$SkipPowerSettings,
-    [switch]$SkipSelfTest
+    [switch]$SkipSelfTest,
+    [switch]$ReplacePairing
 )
 
 $ErrorActionPreference = 'Stop'
@@ -163,7 +168,7 @@ function Show-FinalValues {
     }
     Write-Host ''
     Write-Host '======================================================================' -ForegroundColor Cyan
-    Write-Host ' Enter these in Blossom CRM -> Phone Farm -> Farm setup -> Advanced' -ForegroundColor Cyan
+    Write-Host ' Enter these in Blossom CRM -> Phone Farm -> Farm setup (the address form)' -ForegroundColor Cyan
     Write-Host '======================================================================' -ForegroundColor Cyan
     Write-Host ('   Hub address ............ https://' + $s.HubHost)
     Write-Host ('   Provider address ....... https://' + $s.ProviderHost)
@@ -190,9 +195,10 @@ function Show-FinalValues {
         Write-Host ' Nothing secret was changed in this run. Lost a value? scripts\rotate-secrets.ps1' -ForegroundColor Yellow
         Write-Host ' makes new ones.' -ForegroundColor Yellow
     }
-    Write-Host ' The way without copying: Blossom -> Phone Farm -> Farm setup -> Connect a' -ForegroundColor Yellow
-    Write-Host ' computer shows one command for this computer; it is safe to run on a farm' -ForegroundColor Yellow
-    Write-Host ' that is already installed.' -ForegroundColor Yellow
+    Write-Host ' The form is behind "Connect a farm"; where Blossom offers "Connect a' -ForegroundColor Yellow
+    Write-Host ' computer", it is behind "Advanced: enter the addresses yourself", and' -ForegroundColor Yellow
+    Write-Host ' "Connect a computer" itself shows one command that does this without' -ForegroundColor Yellow
+    Write-Host ' copying; it keeps a farm that is already installed.' -ForegroundColor Yellow
     Write-Host ''
 }
 
@@ -241,6 +247,7 @@ try {
     Write-Step '1/12  Checking this computer'
     # ------------------------------------------------------------------
     Assert-Administrator
+    Protect-KitFolder -KitRoot $KitRoot
     if ($PairingCode -or $AppOrigin) {
         # A slip in the command is cheaper to find now than after the installation.
         $fromBlossom = 'Copy the whole command from Blossom (Phone Farm -> Farm setup -> Connect a computer) and run it again.'
@@ -325,13 +332,17 @@ try {
     $pairing = Read-FarmPairing -Paths $paths
     if ($PairingCode) {
         Write-Note ('Telling Blossom (' + (ConvertTo-AppOrigin -Origin $AppOrigin) + ') about this computer...')
-        $claim = Register-FarmPairing -Paths $paths -Origin $AppOrigin -Code $PairingCode
+        $claim = Register-FarmPairing -Paths $paths -Origin $AppOrigin -Code $PairingCode -ReplacePairing:$ReplacePairing
         if ($claim.Ok) {
             $script:Pairing = $true
             $pairing = Read-FarmPairing -Paths $paths
             $where = ''
             if ($pairing -and $pairing.Workspace) { $where = ' (workspace "' + $pairing.Workspace + '")' }
             Write-Ok ('Blossom knows this computer now' + $where + '. The farm is sent to it when the installation has finished.')
+        } elseif ($claim.Kind -eq 'declined') {
+            # Not a failure to work around: the person at the keyboard (or
+            # nobody) did not agree to move the farm to another workspace.
+            Stop-Farm -Problem 'The pairing of this computer was not changed.' -WhatToDo ($claim.Message + ' Nothing about the farm, its passwords or its pairing was changed in this run. If you did not get this command from your own Blossom yourself, do not run it again.')
         } else {
             Write-Warn ('Pairing with Blossom did not work: ' + $claim.Message)
             Write-Warn ('The installation continues. At the end the values are shown for you to enter in Blossom by hand; or get a new command there and run it afterwards. ' + $pairHelp)
@@ -584,7 +595,7 @@ try {
     $workspaces = @(Get-JsonProperty -Object (Get-JsonProperty -Object $r.Json -Name 'result') -Name 'workspaces')
     $workspaceIds = @($workspaces | Where-Object { $_ } | ForEach-Object { [string](Get-JsonProperty -Object $_ -Name 'id') } | Where-Object { $_ })
     if ($r.Status -ne 200 -or $workspaceIds.Count -eq 0) {
-        Stop-Farm -Problem ('The hub did not list its workspaces (HTTP ' + $r.Status + ').') -WhatToDo 'Restart the hub (Restart-Service GadsHub), wait a minute and run install.ps1 again.'
+        Stop-Farm -Problem ('The hub did not list its workspaces (HTTP ' + $r.Status + ').') -WhatToDo 'Restart the hub (Restart-Service GadsHub -Force; -Force because other farm services depend on it, and it restarts them too), wait a minute and run install.ps1 again.'
     }
 
     # "blossom": the login Blossom CRM uses. Admin role, because the product

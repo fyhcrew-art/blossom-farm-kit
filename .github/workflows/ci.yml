@@ -173,7 +173,7 @@ jobs:
           done
 
   macos:
-    name: macOS scripts on macOS (the bash, awk and sed of macOS; plutil, pfctl, newsyslog)
+    name: macOS scripts on macOS (the bash, awk and sed of macOS; plutil, pfctl)
     runs-on: macos-15
     timeout-minutes: 15
     permissions:
@@ -211,15 +211,13 @@ jobs:
           /bin/bash tests/pairing.test.sh
           /bin/bash tests/bootstrap.test.sh
 
-      - name: The launchd property lists, the packet filter rule and the newsyslog file are accepted by macOS
+      - name: The launchd property lists and the packet filter rule are accepted by macOS
         run: |
           set -euo pipefail
           /bin/bash tests/render-templates.sh "$RUNNER_TEMP/rendered"
           plutil -lint "$RUNNER_TEMP"/rendered/*.plist
           # -n: parse only, nothing is loaded
           sudo pfctl -n -f "$RUNNER_TEMP/rendered/pf.rules"
-          # -n: say what would be done, do nothing
-          sudo newsyslog -n -v -f "$RUNNER_TEMP/rendered/newsyslog.conf"
 
       - name: The restart service, the provider gate and keep-available.sh
         run: node --test --test-timeout=60000 tests/restart-server.test.js tests/provider-gate.test.js tests/keep-available.test.js tests/fake-blossom.test.js

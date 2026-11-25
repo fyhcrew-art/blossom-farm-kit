@@ -91,6 +91,12 @@ empty "$(test_provider_nickname Provider1)" 'accepts Provider1'
 for n in '' '1provider' 'my provider' 'a' 'prov/../x' 'prov"x' 'abcdefghijklmnopqrstuvwxyz1234567'; do
     not_empty "$(test_provider_nickname "$n")" "refuses [$n]"
 done
+# the nickname becomes a folder below the farm folder, on a disk that does not
+# tell upper case from lower case
+for n in services Services CONFIG Bin logs Logs-Root Data var export-stage; do
+    matches "$(test_provider_nickname "$n")" 'a folder the kit itself uses' "refuses the kit's own folder name [$n]"
+done
+empty "$(test_provider_nickname Services2)" 'a name that only starts like one is accepted'
 
 # ---------------------------------------------------------------------------
 describe 'test_public_ip_address'
@@ -280,6 +286,7 @@ invoke_farm_http() {
         */authenticate) HTTP_TEXT='{"result":{"access_token":"tok"}}'; [ "$FAKE_MODE" = badlogin ] && { HTTP_STATUS=401; HTTP_TEXT='{}'; } ;;
         */admin/devices) HTTP_TEXT='{"result":{"devices":[{"udid":"U1"},{"udid":"U2"}]}}' ;;
         *appium* | *APPIUM* | */admin/provider/*/info) HTTP_STATUS=403; [ "$FAKE_MODE" = leak ] && HTTP_STATUS=200 ;;
+        */provider-update) HTTP_STATUS=403; case $FAKE_MODE in leak | no-update-rule) HTTP_STATUS=404 ;; esac ;;
         */provider/Provider1/devices) HTTP_TEXT='{"result":[{"udid":"U1","connected":true,"provider_state":"live"},{"udid":"U3","connected":false,"provider_state":"init"}]}' ;;
         https://p.yourdomain.com/devices) HTTP_STATUS=401; [ "$FAKE_MODE" = open ] && HTTP_STATUS=200 ;;
         https://p.yourdomain.com/device/U1/info) [ "$bearer" = tok ] || HTTP_STATUS=401 ;;
@@ -291,7 +298,7 @@ invoke_farm_http() {
 }
 invoke_farm_self_test h.yourdomain.com p.yourdomain.com r.yourdomain.com Provider1 blossom pw secret
 is "$SELFTEST_FAILED" 0 'a healthy farm passes'
-is "$(printf '%s' "$SELFTEST_STEPS" | cut -f1 | tr '\n' ' ')" 'address dns reach signin hub hub-appium hub-provider-info devices provider provider-locked restart restart-locked ' 'runs the twelve steps in order'
+is "$(printf '%s' "$SELFTEST_STEPS" | cut -f1 | tr '\n' ' ')" 'address dns reach signin hub hub-appium hub-provider-info hub-provider-update devices provider provider-locked restart restart-locked ' 'runs the thirteen steps in order'
 matches "$SELFTEST_STEPS" 'devices	ok	3 phone\(s\) registered, 1 live right now' 'counts registered and live phones'
 FAKE_MODE=open; invoke_farm_self_test h.yourdomain.com p.yourdomain.com r.yourdomain.com Provider1 blossom pw secret
 is "$SELFTEST_FAILED" 1 'fails when the provider answers without a login'
@@ -299,11 +306,21 @@ matches "$SELFTEST_STEPS" 'provider-locked	fail' 'and names that step'
 FAKE_MODE=leak; invoke_farm_self_test h.yourdomain.com p.yourdomain.com r.yourdomain.com Provider1 blossom pw secret
 matches "$SELFTEST_STEPS" 'hub-appium	fail' 'fails when the tunnel lets "appium" paths through'
 matches "$SELFTEST_STEPS" 'hub-provider-info	fail' 'fails when the tunnel lets the provider record through'
+matches "$SELFTEST_STEPS" 'hub-provider-update	fail' 'fails when the tunnel lets /provider-update through'
+# a tunnel configuration that lost only the /provider-update rule
+FAKE_MODE=no-update-rule; invoke_farm_self_test h.yourdomain.com p.yourdomain.com r.yourdomain.com Provider1 blossom pw secret
+is "$SELFTEST_FAILED" 1 'the self-test fails when only the /provider-update rule is missing'
+matches "$SELFTEST_STEPS" 'hub-provider-update	fail	The hub path /provider-update is not refused by the tunnel \(HTTP 404\)' 'and names the path'
+matches "$SELFTEST_STEPS" 'hub-appium	ok' 'while the other refusals still pass'
 FAKE_MODE=challenge; invoke_farm_self_test h.yourdomain.com p.yourdomain.com r.yourdomain.com Provider1 blossom pw secret
 matches "$SELFTEST_STEPS" 'reach	fail	Cloudflare blocked or challenged' 'names a Cloudflare challenge'
 is "$(printf '%s' "$SELFTEST_STEPS" | awk 'NF' | wc -l | tr -d ' ')" 3 'and stops there'
 FAKE_MODE=badlogin; invoke_farm_self_test h.yourdomain.com p.yourdomain.com r.yourdomain.com Provider1 blossom pw secret
-matches "$SELFTEST_STEPS" 'signin	fail	The hub refused' 'names a refused login'
+matches "$SELFTEST_STEPS" 'signin	fail	The hub refused the password of the user "blossom"' 'names a refused login'
+matches "$SELFTEST_STEPS" 'self-test.sh --hub-user admin' 'and says how to test without a password nobody has'
+invoke_farm_self_test h.yourdomain.com p.yourdomain.com r.yourdomain.com Provider1 admin pw secret
+matches "$SELFTEST_STEPS" 'signin	fail	The hub refused the password of its administrator' 'a refused administrator password is named as such'
+not_matches "$SELFTEST_STEPS" 'rotate-secrets' 'and rotating the login of Blossom is not the advice for it'
 FAKE_MODE=good; invoke_farm_self_test h.yourdomain.com p.yourdomain.com r.yourdomain.com Provider1 blossom pw wrong
 matches "$SELFTEST_STEPS" 'restart	fail	The restart service refused the secret' 'names a refused restart secret'
 farm_resolve() { echo 192.168.1.20; }
@@ -378,6 +395,116 @@ matches "$(cat "$log")" 'still waiting for 127\.0\.0\.1:1' 'and logs what it wai
 not_matches "$(cat "$log")" '^started$' 'the program was not run'
 not_ok bash "$RUN" --log "$log" 2> /dev/null
 not_ok bash "$RUN" -- /bin/true 2> /dev/null
+
+# the wrapper rotates its own log, as the account the program runs as
+rot=$WORK/rot.log
+bash "$RUN" --log "$rot" --log-max-kb 1 --log-keep 2 -- /bin/sh -c 'i=0; while [ $i -lt 900 ]; do echo "line $i ....................................................................."; i=$((i + 1)); done'
+sleep 0.5
+ok test -f "$rot.1.gz"
+ok test -f "$rot.2.gz"
+not_ok test -e "$rot.3.gz"
+not_ok test -e "$rot.1"
+matches "$(gzip -dc "$rot.1.gz" | head -n 1)" '^line [0-9]+ ' 'a log that was put aside can be read'
+total=$( { gzip -dc "$rot.2.gz" "$rot.1.gz"; cat "$rot" 2> /dev/null; } | tail -n 1)
+is "${total%% .*}" 'line 899' 'the newest line is the last one'
+
+# ---------------------------------------------------------------------------
+describe 'copy_as_new_file (a program is never rewritten in place)'
+# shellcheck disable=SC2012  # one known file name
+inode() { ls -i "$1" | awk '{ print $1 }'; }
+printf 'old program\n' > "$WORK/prog"; chmod 755 "$WORK/prog"
+ln "$WORK/prog" "$WORK/prog.same-file"      # a second name for the file that is "running"
+before=$(inode "$WORK/prog")
+printf 'new program\n' > "$WORK/prog.src"
+ok copy_as_new_file "$WORK/prog.src" "$WORK/prog" "$(id -u):$(id -g)" 750
+after=$(inode "$WORK/prog")
+if [ "$before" != "$after" ]; then pass; else fail 'the destination is still the same file (same inode): it was rewritten in place'; fi
+is "$(cat "$WORK/prog")" 'new program' 'the destination has the new content'
+is "$(cat "$WORK/prog.same-file")" 'old program' 'the file that was there before is not touched'
+is "$(file_mode "$WORK/prog")" 750 'with the mode that was asked for'
+not_ok test -e "$WORK/prog.new.$$"
+# without owner and mode: those of the source (the rollback of update.sh)
+chmod 700 "$WORK/prog.src"; before=$after
+ok copy_as_new_file "$WORK/prog.src" "$WORK/prog"
+if [ "$before" != "$(inode "$WORK/prog")" ]; then pass; else fail 'the rollback copy rewrote the file in place'; fi
+is "$(file_mode "$WORK/prog")" 700 'the mode of the source is kept'
+# a link at the destination is replaced, not followed
+printf 'elsewhere\n' > "$WORK/elsewhere"; ln -sfn "$WORK/elsewhere" "$WORK/linked"
+ok copy_as_new_file "$WORK/prog.src" "$WORK/linked" "$(id -u):$(id -g)" 750
+not_ok test -L "$WORK/linked"
+is "$(cat "$WORK/elsewhere")" 'elsewhere' 'what the link pointed at is left alone'
+not_ok copy_as_new_file "$WORK/no-such-file" "$WORK/prog" 2> /dev/null
+is "$(cat "$WORK/prog")" 'new program' 'a failed copy leaves the destination as it was'
+src=$(cat "$KIT_ROOT/lib/farmkit.sh" "$KIT_ROOT/scripts/update.sh" "$KIT_ROOT/install.sh")
+not_matches "$src" 'cp (-p?f|-fp?) "[^"]*" "\$(FARM_HUB_EXE|FARM_PROVIDER_EXE|FARM_CLOUDFLARED_EXE|target)"' 'no script copies onto an installed program'
+
+# ---------------------------------------------------------------------------
+describe 'launchd: a service is running when its program is, not its wrapper'
+print_out='system/blossom-farm.hub = {
+	state = running
+
+	program = /bin/bash
+	pid = 412
+}'
+is "$(printf '%s\n' "$print_out" | launchd_process_id)" 412 'the process number is read from launchctl print'
+is "$(printf 'system/x = {\n\tstate = not running\n\tpid = 7\n}\n' | launchd_process_id)" '' 'nothing when launchd says it is not running'
+is "$(printf 'system/x = {\n\tstate = running\n}\n' | launchd_process_id)" 0 'running without a process number'
+ok test_program_started '/opt/farm/bin/GADS hub --host-address=127.0.0.1'
+not_ok test_program_started '/bin/bash /opt/farm/services/farm-run.sh --log /opt/farm/logs/hub.log --wait 27017 -- /opt/farm/bin/GADS hub'
+not_ok test_program_started ''
+# with stand-ins for launchctl and ps
+FAKE_PS=''
+launchctl() { [ "$1" = print ] && printf '%s\n' "$print_out"; }
+ps() { printf '%s\n' "$FAKE_PS"; }
+FAKE_PS='/bin/bash /opt/farm/services/farm-run.sh --log /opt/farm/logs/hub.log --wait 27017 -- /opt/farm/bin/GADS hub'
+ok farm_service_alive hub
+not_ok farm_service_running hub
+FAKE_PS='/opt/farm/bin/GADS hub --host-address=127.0.0.1 --port=10000'
+ok farm_service_running hub
+launchctl() { return 113; }
+not_ok farm_service_alive hub
+not_ok farm_service_running hub
+unset -f launchctl ps
+
+# ---------------------------------------------------------------------------
+describe 'the kit folder (its scripts run as root: only root may change them)'
+trust() { printf '%s\n' "$@" | test_kit_folder_trust; }
+empty "$(trust 'kit 0 755 /opt/blossom-farm-kit' 'above 0 755 /opt' 'above 0 755 /')" 'a kit that root owns, below folders root owns, is accepted'
+empty "$(trust 'kit 0 755 /private/tmp/kit' 'above 0 1777 /private/tmp' 'above 0 755 /private' 'above 0 755 /')" 'a sticky folder above it (like /tmp) is accepted: only root can move what root owns there'
+matches "$(trust 'kit 501 755 /Users/ada/blossom-farm-kit' 'above 501 750 /Users/ada' 'above 0 755 /Users' 'above 0 755 /')" '^/Users/ada/blossom-farm-kit belongs to an account other than root' 'a kit in a home folder is not'
+matches "$(trust 'kit 0 755 /Users/ada/kit' 'above 501 750 /Users/ada' 'above 0 755 /')" '^/Users/ada belongs to an account other than root' 'nor a root-owned kit inside a folder somebody else owns (it could be swapped)'
+matches "$(trust 'kit 0 775 /opt/blossom-farm-kit' 'above 0 755 /opt' 'above 0 755 /')" 'can be changed by accounts other than root' 'nor a kit folder the group may write to'
+matches "$(trust 'kit 0 1777 /opt/blossom-farm-kit' 'above 0 755 /')" 'can be changed by accounts other than root' 'the kit folder itself may not be open to others, sticky or not'
+matches "$(trust 'kit 0 755 /opt/blossom-farm-kit' 'above 0 777 /opt' 'above 0 755 /')" '^/opt can be changed' 'nor one below a folder everybody may write to'
+matches "$(trust 'kit 0 755 /opt/k' 'above 0 755 /opt' 'above 0 755 /' 'inside 501 644 /opt/k/lib/farmkit.sh')" '^/opt/k/lib/farmkit.sh belongs to an account other than root' 'a single file of somebody else inside it is enough'
+matches "$(trust 'kit 0 755 /opt/k' 'above 0 755 /' 'inside 0 666 /opt/k/scripts/update.sh')" 'update.sh can be changed' 'or one that others may write'
+matches "$(trust 'kit 0 755 /opt/k' 'above 0 755 /' 'link 0 0 /opt/k/lib/farmkit.sh')" 'farmkit.sh is a link to another place' 'or a link'
+matches "$(trust 'kit 0 755 /opt/my kit' 'above 0 757 /opt/a b' 'above 0 755 /')" '^/opt/a b can be changed' 'a path with a space is named whole'
+matches "$(trust 'kit  755 /opt/k')" 'cannot be examined' 'what cannot be read is not trusted'
+mkdir -p "$WORK/kit/lib"; : > "$WORK/kit/lib/a.sh"; ln -s /etc/hosts "$WORK/kit/lib/linked.sh"; chmod 755 "$WORK/kit" "$WORK/kit/lib"
+listing=$(list_kit_folder "$WORK/kit")
+is "$(printf '%s\n' "$listing" | head -n 1)" "kit $(id -u) 755 $WORK/kit" 'the listing starts with the kit folder, its owner and its mode'
+is "$(printf '%s\n' "$listing" | awk '$1 == "above"' | tail -n 1)" 'above 0 755 /' 'goes up to the root folder'
+has_line "$listing" "link 0 0 $WORK/kit/lib/linked.sh"
+mkdir "$WORK/sticky"; chmod 1777 "$WORK/sticky"
+is "$(file_mode_bits "$WORK/sticky")" 1777 'the sticky bit of a folder is read'
+for f in "$KIT_ROOT"/install.sh "$KIT_ROOT"/scripts/*.sh; do
+    rel=${f#"$KIT_ROOT"/}
+    matches "$(grep -A 4 '^assert_macos_root$' "$f")" "use_protected_kit_folder \"?$rel\"? " "$rel checks the kit folder before it does anything"
+done
+
+# ---------------------------------------------------------------------------
+describe 'the logs of the root services'
+get_farm_paths /opt/farm
+is "$FARM_ROOT_LOGS" /opt/farm/logs-root 'they have a folder of their own'
+for name in restart firewall; do
+    matches "$(cat "$KIT_ROOT/launchd/blossom-farm.$name.plist")" '<string>@FARM_ROOT@/logs-root/[a-z-]+\.log</string>' "$name writes its log where only root can"
+    not_matches "$(cat "$KIT_ROOT/launchd/blossom-farm.$name.plist")" '@FARM_ROOT@/logs/' "$name writes nothing into the folder of the service account"
+done
+for name in mongodb hub provider gate keep-available cloudflared; do
+    not_matches "$(cat "$KIT_ROOT/launchd/blossom-farm.$name.plist")" 'logs-root' "$name (the service account) does not use root's log folder"
+done
+not_ok test -e "$KIT_ROOT/launchd/newsyslog.conf.template"
 
 # ---------------------------------------------------------------------------
 describe 'keep-available.sh'
