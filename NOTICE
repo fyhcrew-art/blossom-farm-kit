@@ -91,13 +91,20 @@ versions pinned in versions.json. Licences as stated by the projects:
 * NSSM (NSSM.NSSM) - public domain; the installer keeps a private copy of
   nssm.exe in C:\farm\bin on the farm computer
 
+Only with "install.ps1 -WithAppium", installed with npm from the npm registry:
+
+* Appium (appium) and its iOS driver (appium-xcuitest-driver) - Apache
+  License 2.0. The GADS provider then installs its own Appium plugin
+  (appium-gads, part of GADS) by itself.
+
 Not installed by the kit, but required for iPhones (docs/phones.md):
 
 * Apple Devices or iTunes (Apple) - Apple's licence terms
 * WebDriverAgent, fork by the GADS author
   (https://github.com/shamanec/WebDriverAgent) - BSD licence of
-  WebDriverAgent; it must be signed by the farm operator with their own
-  Apple Developer account
+  WebDriverAgent. The farm operator downloads the pre-built file from that
+  repository's own release page and signs it with their own Apple Developer
+  account; this kit neither contains nor redistributes it
 
 4. Trademarks
 -------------

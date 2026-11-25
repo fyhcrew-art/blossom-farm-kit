@@ -11,16 +11,6 @@ addresses and two secrets into Blossom CRM, and your phones appear there.
 
 There is no onboarding call. This repository is the whole of it.
 
-> **Status of this kit: read this first.** The services
-> (`services/restart-server.js`, `services/provider-gate.js`) are covered by
-> automated tests, and the GADS build is reproduced by CI. The PowerShell
-> scripts were written for Windows PowerShell 5.1 but **have not yet been run
-> on a Windows PC by the authors of this version**; the first releases are
-> being tested on the vendor's own farm. If `install.ps1` stops with an error
-> that its "what to do" line does not resolve, please open an issue with the
-> PROBLEM line (remove host names and passwords first).
-> [`docs/TESTING.md`](docs/TESTING.md) lists exactly what was and was not tested.
-
 ## The 10-minute overview
 
 ```
@@ -65,7 +55,7 @@ All of it runs as Windows services that start with the PC:
 | USB | One data cable per phone and **powered** USB hubs. This is practice, not a rule from GADS: a phone that is awake all day draws more than an unpowered port gives. |
 | A domain | A domain name you own, with its DNS at Cloudflare (free plan is enough). The installer creates three sub-domains on it. |
 | A Cloudflare account | Free. Needed for the tunnel. |
-| An Apple Developer account | Needed to sign WebDriverAgent, the helper app on each phone. Paid (signature lasts a year) or free (lasts 7 days, impractical for a farm). See [`docs/phones.md`](docs/phones.md). |
+| An Apple Developer account | Yours. WebDriverAgent, the helper app on each phone, is downloaded from the GADS author and must be signed with your own Apple account: the paid Apple Developer Program (a signature lasts a year). The kit contains no WebDriverAgent and cannot sign for you. See [`docs/phones.md`](docs/phones.md). |
 | Blossom CRM | A workspace with Phone Farm access. |
 
 ## Step by step
@@ -115,7 +105,7 @@ What the installer does, in order (it prints each step):
 | 9 Tunnel | Opens the Cloudflare sign-in in a browser, creates the tunnel `blossom-farm`, creates the three DNS records, writes and validates the tunnel configuration. |
 | 10 Restart secret | Generates it (256 random bits). |
 | 11 Services | Creates the Windows services (auto-start, restart on crash, rotating logs in `C:\farm\logs`) and starts them; the tunnel last. Switches off sleep on mains power. |
-| 12 Self-test | Performs the checks of Blossom's "Test connection" against your public addresses, plus two of its own: that the provider and the restart service refuse a stranger. |
+| 12 Self-test | Performs the checks of Blossom's "Test connection" against your public addresses, plus three of its own: that the provider and the restart service refuse a stranger, and that the tunnel refuses the hub paths GADS leaves without a login. |
 
 At the end it prints what to paste into Blossom:
 
@@ -135,6 +125,25 @@ log.** Copy them straight into Blossom or a password manager.
 The installer can be run again at any time. It keeps the database, the
 tunnel, the secrets and the passwords, and repairs what is missing.
 
+**Appium: off unless you ask for it.** No screen of Blossom CRM needs Appium:
+the phone list, Control, live video, the AI assistant, downloads to a phone
+(the "Scarica farm" Shortcut) and the Services panel all work without it, and
+GADS marks Appium as optional. Only one older Blossom API
+route (`/api/gads/drive-download`) drives a phone through Appium on the
+provider. If you call that route, or want Appium sessions for your own
+automation, include it:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -WithAppium
+```
+
+This also installs Appium and its iOS driver under `C:\farm` (pinned in
+`versions.json`) and lets the provider start one Appium server per phone. It
+can be added later by running the installer again with the switch. Read
+`docs/security.md`, section 3, first: with Appium on, the tunnel rule that
+refuses "appium" paths on the hub address is what stands between the internet
+and those servers.
+
 ### 4. Connect it to Blossom
 
 In Blossom CRM open **Phone Farm → Farm setup → Connect a farm**, paste the
@@ -144,9 +153,10 @@ values (the restart service goes under "Restart service (optional)"), press
 
 ### 5. Add the phones
 
-Follow [`docs/phones.md`](docs/phones.md): prepare each iPhone, sign and
-upload WebDriverAgent, switch iOS on for the provider, register the phones in
-the hub. Do one phone completely before the others.
+Follow [`docs/phones.md`](docs/phones.md): prepare each iPhone, download
+WebDriverAgent from the GADS author and sign it with your Apple account,
+switch iOS on for the provider, register the phones in the hub. Do one phone
+completely before the others.
 
 ### 6. Check that it survives a restart
 
@@ -211,6 +221,8 @@ Blossom. The first step that is not OK is the cause.
 | Self-test, DNS: "does not resolve yet" | New DNS records | Wait a few minutes, `scripts\self-test.ps1`. |
 | Self-test, Secure connection: "answers, but not the hub behind it" (502/530) | Tunnel up, hub down | `scripts\status.ps1`; `Start-Service GadsHub`. |
 | Self-test, Secure connection: certificate error | Host name deeper than one level (`hub.farm.yourdomain.com`) | Use direct sub-domains: Cloudflare's free certificate covers `*.yourdomain.com` only. |
+| Self-test: "Hub paths containing appium are not refused by the tunnel" | The tunnel configuration was changed by hand | Run `install.ps1` again (it rewrites the configuration). If it stays, stop the tunnel (`Stop-Service Cloudflared`) and report it. |
+| Provider log: "Appium is not available" | Appium is switched on for the provider in the hub but was not installed | Run `install.ps1 -WithAppium`, or switch "Set up Appium servers" off for the provider in the hub page. |
 | Self-test, Provider: "not the provider behind it" (502) | `GadsProvider` is not running | `C:\farm\Provider1\provider.log` and `C:\farm\logs\provider.log`. If it says *Could not provide WebDriverAgent.ipa file from MongoDB*: iOS was switched on for the provider before a WebDriverAgent was uploaded — `docs/phones.md`, step 3. |
 | Blossom "Test connection" fails at Hub sign-in although the self-test passes | A login wall or a challenge in front of the host names | Remove Cloudflare Access applications and "Under Attack"/challenge rules for the three names (`docs/security.md`). |
 | Blossom: taps answer "device is not available" (422) | keep-available is not running | `Get-Service KeepAvailable`, `C:\farm\logs\keep-available.log`. If you created extra workspaces in the hub: `scripts\rotate-secrets.ps1 -KeepAvailable` makes it cover all of them. |
@@ -227,8 +239,9 @@ the GADS 6.0.0 source). With the MongoDB shell
 (`winget install --exact --id MongoDB.Shell`) an Administrator of the PC can
 set a new one:
 `mongosh mongodb://127.0.0.1:27017/gads --eval "db.users.updateOne({username:'admin'},{$set:{password:'<new long password>'}})"`.
-We have not run this recovery ourselves; treat it as a last resort and choose
-a password that passes the installer's rules.
+Run it in `cmd.exe`, not in PowerShell (PowerShell would read `$set` as a
+variable). Choose a password that passes the installer's rules, then restart
+the hub (`Restart-Service GadsHub`).
 
 ## Uninstall
 
@@ -251,7 +264,7 @@ winget, the site in Blossom) with the way to remove each.
 | `scripts/` | status, self-test, update, rotate-secrets, export, import, uninstall |
 | `patch/` | the provider patch and what it does |
 | `.github/workflows/` | `build-gads.yml` builds the patched provider and publishes it; `ci.yml` tests the kit |
-| `docs/` | [`phones.md`](docs/phones.md), [`network.md`](docs/network.md), [`security.md`](docs/security.md), [`TESTING.md`](docs/TESTING.md), [`RELEASING.md`](docs/RELEASING.md) |
+| `docs/` | [`phones.md`](docs/phones.md), [`network.md`](docs/network.md), [`security.md`](docs/security.md), [`RELEASING.md`](docs/RELEASING.md) |
 | `tests/` | tests of the services (Node) and of the pure PowerShell functions (Pester) |
 
 ## Licences, in short

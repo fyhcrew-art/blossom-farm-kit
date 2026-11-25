@@ -796,6 +796,21 @@ function Invoke-FarmSelfTest {
         return $steps
     }
 
+    # extra check, not part of the product's test: GADS 6.0.0 skips its login
+    # for hub paths containing "appium"; the tunnel must refuse them (403).
+    # (cloudflared matches the rule against the decoded path, the same form
+    # the hub checks, so a percent-encoded spelling is refused as well.)
+    $leaks = @()
+    foreach ($probe in @('/device/kit-selftest/appium/status', '/device/kit-selftest/APPIUM/status', '/device/kit-selftest/appiumSource')) {
+        $r = Invoke-FarmHttp -Url ($hub + $probe) -TimeoutSec 15
+        if ($r.Status -ne 403) { $leaks += ($probe + ' -> HTTP ' + $r.Status) }
+    }
+    if ($leaks.Count -gt 0) {
+        & $add 'hub-appium' 'fail' ('Hub paths containing "appium" are not refused by the tunnel: ' + ($leaks -join '; ') + '.') 'GADS does not check the login on these paths. If Appium is switched on for the provider, stop the tunnel (Stop-Service Cloudflared) and report this on the kit repository; see docs\security.md, section 3.'
+    } else {
+        & $add 'hub-appium' 'ok' 'Hub paths containing "appium" are refused at the tunnel (403), as they must be.' $null
+    }
+
     # 6 phones
     $r = Invoke-FarmHttp -Url ($hub + '/provider/' + [Uri]::EscapeDataString($Nickname) + '/devices') -Headers $auth -TimeoutSec 15
     $sync = @()
@@ -863,7 +878,7 @@ function Write-SelfTestReport {
     # Prints the steps; returns $true when nothing failed.
     param([Parameter(Mandatory = $true)]$Steps)
     $titles = @{ address = 'Addresses'; dns = 'DNS'; reach = 'Secure connection (TLS)'; signin = 'Hub sign-in'; hub = 'Hub answers like GADS';
-        devices = 'Phones'; provider = 'Provider'; 'provider-locked' = 'Provider refuses strangers'; restart = 'Restart service'; 'restart-locked' = 'Restart service refuses strangers' }
+        'hub-appium' = 'Hub refuses unauthenticated Appium paths'; devices = 'Phones'; provider = 'Provider'; 'provider-locked' = 'Provider refuses strangers'; restart = 'Restart service'; 'restart-locked' = 'Restart service refuses strangers' }
     $allOk = $true
     foreach ($s in $Steps) {
         $color = 'Green'; $mark = 'OK    '

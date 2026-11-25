@@ -22,5 +22,9 @@
     "node": { "id": "OpenJS.NodeJS.LTS", "version": "26.13.1" },
     "ffmpeg": { "id": "Gyan.FFmpeg", "version": "9.1" },
     "cloudflared": { "id": "Cloudflare.cloudflared", "version": "2026.11.2" }
+  },
+  "npm": {
+    "appium": "3.9.1",
+    "xcuitestDriver": "12.22.8"
   }
 }

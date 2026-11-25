@@ -13,9 +13,9 @@ Two kinds of release live in this repository:
 
 ## First release
 
-1. Push `main`. Wait for the CI workflow to be green. This is the first time
-   the PowerShell scripts are parsed, analysed and unit-tested on Windows
-   (`docs/TESTING.md`): expect to fix things.
+1. Push `main`. Wait for the CI workflow to be green: it parses every script
+   with Windows PowerShell 5.1, runs PSScriptAnalyzer and the Pester tests on
+   Windows, and the Node tests on Windows and Linux.
 2. Run the *Build GADS-drag* workflow by hand (Actions → Build GADS-drag →
    Run workflow, "publish" off). It must end with "Reproduced the pinned
    SHA-256". If it reports a different hash, do not publish: find out why
@@ -23,9 +23,32 @@ Two kinds of release live in this repository:
    `goVersion`).
 3. Tag the same commit: `git tag gads-v6.0.0-drag.1 && git push origin gads-v6.0.0-drag.1`.
    The workflow builds again and creates the release with the three files.
-4. Test `install.ps1` on a real Windows PC with a real phone, following the
-   README as a customer would (`docs/TESTING.md` has the list).
-5. Create the release `kit-v1.0.0` from the tested commit.
+4. Run the acceptance checklist below on a Windows PC with a phone, following
+   the README as a customer would.
+5. Create the release `kit-v1.0.0` from that commit.
+
+## Acceptance checklist for a kit release
+
+On a spare Windows PC (or a virtual machine), never the production farm:
+
+1. `install.ps1` to the end, with a new Cloudflare tunnel and three new host
+   names. Run it a second time: it must change nothing and ask only for the
+   hub administrator password.
+2. `scripts\status.ps1` reports no problem; `scripts\self-test.ps1` passes.
+3. "Test connection" in Blossom is green; the Services panel shows every
+   program and "Restart Provider" works.
+4. One phone through `docs/phones.md`. In Blossom's Control page: picture,
+   tap, swipe, typing; with the AI assistant: `drag`, `source`, `open_url`.
+5. From another network, without signing in: `https://<provider host>/devices`
+   and `https://<restart host>/status` answer 401;
+   `https://<hub host>/device/x/appium/status` and the same address with
+   `%61ppium` answer 403 (`curl --path-as-is`).
+6. Restart the PC and touch nothing: everything comes back by itself.
+7. `rotate-secrets.ps1 -All`; `update.ps1` and `update.ps1 -Rollback`;
+   `export-farm.ps1`, then `import-farm.ps1` and `install.ps1` on a second
+   machine; `uninstall.ps1 -RemoveData`.
+8. With `install.ps1 -WithAppium`: the provider starts, and an Appium session
+   opens through the provider host name.
 
 ## A new patched provider (patch changed, or a newer GADS)
 

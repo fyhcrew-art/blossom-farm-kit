@@ -25,6 +25,11 @@
     Replace DNS records that already exist for the three host names.
 .PARAMETER ResetHubUser
     Give the hub user "blossom" a new password even when the user exists.
+.PARAMETER WithAppium
+    Also install Appium and its iOS driver and let the provider start an
+    Appium server per phone. No screen of Blossom CRM needs it (see README,
+    "Appium: off unless you ask for it"). Once chosen it is remembered for
+    later runs.
 .PARAMETER SkipPowerSettings
     Do not switch off sleep on mains power.
 .PARAMETER SkipSelfTest
@@ -39,6 +44,7 @@ param(
     [string]$TunnelName = 'blossom-farm',
     [switch]$OverwriteDns,
     [switch]$ResetHubUser,
+    [switch]$WithAppium,
     [switch]$SkipPowerSettings,
     [switch]$SkipSelfTest
 )
@@ -168,6 +174,7 @@ try {
         $Nickname = 'Provider1'
         if ($previous -and (Get-JsonProperty -Object $previous -Name 'nickname')) { $Nickname = [string]$previous.nickname }
     }
+    if (-not $WithAppium -and $previous -and ((Get-JsonProperty -Object $previous -Name 'withAppium') -eq $true)) { $WithAppium = $true }
     $reason = Test-ProviderNickname -Nickname $Nickname
     if ($reason) { Stop-Farm -Problem ('The provider nickname "' + $Nickname + '" cannot be used.') -WhatToDo $reason }
 
@@ -204,6 +211,39 @@ try {
     # manager later moves or removes its own copy.
     if (-not (Test-Path -LiteralPath $paths.Nssm)) { Copy-Item -LiteralPath $nssmSource -Destination $paths.Nssm -Force }
     $nssm = $paths.Nssm
+
+    $npmPrefix = Join-Path $paths.Root 'npm'
+    $appiumHome = Join-Path $paths.Root 'appium'
+    if ($WithAppium) {
+        # Installed under C:\farm, not in a user profile: the provider runs as
+        # a Windows service and must find Appium, its driver and its plugin.
+        $npmCmd = Join-Path (Split-Path -Parent $nodeExe) 'npm.cmd'
+        if (-not (Test-Path -LiteralPath $npmCmd)) {
+            Stop-Farm -Problem 'npm was not found next to node.exe.' -WhatToDo 'Reinstall Node.js (winget uninstall --id OpenJS.NodeJS.LTS, then run install.ps1 again).'
+        }
+        foreach ($dir in @($npmPrefix, $appiumHome)) {
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        }
+        $env:APPIUM_HOME = $appiumHome
+        $env:NPM_CONFIG_PREFIX = $npmPrefix
+        $env:Path = $npmPrefix + ';' + (Split-Path -Parent $nodeExe) + ';' + $env:Path
+        $appiumCmd = Join-Path $npmPrefix 'appium.cmd'
+        if (-not (Test-Path -LiteralPath $appiumCmd)) {
+            Write-Note ('Installing Appium ' + $versions.npm.appium + ' (a few minutes)...')
+            $r = Invoke-Native -File $npmCmd -Arguments @('install', '--global', '--prefix', $npmPrefix, '--no-fund', '--no-audit', ('appium@' + $versions.npm.appium))
+            if ($r.Code -ne 0 -or -not (Test-Path -LiteralPath $appiumCmd)) {
+                Stop-Farm -Problem ('npm could not install Appium: ' + (($r.Output | Select-Object -Last 3) -join ' ')) -WhatToDo 'Check the internet connection and run install.ps1 -WithAppium again. To continue without Appium, delete C:\farm\npm and run install.ps1 without -WithAppium.'
+            }
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $appiumHome 'node_modules\appium-xcuitest-driver'))) {
+            Write-Note ('Installing the Appium XCUITest driver ' + $versions.npm.xcuitestDriver + '...')
+            $r = Invoke-Native -File $appiumCmd -Arguments @('driver', 'install', '--source=npm', ('appium-xcuitest-driver@' + $versions.npm.xcuitestDriver))
+            if ($r.Code -ne 0) {
+                Stop-Farm -Problem ('Appium could not install its iOS driver: ' + (($r.Output | Select-Object -Last 3) -join ' ')) -WhatToDo 'Run install.ps1 -WithAppium again. If it repeats, report the text above on the kit repository.'
+            }
+        }
+        Write-Ok ('Appium ' + $versions.npm.appium + ' with the XCUITest driver is installed under C:\farm.')
+    }
 
     $apple = Get-Service -Name 'Apple Mobile Device Service' -ErrorAction SilentlyContinue
     $appleStore = $null
@@ -394,11 +434,18 @@ try {
         if ([int]$existingPort -ne $ProviderPort -or ($existingHost -ne '127.0.0.1' -and $existingHost -ne 'localhost')) {
             Stop-Farm -Problem ('The hub already has a provider "' + $Nickname + '" on ' + $existingHost + ':' + $existingPort + '. This kit needs it on 127.0.0.1:' + $ProviderPort + '.') -WhatToDo ('In the hub page (Admin -> Providers) set its host address to 127.0.0.1 and its port to ' + $ProviderPort + ', or run install.ps1 -Nickname <another name>.')
         }
+        if ($WithAppium -and ((Get-JsonProperty -Object $mine -Name 'setup_appium_servers') -ne $true)) {
+            if ($mine.PSObject.Properties['setup_appium_servers']) { $mine.setup_appium_servers = $true }
+            else { $mine | Add-Member -NotePropertyName 'setup_appium_servers' -NotePropertyValue $true }
+            $r = Invoke-HubAdmin -Path '/admin/providers/update' -Method 'POST' -Body ($mine | ConvertTo-Json -Compress -Depth 6) -Token $adminToken
+            if ($r.Status -eq 200) { Write-Ok ('Provider "' + $Nickname + '" now sets up Appium servers.') }
+            else { Write-Warn ('The hub did not switch Appium on for the provider (HTTP ' + $r.Status + '). Do it in the hub page: Admin -> Providers -> "Set up Appium servers".') }
+        }
         Write-Ok ('Provider "' + $Nickname + '" exists in the hub.')
     } else {
         $body = (@{
                 os = 'windows'; nickname = $Nickname; host_address = '127.0.0.1'; port = $ProviderPort
-                provide_ios = $false; provide_android = $false; setup_appium_servers = $false; use_gads_ios_stream = $false
+                provide_ios = $false; provide_android = $false; setup_appium_servers = [bool]$WithAppium; use_gads_ios_stream = $false
                 wda_bundle_id = ''
             } | ConvertTo-Json -Compress)
         $r = Invoke-HubAdmin -Path '/admin/providers/add' -Method 'POST' -Body $body -Token $adminToken
@@ -517,6 +564,7 @@ try {
         nickname = $Nickname; hubHost = $HubHost; providerHost = $ProviderHost; restartHost = $RestartHost
         hubUser = $HubUserName; tunnelName = $TunnelName; tunnelId = $tunnelId; routesCreated = $true
         gads = [string]$versions.gads.version; gadsDrag = [string]$versions.gadsDrag.version
+        withAppium = [bool]$WithAppium
     }
     Write-TextFileUtf8 -Path $paths.FarmJson -Text ($record | ConvertTo-Json)
 
@@ -542,12 +590,19 @@ try {
     Write-Step '11/12  Windows services'
     # ------------------------------------------------------------------
     $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-    $providerPath = 'PATH=' + (Split-Path -Parent $ffmpegExe) + ';' + $machinePath
     $providerFolder = Join-Path $paths.Root $Nickname
+    $providerEnv = @()
+    if ($WithAppium) {
+        $providerEnv += ('PATH=' + $npmPrefix + ';' + (Split-Path -Parent $nodeExe) + ';' + (Split-Path -Parent $ffmpegExe) + ';' + $machinePath)
+        $providerEnv += ('APPIUM_HOME=' + $appiumHome)
+        $providerEnv += ('NPM_CONFIG_PREFIX=' + $npmPrefix)
+    } else {
+        $providerEnv += ('PATH=' + (Split-Path -Parent $ffmpegExe) + ';' + $machinePath)
+    }
 
     Set-FarmService -Nssm $nssm -Name 'GadsProvider' -DisplayName 'Blossom farm - GADS provider' -Description 'GADS device-farm provider, patched build (Blossom farm kit).' `
         -Application $paths.ProviderExe -Parameters ('provider --nickname=' + $Nickname + ' --hub=' + $HubUrl + ' --mongo-db=127.0.0.1:' + $MongoPort + ' --provider-folder=' + (ConvertTo-NssmArgument -Value $providerFolder) + ' --use-ios-pair-cache') `
-        -Directory $paths.Root -LogFile (Join-Path $paths.Logs 'provider.log') -DependsOn @('GadsHub') -Environment @($providerPath)
+        -Directory $paths.Root -LogFile (Join-Path $paths.Logs 'provider.log') -DependsOn @('GadsHub') -Environment $providerEnv
 
     Set-FarmService -Nssm $nssm -Name 'FarmGate' -DisplayName 'Blossom farm - provider gate' -Description 'Lets only requests with a valid hub token through to the GADS provider (Blossom farm kit).' `
         -Application $nodeExe -Parameters (ConvertTo-NssmArgument -Value (Join-Path $paths.Services 'provider-gate.js')) `

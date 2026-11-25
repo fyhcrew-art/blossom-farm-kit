@@ -63,10 +63,9 @@ Limits you should know:
 * Any valid hub session passes, whatever the user's role. Do not hand out hub
   users you would not trust with every phone.
 * A cancelled token keeps working at the gate for up to 30 seconds.
-* The gate is new code written for this kit. It is covered by automated tests
-  (`tests/provider-gate.test.js`), including WebSocket pass-through, but it
-  has not yet carried the live-video handshake of a real phone in our hands.
-  `docs/TESTING.md` lists this.
+* The gate is part of this kit, not of GADS (`services/provider-gate.js`,
+  with automated tests in `tests/provider-gate.test.js`). Read it; it is
+  short.
 
 `install.ps1` and `scripts\self-test.ps1` check from outside that the provider
 host name answers **401** without a token. If that check ever fails, stop the
@@ -96,11 +95,29 @@ state of the software the farm runs on.
   A Cloudflare rate-limiting rule on `/authenticate` is worth adding
   (`docs/network.md`, section 5).
 * **Hub paths that contain the word "appium" skip the login check**
-  (`hub/auth/auth.go`, `AuthMiddleware`). Blossom calls no such path, so the
-  kit's tunnel configuration refuses them before they reach the hub, and the
-  provider is created with Appium switched off, so there is no Appium server
-  behind those paths either. We treat the tunnel rule as an extra layer, not
-  as the only one.
+  (`hub/auth/auth.go`, `AuthMiddleware`: any path containing "appium" is let
+  through). Behind such paths the hub forwards to the provider, and from there
+  to the Appium server of a phone, if there is one. The kit's answer:
+  * the tunnel configuration refuses every request to the hub host name whose
+    path contains "appium", in any letter case, before it reaches the hub.
+    Blossom never calls such a path on the hub (its Appium calls go to the
+    provider host name, through the gate, with a token);
+  * the installer's self-test checks from outside that these paths answer 403;
+  * by default the provider is created with Appium **off**, so there is no
+    Appium server behind those paths at all.
+
+  If you install with `-WithAppium`, the first point is the only thing between
+  the internet and the Appium servers of your phones for anyone who knows a
+  phone's UDID. cloudflared matches the rule against the decoded request path
+  (`ingress/ingress.go` in its source), the same form the hub checks, so
+  spelling the word with percent-codes does not get around it. To see it for
+  yourself, from any computer with curl, both of these must print **403**:
+  `curl -s -o NUL -w "%{http_code}" --path-as-is https://<hub host>/device/x/appium/status`
+  `curl -s -o NUL -w "%{http_code}" --path-as-is https://<hub host>/device/x/%61ppium/status`
+  Do not edit the tunnel configuration by hand, and do not put a Cloudflare
+  Access rule into it. A side effect of the rule: the hub page's Appium log
+  view does not load through the public address; open the hub page on the PC
+  (`http://127.0.0.1:10000`) for that.
 * **Some hub endpoints are registered outside the login check**
   (`hub/router/handler.go`), among them `/available-devices` (the device list
   of a workspace, for whoever knows the workspace id) and `/provider-update`
@@ -220,11 +237,10 @@ programs. It cannot read data or control a phone. Rotate it with
 
 * The six services run as **LocalSystem**, as on the farm this kit was
   modelled on. A flaw in GADS, in the gate or in the restart service would
-  therefore be a flaw with full rights on that PC. Running them under a
-  restricted account is possible but was not attempted in this version,
-  because the provider needs access to Apple's device service and we could
-  not test the combination. This is one more reason to dedicate the PC to the
-  farm.
+  therefore be a flaw with full rights on that PC. The kit does not set up a
+  restricted service account: the provider needs Apple's device service and
+  the pairing records, and the restart service needs the right to start and
+  stop services. This is one more reason to dedicate the PC to the farm.
 * The hub and provider binaries are **not code-signed**. Their integrity
   rests on the SHA-256 values pinned in `versions.json`, which the installer
   and `scripts\status.ps1` check. The provider is rebuilt by this repository's
