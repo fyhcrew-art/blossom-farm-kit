@@ -185,10 +185,10 @@ Where things are:
   against a specific GADS version. Do not replace `GADS.exe` by hand.
 * **MongoDB, Node.js, FFmpeg, cloudflared**: `update.ps1` leaves them alone.
   Update them with `winget upgrade --id <id>` when you choose to
-  (`versions.json` lists the ids); stop the farm services first
-  (`scripts\uninstall.ps1 -ServicesOnly` is *not* needed: `Stop-Service` is
-  enough) and run `scripts\status.ps1` afterwards. cloudflared runs with
-  `--no-autoupdate`, as Cloudflare recommends for services.
+  (`versions.json` lists the ids): stop the farm services first
+  (`Stop-Service Cloudflared, KeepAvailable, FarmRestart, FarmGate, GadsProvider, GadsHub`),
+  upgrade, restart the PC, and run `scripts\status.ps1`. cloudflared runs
+  with `--no-autoupdate`, so it too only changes when you change it.
 * **Windows**: let it update. The services start by themselves after the
   restart.
 

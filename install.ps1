@@ -339,26 +339,40 @@ try {
     $users = @(Get-JsonProperty -Object $r.Json -Name 'result')
     $userNames = @($users | Where-Object { $_ } | ForEach-Object { [string](Get-JsonProperty -Object $_ -Name 'username') })
     $hubUserExists = ($userNames -contains $HubUserName)
-    if (-not $hubUserExists -or $ResetHubUser) {
+    $setHubUser = $true
+    if ($hubUserExists -and -not $ResetHubUser) { $setHubUser = $false }
+    if ($setHubUser) {
         $candidate = New-RandomSecret -Bytes 32 -Format Base64Url
         $body = (@{ username = $HubUserName; password = $candidate; role = 'admin'; workspace_ids = @() } | ConvertTo-Json -Compress)
-        if ($hubUserExists) { $r = Invoke-HubAdmin -Path '/admin/user' -Method 'PUT' -Body $body -Token $adminToken }
-        else { $r = Invoke-HubAdmin -Path '/admin/user' -Method 'POST' -Body $body -Token $adminToken }
-        if ($r.Status -ne 200) {
+        if ($hubUserExists) {
+            $r = Invoke-HubAdmin -Path '/admin/user' -Method 'PUT' -Body $body -Token $adminToken
+        } else {
+            $r = Invoke-HubAdmin -Path '/admin/user' -Method 'POST' -Body $body -Token $adminToken
+            if ($r.Status -eq 400 -and $r.Text -match '(?i)already exists') {
+                # the user list did not show it, but the hub has it
+                if ($ResetHubUser) { $r = Invoke-HubAdmin -Path '/admin/user' -Method 'PUT' -Body $body -Token $adminToken }
+                else { $setHubUser = $false }
+            }
+        }
+        if ($setHubUser -and $r.Status -ne 200) {
             Stop-Farm -Problem ('The hub did not create or update the user "' + $HubUserName + '" (HTTP ' + $r.Status + ').') -WhatToDo 'Run install.ps1 again. If it repeats, create the user by hand in the hub page (Admin -> Users, role admin) and run install.ps1 once more.'
         }
-        $script:NewHubPassword = $candidate
-        Write-Ok ('Hub user "' + $HubUserName + '" has a new random password (shown at the end).')
-    } else {
-        Write-Ok ('Hub user "' + $HubUserName + '" exists; its password is left as it is.')
+        if ($setHubUser) {
+            $script:NewHubPassword = $candidate
+            Write-Ok ('Hub user "' + $HubUserName + '" has a new random password (shown at the end).')
+        }
+        $candidate = $null
+    }
+    if (-not $setHubUser) {
+        Write-Ok ('Hub user "' + $HubUserName + '" exists; its password is left as it is (-ResetHubUser makes a new one).')
     }
 
     # "farm-keepalive": the login of the keep-available service. Plain user
     # role, new random password on every run (nobody needs to know it).
     $keepPassword = New-RandomSecret -Bytes 32 -Format Base64Url
     $body = (@{ username = $KeepUserName; password = $keepPassword; role = 'user'; workspace_ids = $workspaceIds } | ConvertTo-Json -Compress)
-    if ($userNames -contains $KeepUserName) { $r = Invoke-HubAdmin -Path '/admin/user' -Method 'PUT' -Body $body -Token $adminToken }
-    else { $r = Invoke-HubAdmin -Path '/admin/user' -Method 'POST' -Body $body -Token $adminToken }
+    $r = Invoke-HubAdmin -Path '/admin/user' -Method 'PUT' -Body $body -Token $adminToken
+    if ($r.Status -ne 200) { $r = Invoke-HubAdmin -Path '/admin/user' -Method 'POST' -Body $body -Token $adminToken }
     if ($r.Status -ne 200) {
         Stop-Farm -Problem ('The hub did not create or update the user "' + $KeepUserName + '" (HTTP ' + $r.Status + ').') -WhatToDo 'Run install.ps1 again.'
     }
