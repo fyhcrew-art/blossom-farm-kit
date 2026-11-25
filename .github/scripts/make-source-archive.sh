@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Builds what is published next to GADS-drag.exe:
-#   dist/THIRD-PARTY-NOTICES.txt       licence texts of the Go modules compiled into the exe
-#   dist/LICENSE-AGPL-3.0.txt          the licence of GADS-drag.exe (upstream's LICENSE file)
+# Builds what is published next to the GADS-drag programs (GADS-drag.exe,
+# GADS-drag-darwin-arm64, GADS-drag-darwin-amd64):
+#   dist/THIRD-PARTY-NOTICES.txt       licence texts of the Go modules compiled into them
+#   dist/LICENSE-AGPL-3.0.txt          their licence (upstream's LICENSE file)
 #   dist/GADS-drag-<version>-source.tar.gz
 #       the patched GADS tree + the generated docs package + the module sources
 #       (vendor/) + the patch + BUILD.md + MODIFICATIONS.md, WITHOUT Apple's
@@ -9,39 +10,44 @@
 #       checksums and fetched from upstream by whoever rebuilds.
 #
 # Run from the folder that holds  kit/  gads/  dist/  after the build and its
-# tests (vendor/ must not exist while the exe is built: the published exe is
-# built in module mode). Used by .github/workflows/build-gads.yml.
+# tests (vendor/ must not exist while the programs are built: the published
+# ones are built in module mode). Used by .github/workflows/build-gads.yml.
 set -euo pipefail
 
 : "${VERSION:?}" "${UPSTREAM_COMMIT:?}" "${UPSTREAM_TAG:?}" "${GO_VERSION:?}" "${SWAG_VERSION:?}"
 KIT=kit
 SRC=gads
 DIST=dist
-EXE="$DIST/GADS-drag.exe"
-test -f "$EXE"
+PROGRAMS="GADS-drag.exe GADS-drag-darwin-arm64 GADS-drag-darwin-amd64"
+for PROGRAM in $PROGRAMS; do test -f "$DIST/$PROGRAM"; done
 test -f "$SRC/LICENSE"
 BUILD_DATE="$(date -u +%Y-%m-%d)"
 
 # 1. The sources of every module the program is built from.
 (cd "$SRC" && go mod vendor)
 
-# 2. Licence texts of the modules that are actually linked into the exe.
+# 2. Licence texts of the modules that are actually linked into the programs.
+#    The three do not link exactly the same set (some modules are for one
+#    system only), so the list is the union.
 NOTICES="$DIST/THIRD-PARTY-NOTICES.txt"
-MODULES="$(go version -m "$EXE" | awk '$1 == "dep" { print $2 " " $3 }' | LC_ALL=C sort)"
+MODULES="$(for PROGRAM in $PROGRAMS; do go version -m "$DIST/$PROGRAM" | awk '$1 == "dep" { print $2 " " $3 }'; done | LC_ALL=C sort -u)"
 test -n "$MODULES"
 MISSING=0
 {
-  echo "GADS-drag.exe $VERSION - third-party software compiled into this program"
+  echo "GADS-drag $VERSION - third-party software compiled into these programs"
   echo "======================================================================"
   echo
-  echo "GADS-drag.exe is GADS (https://github.com/shamanec/GADS, GNU AGPL v3.0)"
-  echo "with the Blossom patch. It is statically linked with the Go modules listed"
-  echo "below (as reported by 'go version -m GADS-drag.exe') and with the Go"
-  echo "standard library and runtime (https://go.dev/LICENSE, BSD 3-Clause)."
-  echo "The licence, notice and copyright files of each module follow, copied"
-  echo "from the module's own source at the version named."
+  echo "GADS-drag is GADS (https://github.com/shamanec/GADS, GNU AGPL v3.0) with"
+  echo "the Blossom patch, published as GADS-drag.exe (Windows x64),"
+  echo "GADS-drag-darwin-arm64 and GADS-drag-darwin-amd64 (macOS). Each is"
+  echo "statically linked with Go modules from the list below (the union of what"
+  echo "'go version -m' reports for the three; a few modules are linked on one"
+  echo "system only) and with the Go standard library and runtime"
+  echo "(https://go.dev/LICENSE, BSD 3-Clause). The licence, notice and"
+  echo "copyright files of each module follow, copied from the module's own"
+  echo "source at the version named."
   echo
-  echo "$MODULES" | sed 's/^/  /'
+  while read -r LINE; do echo "  $LINE"; done <<< "$MODULES"
   echo
   while read -r MOD VER; do
     echo "----------------------------------------------------------------------"
@@ -80,7 +86,6 @@ cp "$SRC/LICENSE" "$DIST/LICENSE-AGPL-3.0.txt"
 cp "$KIT/patch/provider-drag.patch" "$SRC/provider-drag.patch"
 cp "$NOTICES" "$SRC/THIRD-PARTY-NOTICES.txt"
 
-DDI_DIR="$SRC/resources/ios-ddi"
 DDI_FILES="$(cd "$SRC" && find resources/ios-ddi -type f | LC_ALL=C sort)"
 test -n "$DDI_FILES"
 {
@@ -121,7 +126,7 @@ What differs from the upstream tree at that commit:
 | \`provider-drag.patch\` | added: the two modifications above as a patch against upstream |
 | \`docs/docs.go\`, \`docs/swagger.json\`, \`docs/swagger.yaml\` | added: generated with \`swag init\` (the program imports this package) |
 | \`vendor/\` | added: the sources of the Go modules the program is built from (\`go mod vendor\`) |
-| \`THIRD-PARTY-NOTICES.txt\` | added: licence texts of the modules linked into the program |
+| \`THIRD-PARTY-NOTICES.txt\` | added: licence texts of the modules linked into the programs |
 | \`BUILD.md\`, \`MODIFICATIONS.md\` | added |
 | \`resources/ios-ddi/*\` | removed: Apple's developer disk image; see \`resources/ios-ddi/NOT-INCLUDED.txt\` |
 
@@ -134,26 +139,30 @@ The modified files are licensed under the GNU AGPL v3.0, like the originals.
 TEXT
 
 cat > "$SRC/BUILD.md" <<TEXT
-# How GADS-drag.exe $VERSION was built
+# How the GADS-drag programs $VERSION were built
 
 On Linux x64, with Go $GO_VERSION, from this tree:
 
 1. Put Apple's developer disk image back (\`resources/ios-ddi/NOT-INCLUDED.txt\`
    says where to get the files and gives their checksums). The program embeds
    that folder and does not compile without it.
-2. Build:
+2. Build (the same command three times; only the target system differs):
 
 \`\`\`sh
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOFLAGS= \\
-  go build -mod=mod -trimpath -buildvcs=false -ldflags="-X main.AppVersion=$VERSION" -o GADS-drag.exe .
+build() { CGO_ENABLED=0 GOOS=\$1 GOARCH=\$2 GOFLAGS= \\
+  go build -mod=mod -trimpath -buildvcs=false -ldflags="-X main.AppVersion=$VERSION" -o \$3 .; }
+build windows amd64 GADS-drag.exe            # Windows x64
+build darwin  arm64 GADS-drag-darwin-arm64   # macOS, Apple Silicon
+build darwin  amd64 GADS-drag-darwin-amd64   # macOS, Intel
 \`\`\`
 
-\`-mod=mod\` makes Go take the modules from the module cache (downloading
-them, checked against \`go.sum\`), which is how the published file was built;
-its SHA-256 is in \`SHA256SUMS\` on the release and in the kit's
-\`versions.json\`. Without \`-mod=mod\` Go uses \`vendor/\` (no download needed);
-the program is the same, but the file is not identical byte for byte, because
-source paths are recorded differently.
+No C compiler is involved (\`CGO_ENABLED=0\`), so the macOS programs are built
+on Linux as well. \`-mod=mod\` makes Go take the modules from the module cache
+(downloading them, checked against \`go.sum\`), which is how the published
+files were built; their SHA-256 values are in \`SHA256SUMS\` on the release and
+in the kit's \`versions.json\`. Without \`-mod=mod\` Go uses \`vendor/\` (no
+download needed); the programs are the same, but the files are not identical
+byte for byte, because source paths are recorded differently.
 
 No \`-tags ui\`: the hub's web interface (\`hub-ui\`, proprietary) is not part
 of this build.

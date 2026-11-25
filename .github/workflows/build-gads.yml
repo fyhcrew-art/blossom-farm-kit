@@ -1,13 +1,19 @@
-# Builds GADS-drag.exe: upstream GADS at the pinned commit + patch/provider-drag.patch,
-# for Windows x64, WITHOUT the hub web interface (hub-ui is proprietary and is
-# not part of this build; the kit uses this binary as the provider only).
+# Builds GADS-drag: upstream GADS at the pinned commit + patch/provider-drag.patch,
+# WITHOUT the hub web interface (hub-ui is proprietary and is not part of this
+# build; the kit uses this program as the provider only). Three files from
+# the same patched source:
+#   GADS-drag.exe            Windows x64
+#   GADS-drag-darwin-arm64   macOS, Apple Silicon
+#   GADS-drag-darwin-amd64   macOS, Intel
+# All three are cross-built on Linux with CGO_ENABLED=0 (GADS and the modules
+# it uses need no C compiler on any of the three systems).
 #
 # Runs on a tag "gads-v*" (builds and publishes a release) or by hand
-# (builds; publishes only when asked). The build is reproducible: the result
-# must have the SHA-256 pinned in versions.json, otherwise the job fails.
+# (builds; publishes only when asked). The build is reproducible: each file
+# must have the SHA-256 pinned for it in versions.json, otherwise the job fails.
 #
 # Nothing is published unless versions.json records the maintainers' decision
-# to publish a binary that embeds upstream's "resources" folder (Apple's
+# to publish binaries that embed upstream's "resources" folder (Apple's
 # developer disk image among it): gadsDrag.redistributeEmbeddedResources must
 # be true. See NOTICE, section 2b, and docs/RELEASING.md.
 name: Build GADS-drag
@@ -58,6 +64,8 @@ jobs:
             echo "release_tag=$(jq -er .gadsDrag.releaseTag versions.json)"
             echo "version=$(jq -er .gadsDrag.version versions.json)"
             echo "sha256=$(jq -er .gadsDrag.sha256 versions.json)"
+            echo "sha256_darwin_arm64=$(jq -er .macos.arm64.provider.sha256 versions.json)"
+            echo "sha256_darwin_amd64=$(jq -er .macos.x86_64.provider.sha256 versions.json)"
             echo "go_version=$(jq -er .gadsDrag.goVersion versions.json)"
             echo "swag_version=$(jq -er .gadsDrag.swagVersion versions.json)"
             echo "redistribute=$(jq -r '.gadsDrag.redistributeEmbeddedResources == true' versions.json)"
@@ -71,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$PUSHED" != "$PINNED" ]; then
-            echo "::error::Tag $PUSHED was pushed, but versions.json names $PINNED. Update versions.json (gadsDrag.releaseTag, version, url) in the commit you tag."
+            echo "::error::Tag $PUSHED was pushed, but versions.json names $PINNED. Update versions.json (gadsDrag.releaseTag, version, url, and the two macos.*.provider.url) in the commit you tag."
             exit 1
           fi
 
@@ -112,19 +120,20 @@ jobs:
           go install "github.com/swaggo/swag/cmd/swag@${SWAG_VERSION}"
           "$(go env GOPATH)/bin/swag" init -g hub/hub.go -o docs
 
-      - name: Build for Windows x64
+      - name: Build for Windows x64, macOS arm64 and macOS x64
         working-directory: gads
         env:
           VERSION: ${{ steps.pins.outputs.version }}
           CGO_ENABLED: '0'
-          GOOS: windows
-          GOARCH: amd64
           GOFLAGS: ''
         run: |
           set -euo pipefail
           mkdir -p ../dist
           # No "-tags ui": the proprietary web interface is not embedded.
-          go build -trimpath -buildvcs=false -ldflags="-X main.AppVersion=${VERSION}" -o ../dist/GADS-drag.exe .
+          build() { GOOS="$1" GOARCH="$2" go build -trimpath -buildvcs=false -ldflags="-X main.AppVersion=${VERSION}" -o "../dist/$3" .; }
+          build windows amd64 GADS-drag.exe
+          build darwin arm64 GADS-drag-darwin-arm64
+          build darwin amd64 GADS-drag-darwin-amd64
           ls -l ../dist
 
       - name: Vet and test the provider packages (the patch only touches provider/router)
@@ -132,10 +141,12 @@ jobs:
         run: |
           set -euo pipefail
           go vet ./provider/router/
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go vet ./provider/router/
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go vet ./provider/router/
           go test ./provider/...
 
       # After the build and its tests on purpose: the script adds vendor/ to the
-      # tree, and the published exe is built in module mode, without it.
+      # tree, and the published programs are built in module mode, without it.
       - name: Source archive, licence texts of the linked modules, the AGPL text
         env:
           VERSION: ${{ steps.pins.outputs.version }}
@@ -148,17 +159,26 @@ jobs:
 
       - name: Checksums, and the reproducibility check
         env:
-          PINNED: ${{ steps.pins.outputs.sha256 }}
+          PINNED_WINDOWS: ${{ steps.pins.outputs.sha256 }}
+          PINNED_DARWIN_ARM64: ${{ steps.pins.outputs.sha256_darwin_arm64 }}
+          PINNED_DARWIN_AMD64: ${{ steps.pins.outputs.sha256_darwin_amd64 }}
         working-directory: dist
         run: |
           set -euo pipefail
-          sha256sum GADS-drag.exe GADS-drag-*-source.tar.gz THIRD-PARTY-NOTICES.txt LICENSE-AGPL-3.0.txt | tee SHA256SUMS
-          BUILT="$(sha256sum GADS-drag.exe | cut -d' ' -f1)"
-          if [ "$BUILT" != "$PINNED" ]; then
-            echo "::error::GADS-drag.exe has SHA-256 $BUILT but versions.json pins $PINNED. If the patch, the upstream commit, the Go version or the swag version changed, put the new value into versions.json (gadsDrag.sha256) and tag again. If nothing changed, do not publish: find out why the build differs."
-            exit 1
-          fi
-          echo "Reproduced the pinned SHA-256."
+          sha256sum GADS-drag.exe GADS-drag-darwin-arm64 GADS-drag-darwin-amd64 GADS-drag-*-source.tar.gz THIRD-PARTY-NOTICES.txt LICENSE-AGPL-3.0.txt | tee SHA256SUMS
+          FAILED=0
+          check() {
+            BUILT="$(sha256sum "$1" | cut -d' ' -f1)"
+            if [ "$BUILT" != "$2" ]; then
+              echo "::error::$1 has SHA-256 $BUILT but versions.json pins $2 ($3). If the patch, the upstream commit, the Go version or the swag version changed, put the new value into versions.json and tag again. If nothing changed, do not publish: find out why the build differs."
+              FAILED=1
+            fi
+          }
+          check GADS-drag.exe "$PINNED_WINDOWS" gadsDrag.sha256
+          check GADS-drag-darwin-arm64 "$PINNED_DARWIN_ARM64" macos.arm64.provider.sha256
+          check GADS-drag-darwin-amd64 "$PINNED_DARWIN_AMD64" macos.x86_64.provider.sha256
+          if [ "$FAILED" -ne 0 ]; then exit 1; fi
+          echo "Reproduced the three pinned SHA-256 values."
 
       - name: Keep the result for the release job
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -183,7 +203,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$REDISTRIBUTE" != "true" ]; then
-            echo "::error::Not published. GADS-drag.exe embeds upstream's 'resources' folder, which holds Apple's developer disk image and other pre-built files. Publishing it makes this repository a distributor of them. Read NOTICE, section 2b, and docs/RELEASING.md (\"Before the first gads release\"); if you decide to publish, set gadsDrag.redistributeEmbeddedResources to true in versions.json in the commit you tag. The build itself succeeded and is kept as a workflow artifact."
+            echo "::error::Not published. Every GADS-drag program embeds upstream's 'resources' folder, which holds Apple's developer disk image and other pre-built files. Publishing it makes this repository a distributor of them. Read NOTICE, section 2b, and docs/RELEASING.md (\"Before the first gads release\"); if you decide to publish, set gadsDrag.redistributeEmbeddedResources to true in versions.json in the commit you tag. The build itself succeeded and is kept as a workflow artifact."
             exit 1
           fi
 
@@ -205,18 +225,18 @@ jobs:
           cd dist
           sha256sum -c SHA256SUMS
           cat > notes.md <<NOTES
-          **This is not the kit.** To set up a farm, download the newest release whose name starts with \`kit-v\`. The kit's installer fetches the file below by itself.
+          **This is not the kit.** To set up a farm, download the newest release whose name starts with \`kit-v\`. The kit's installer fetches the file it needs from below by itself.
 
-          GADS provider with the Blossom patch, for Windows x64 (${VERSION}). A modified version of GADS, not the original.
+          GADS provider with the Blossom patch (${VERSION}), built three times from the same source: \`GADS-drag.exe\` for Windows x64, \`GADS-drag-darwin-arm64\` for a Mac with Apple Silicon, \`GADS-drag-darwin-amd64\` for an Intel Mac. A modified version of GADS, not the original.
 
           * Built by this repository's workflow from https://github.com/shamanec/GADS plus \`patch/provider-drag.patch\`; the exact upstream commit is in \`versions.json\`.
           * Licence: GNU AGPL v3.0, like the GADS source it is built from (\`LICENSE-AGPL-3.0.txt\`).
           * Source: \`GADS-drag-${VERSION}-source.tar.gz\` holds the patched GADS tree, the generated \`docs\` package, the sources of all Go modules it is built from (\`vendor/\`), the patch, \`BUILD.md\` (how this file was built) and \`MODIFICATIONS.md\` (what was changed, and when). One thing is left out and named in the archive with checksums and its upstream address: Apple's developer disk image (\`resources/ios-ddi\`), which the build embeds.
-          * \`THIRD-PARTY-NOTICES.txt\`: the licence texts of the Go modules compiled into the program.
+          * \`THIRD-PARTY-NOTICES.txt\`: the licence texts of the Go modules compiled into the three programs.
           * It does **not** contain the GADS hub web interface (\`hub-ui\`, proprietary). Use it as the provider only; the hub is the publisher's own release.
-          * SHA-256 values are in \`SHA256SUMS\`; the installer of the kit verifies the one pinned in \`versions.json\`.
+          * SHA-256 values are in \`SHA256SUMS\`; the installers of the kit verify the ones pinned in \`versions.json\`.
           NOTES
           # --latest=false: the "Latest" badge and /releases/latest belong to the
           # tested kit-v releases, never to a provider-only release.
           gh release create "$TAG" --target "$TARGET" --title "GADS-drag ${VERSION}" --notes-file notes.md --latest=false \
-            GADS-drag.exe SHA256SUMS "GADS-drag-${VERSION}-source.tar.gz" THIRD-PARTY-NOTICES.txt LICENSE-AGPL-3.0.txt
+            GADS-drag.exe GADS-drag-darwin-arm64 GADS-drag-darwin-amd64 SHA256SUMS "GADS-drag-${VERSION}-source.tar.gz" THIRD-PARTY-NOTICES.txt LICENSE-AGPL-3.0.txt

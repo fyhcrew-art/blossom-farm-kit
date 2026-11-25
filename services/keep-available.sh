@@ -37,7 +37,6 @@ POLL_SECONDS=5
 HUB_URL=''; HUB_USER=''; HUB_PASSWORD=''
 TOKEN=''
 PIDS=''
-BEATS=''
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [keep-available] $1"; }
 
@@ -128,59 +127,38 @@ stop_streams() {
     for pid in $PIDS; do kill "$pid" 2> /dev/null; done
     for pid in $PIDS; do wait "$pid" 2> /dev/null; done
     PIDS=''
-    if [ -n "$BEATS" ] && [ -d "$BEATS" ]; then rm -rf "$BEATS"; fi
-    BEATS=''
-}
-
-start_stream() {
-    # start_stream <workspace id> <beat file>
-    # One stream of the hub, held open by curl. Every line that arrives is
-    # counted into the beat file, which is how the loop below sees that the
-    # stream is alive.
-    printf 'url = %s\nheader = %s\n' "$(config_quote "$HUB_URL/available-devices?workspaceId=$1")" "$(config_quote "Authorization: Bearer $TOKEN")" |
-        curl -q -sS -N --noproxy '*' --fail -K - 2> /dev/null > >(n=0; while IFS= read -r line; do n=$((n + 1)); echo "$n" > "$2"; done) &
-    PIDS="$PIDS $!"
 }
 
 # One pass: sign in, find the workspaces, hold one stream per workspace until
 # one of them ends or the list of workspaces is due for a refresh. Status 0
 # for a planned refresh.
 subscribe() {
-    local ids id count=0 pid started i beat silent
-    local -a last quiet
+    local ids id count=0 pid started alive
     if ! sign_in; then log 'the hub refused the login of the keep-available user, or does not answer'; return 1; fi
     ids=$(workspace_ids)
     if [ -z "$ids" ]; then log 'the keep-available user sees no workspace'; return 1; fi
-    BEATS=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/keep-available.XXXXXX") || { log 'could not create a temporary folder'; return 1; }
     PIDS=''
     for id in $ids; do
         case $id in *[!A-Za-z0-9_-]*) continue ;; esac
-        echo 0 > "$BEATS/$count"
-        start_stream "$id" "$BEATS/$count"
-        last[$count]=0; quiet[$count]=0
+        # One stream of the hub, held open by curl and thrown away as it
+        # arrives. --speed-time: curl itself ends a stream that carried no
+        # data for a minute.
+        printf 'url = %s\nheader = %s\n' "$(config_quote "$HUB_URL/available-devices?workspaceId=$id")" "$(config_quote "Authorization: Bearer $TOKEN")" |
+            curl -q -sS -N --noproxy '*' --fail --speed-limit 1 --speed-time "$STALL_SECONDS" -o /dev/null -K - 2> /dev/null &
+        PIDS="$PIDS $!"
         count=$((count + 1))
     done
     TOKEN=''
-    if [ "$count" -eq 0 ]; then stop_streams; log 'the keep-available user sees no workspace'; return 1; fi
+    if [ "$count" -eq 0 ]; then log 'the keep-available user sees no workspace'; return 1; fi
     log "subscribed to $count workspace(s)"
     started=$SECONDS
     while [ $((SECONDS - started)) -lt "$REFRESH_SECONDS" ]; do
         sleep "$POLL_SECONDS" &
         wait $!
-        i=0; silent=''
-        for pid in $PIDS; do
-            if ! kill -0 "$pid" 2> /dev/null; then
-                log 'the hub closed a stream, reconnecting'
-                stop_streams
-                return 1
-            fi
-            beat=$(cat "$BEATS/$i" 2> /dev/null)
-            if [ "$beat" = "${last[$i]}" ]; then quiet[$i]=$((${quiet[$i]} + POLL_SECONDS)); else quiet[$i]=0; last[$i]=$beat; fi
-            [ "${quiet[$i]}" -ge "$STALL_SECONDS" ] && silent=1
-            i=$((i + 1))
-        done
-        if [ -n "$silent" ]; then
-            log "no data for $STALL_SECONDS s, reconnecting"
+        alive=0
+        for pid in $PIDS; do kill -0 "$pid" 2> /dev/null && alive=$((alive + 1)); done
+        if [ "$alive" -ne "$count" ]; then
+            log "a stream ended (the hub closed it, or no data for $STALL_SECONDS s), reconnecting"
             stop_streams
             return 1
         fi
