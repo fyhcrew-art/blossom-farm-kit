@@ -15,8 +15,12 @@ on the dates given. It is not legal advice.
   LICENSE-AGPL-3.0 (the same text as the LICENSE file of GADS). The patch
   itself marks both files as modified, by whom and when.
 
-This repository contains no GADS binary, no GADS source file, no
-WebDriverAgent and no Apple software.
+The kit itself (the branch "main" and every archive of it) contains no GADS
+binary, no GADS source file other than the patch, no WebDriverAgent and no
+Apple software. A second branch of this repository, "dist", is not part of
+the kit: it holds the built provider programs and their complete source,
+and those programs embed files of GADS's "resources" folder, Apple's
+developer disk image among them. Section 2b says exactly what is there.
 
 2. GADS (https://github.com/shamanec/GADS), read at tag v6.0.0
 --------------------------------------------------------------
@@ -85,7 +89,8 @@ b) The provider. The branch "dist" of this repository holds the patched
                                  are BSD 3-Clause (https://go.dev/LICENSE).
      One thing needed to build is NOT in the source archive: the folder
      resources/ios-ddi (next point). The archive names its three files with
-     their SHA-256 and the upstream address to fetch them from. The archive
+     their SHA-256 and the upstream address to fetch them from (in
+     IOS-DDI-NOT-INCLUDED.txt, at the top of the tree). The archive
      is therefore the complete source except for those three files.
    - Like every GADS binary, it embeds the "resources" directory of the GADS
      repository: gads-broadcast.ipa and gads-settings.apk (GADS's own helper

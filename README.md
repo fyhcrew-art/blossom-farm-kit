@@ -360,7 +360,9 @@ Computer?" once on the new computer.
   checksums, and refuses a kit that is not newer than the one you have or
   that names another file for a program version you already have
   (`docs/security.md`, section 9, says what this protects against and what
-  it does not). The kit that was in the folder is kept next to it, as
+  it does not). Before it replaces anything it prints the commit and the
+  versions of the kit, of GADS and of the provider, old and new. The kit
+  that was in the folder is kept next to it, as
   `blossom-farm-kit.previous`. A kit you downloaded and unpacked yourself works too: run
   its `update` script without an option. Only versions that a kit pins are
   installed: the hub and the patched provider must match each other, and the

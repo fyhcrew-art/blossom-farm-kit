@@ -20,9 +20,10 @@
 # (versions.json and pairing.json there), downloads that commit's archive
 # from GitHub, checks every file against the commit's MANIFEST.sha256, and
 # refuses a kit that is not newer or that pins another file for a program
-# version this kit already pins. The kit that was here is kept as
-# /opt/blossom-farm-kit.previous. What this does and does not protect
-# against is in docs/security.md, section 9.
+# version this kit already pins. Before anything is replaced it prints the
+# commit and the versions of the kit, of GADS and of the provider, old and
+# new. The kit that was here is kept as /opt/blossom-farm-kit.previous. What
+# this does and does not protect against is in docs/security.md, section 9.
 #
 # Node.js, MongoDB, cloudflared and FFmpeg are not changed by this script; see
 # README, section "Updating".
@@ -87,7 +88,7 @@ if [ "$CHECK" = 1 ] || [ "$LATEST" = 1 ]; then
     fi
     write_note "This kit:          $this_kit"
     write_note "The newest kit:    $RELEASED_KIT_VERSION"
-    if [ "$RELEASED_KIT_VERSION" = "$this_kit" ] || ! version_at_least "$RELEASED_KIT_VERSION" "$this_kit"; then
+    if ! version_greater "$RELEASED_KIT_VERSION" "$this_kit"; then
         write_ok 'This kit is the newest one. Nothing to fetch.'
         [ "$LATEST" = 1 ] && write_note 'To bring the farm to the versions of this kit, run   sudo bash scripts/update.sh   without an option.'
         exit 0
@@ -120,6 +121,9 @@ if [ "$CHECK" = 1 ] || [ "$LATEST" = 1 ]; then
         stop_farm "The kit that was fetched was refused. $problem" 'Nothing was changed. Do not work around it: report it on the kit repository.'
     fi
     write_ok "Kit $RELEASED_KIT_VERSION was downloaded and every file has the SHA-256 its list names."
+    write_note "Commit:    $RELEASED_KIT_COMMIT"
+    write_note "This kit:  $(describe_kit_versions "$KIT_VERSIONS")"
+    write_note "New kit:   $(describe_kit_versions "$(cat "$stage/kit/versions.json")")"
     if ! { chown -R 0:0 "$stage/kit" && chmod -R u=rwX,go=rX "$stage/kit"; }; then
         rm -rf "$stage"
         stop_farm 'Could not set the permissions of the new kit folder.' 'Nothing was changed. Run the script again.'

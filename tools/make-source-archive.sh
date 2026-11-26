@@ -8,7 +8,10 @@
 #       the patched GADS tree + the generated docs package + the module sources
 #       (vendor/) + the patch + BUILD.md + MODIFICATIONS.md, WITHOUT Apple's
 #       developer disk image (resources/ios-ddi), which is listed with
-#       checksums and fetched from upstream by whoever rebuilds.
+#       checksums in IOS-DDI-NOT-INCLUDED.txt at the top of the tree and
+#       fetched from upstream by whoever rebuilds. That note is NOT inside
+#       resources/: the program embeds the whole folder (main.go: go:embed
+#       resources), so one file more in it gives another program.
 #
 # Called by tools/build-provider.sh after the build and its tests (vendor/
 # must not exist while the programs are built: the published ones are built
@@ -94,24 +97,30 @@ cp "$NOTICES" "$SRC/THIRD-PARTY-NOTICES.txt"
 DDI_FILES="$(cd "$SRC" && find resources/ios-ddi -type f | LC_ALL=C sort)"
 test -n "$DDI_FILES"
 {
-  echo "The files of this folder are NOT in this archive."
+  echo "The files of the folder resources/ios-ddi are NOT in this archive."
   echo
   echo "They are Apple's developer disk image for iOS 17 and later, with its"
   echo "manifest and trust cache, exactly as the GADS repository carries them."
-  echo "GADS embeds them into the program (main.go: go:embed resources), so they"
-  echo "are needed to build it. Fetch them, unchanged, from upstream GADS at the"
-  echo "commit this archive was made from, and check them against the SHA-256"
-  echo "values below:"
+  echo "GADS embeds the whole folder resources/ into the program (main.go:"
+  echo "go:embed resources), so they are needed to build it. Fetch them,"
+  echo "unchanged, from upstream GADS at the commit this archive was made from,"
+  echo "and check them against the SHA-256 values below:"
   echo
   echo "  git clone https://github.com/shamanec/GADS.git && cd GADS"
   echo "  git checkout $UPSTREAM_COMMIT"
-  echo "  (then copy resources/ios-ddi/ over this folder)"
+  echo "  (then copy everything in its resources/ios-ddi/, the folder Firmware"
+  echo "  included, into resources/ios-ddi/ of this tree, for example with"
+  echo "  cp -R resources/ios-ddi/. <this tree>/resources/ios-ddi/ )"
   echo
   echo "or file by file:"
   echo "  https://github.com/shamanec/GADS/raw/$UPSTREAM_COMMIT/<path below>"
   echo
+  echo "Put nothing else into resources/ (not this note either): every file in"
+  echo "that folder becomes part of the program, and one file more or less"
+  echo "gives a program with another SHA-256 than the published one."
+  echo
   (cd "$SRC" && echo "$DDI_FILES" | xargs -d '\n' sha256sum)
-} > "$DIST/.ddi-not-included.txt"
+} > "$SRC/IOS-DDI-NOT-INCLUDED.txt"
 
 cat > "$SRC/MODIFICATIONS.md" <<TEXT
 # This is a MODIFIED copy of GADS
@@ -132,8 +141,8 @@ What differs from the upstream tree at that commit:
 | \`docs/docs.go\`, \`docs/swagger.json\`, \`docs/swagger.yaml\` | added: generated with \`swag init\` (the program imports this package) |
 | \`vendor/\` | added: the sources of the Go modules the program is built from (\`go mod vendor\`) |
 | \`THIRD-PARTY-NOTICES.txt\` | added: licence texts of the modules linked into the programs |
-| \`BUILD.md\`, \`MODIFICATIONS.md\` | added |
-| \`resources/ios-ddi/*\` | removed: Apple's developer disk image; see \`resources/ios-ddi/NOT-INCLUDED.txt\` |
+| \`BUILD.md\`, \`MODIFICATIONS.md\`, \`IOS-DDI-NOT-INCLUDED.txt\` | added |
+| \`resources/ios-ddi/*\` | removed: Apple's developer disk image; see \`IOS-DDI-NOT-INCLUDED.txt\` |
 
 Everything else is upstream's, unchanged. That includes the pre-built files
 upstream keeps in \`resources/\` (\`gads-broadcast.ipa\`, \`gads-settings.apk\`,
@@ -150,9 +159,12 @@ On Linux x64, with Go $GO_VERSION, on a maintainer's computer, with the kit's
 \`tools/build-provider.sh\` (the commands below are what it runs). From this
 tree:
 
-1. Put Apple's developer disk image back (\`resources/ios-ddi/NOT-INCLUDED.txt\`
-   says where to get the files and gives their checksums). The program embeds
-   that folder and does not compile without it.
+1. Put Apple's developer disk image back into \`resources/ios-ddi/\`
+   (\`IOS-DDI-NOT-INCLUDED.txt\`, at the top of this tree, says where to get
+   the files and gives their checksums). The program embeds the whole
+   folder \`resources/\` and does not compile without them. Put nothing else
+   into \`resources/\`: one file more or less there gives a program with
+   another SHA-256.
 2. Build (the same command three times; only the target system differs):
 
 \`\`\`sh
@@ -187,26 +199,21 @@ swag init -g hub/hub.go -o docs          # generates the docs package the progra
 then the build command above.
 TEXT
 
-# 4. The archive. Apple's files are left out; a note takes their place.
-STAGE="$(mktemp -d)"
-mkdir -p "$STAGE/gads/resources/ios-ddi"
-cp "$DIST/.ddi-not-included.txt" "$STAGE/gads/resources/ios-ddi/NOT-INCLUDED.txt"
-rm -f "$DIST/.ddi-not-included.txt"
+# 4. The archive. Apple's files are left out (their folder stays, empty);
+#    the note about them is at the top of the tree, outside resources/.
 TAR_OPTS=(--sort=name --owner=0 --group=0 --numeric-owner --mtime='2020-01-01 00:00:00Z')
 tar "${TAR_OPTS[@]}" -C "$(dirname "$SRC")" --exclude=.git --exclude='gads/resources/ios-ddi/*' -cf "$DIST/source.tar" gads
-tar "${TAR_OPTS[@]}" -C "$STAGE" -rf "$DIST/source.tar" gads/resources/ios-ddi/NOT-INCLUDED.txt
 gzip -n -9 "$DIST/source.tar"
 mv "$DIST/source.tar.gz" "$DIST/GADS-drag-${VERSION}-source.tar.gz"
-rm -rf "$STAGE"
 cp "$SRC/BUILD.md" "$SRC/MODIFICATIONS.md" "$DIST/"
 
 # The archive must not carry Apple's image, and must carry what it promises.
 LIST="$(tar -tzf "$DIST/GADS-drag-${VERSION}-source.tar.gz")"
-LEFT="$(grep -E '^gads/resources/ios-ddi/.*[^/]$' <<< "$LIST" | grep -v 'NOT-INCLUDED.txt$' || true)"
+LEFT="$(grep -E '^gads/resources/ios-ddi/.*[^/]$' <<< "$LIST" || true)"
 if [ -n "$LEFT" ]; then
-  echo "ERROR: The source archive still contains files of resources/ios-ddi." >&2; exit 1
+  echo "ERROR: The source archive contains files in resources/ios-ddi (nothing may be there: the folder is embedded into the program)." >&2; exit 1
 fi
-for NEEDED in gads/LICENSE gads/MODIFICATIONS.md gads/BUILD.md gads/provider-drag.patch gads/THIRD-PARTY-NOTICES.txt gads/vendor/modules.txt gads/docs/docs.go gads/resources/ios-ddi/NOT-INCLUDED.txt gads/go.sum; do
+for NEEDED in gads/LICENSE gads/MODIFICATIONS.md gads/BUILD.md gads/provider-drag.patch gads/THIRD-PARTY-NOTICES.txt gads/vendor/modules.txt gads/docs/docs.go gads/IOS-DDI-NOT-INCLUDED.txt gads/resources/ios-ddi/ gads/go.sum; do
   grep -qx "$NEEDED" <<< "$LIST" || { echo "ERROR: The source archive lacks $NEEDED." >&2; exit 1; }
 done
 ls -l "$DIST"

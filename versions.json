@@ -10,7 +10,7 @@
   "gadsDrag": {
     "releaseTag": "gads-v6.0.0-drag.1",
     "version": "v6.0.0-drag.1",
-    "url": "https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/e894f84b804459d223f29615eca3f79696423c4b/gads-v6.0.0-drag.1/GADS-drag.exe",
+    "url": "https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/d1bbd9898c97b5072bf784ed7d71c8c20333939e/gads-v6.0.0-drag.1/GADS-drag.exe",
     "sha256": "4a8bc06eea45030ad69cf27bda6c8aacffc5e8e33c1ec15f39b2d524bc58f975",
     "redistributeEmbeddedResources": true,
     "goVersion": "1.26.0",
@@ -41,7 +41,7 @@
         "exeSha256": "486e99c270df54b05394f01083dca613136e4c3bcd0900dcac21cfc9d7d71d08"
       },
       "provider": {
-        "url": "https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/e894f84b804459d223f29615eca3f79696423c4b/gads-v6.0.0-drag.1/GADS-drag-darwin-arm64",
+        "url": "https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/d1bbd9898c97b5072bf784ed7d71c8c20333939e/gads-v6.0.0-drag.1/GADS-drag-darwin-arm64",
         "sha256": "654b386ab2c2258bfa17798ee549ba99266053ec5e46fe6a41f0dd1a6ecfa124"
       },
       "node": {
@@ -70,7 +70,7 @@
         "exeSha256": "5bfb028f520e69f8d4ebfad1f1e5fb00bb76ac2e06eeb850a00311a3f8c10e49"
       },
       "provider": {
-        "url": "https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/e894f84b804459d223f29615eca3f79696423c4b/gads-v6.0.0-drag.1/GADS-drag-darwin-amd64",
+        "url": "https://raw.githubusercontent.com/fyhcrew-art/blossom-farm-kit/d1bbd9898c97b5072bf784ed7d71c8c20333939e/gads-v6.0.0-drag.1/GADS-drag-darwin-amd64",
         "sha256": "3abe26e56118c1ba18947c7c733520a202fd2c1c024a227940123c024c46bbb0"
       },
       "node": {

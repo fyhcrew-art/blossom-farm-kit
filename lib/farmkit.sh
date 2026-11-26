@@ -2399,14 +2399,42 @@ test_git_commit_text() {
     [[ $1 =~ $re ]]
 }
 
+test_kit_version_text() {
+    # A kit version as the kit writes it: three numbers with dots between
+    # them (1.0.0), no leading zero, nothing before or after. "1.0", "1.0.0.0"
+    # and "01.0.0" are other spellings of a version, not versions: a kit that
+    # names itself that way is not compared, it is refused.
+    local LC_ALL=C
+    local re='^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$'
+    [[ $1 =~ $re ]]
+}
+
+test_program_version_text() {
+    # The version of GADS or of the patched provider as versions.json writes
+    # it: v6.0.0, v6.0.0-drag.1. Lower case, no blank, nothing else: two
+    # versions are the same exactly when their texts are the same.
+    local LC_ALL=C
+    local re='^v[0-9]{1,6}(\.[0-9]{1,6}){1,3}(-[a-z0-9]{1,16}(\.[a-z0-9]{1,16}){0,3})?$'
+    [[ $1 =~ $re ]]
+}
+
+version_greater() {
+    # version_greater <have> <want>   (two kit versions; status 0 only when
+    # both are well-formed and have > want)
+    test_kit_version_text "$1" && test_kit_version_text "$2" || return 1
+    version_at_least "$1" "$2" && ! version_at_least "$2" "$1"
+}
+
 test_kit_tree() {
     # test_kit_tree <folder> <SHA-256 of its MANIFEST.sha256>
     # Prints what is wrong with an unpacked kit, or nothing when every file is
     # the one its list names: the list has the SHA-256 given; every file on
     # the list is there with its SHA-256; nothing is there that the list does
     # not name, except the four files that cannot be on it (MANIFEST.sha256
-    # itself, bootstrap.sh, bootstrap.ps1, pairing.json); nothing is a link.
-    local dir=$1 want_list=$2 got want name extra allowed
+    # itself, bootstrap.sh, bootstrap.ps1, pairing.json); no folder is there
+    # that holds no file of the list; nothing is a link. A step of the check
+    # that cannot be carried out counts as a problem, never as "nothing found".
+    local dir=$1 want_list=$2 got want name extra tmp
     if [ ! -f "$dir/MANIFEST.sha256" ]; then echo 'It has no MANIFEST.sha256.'; return 0; fi
     got=$(get_file_sha256 "$dir/MANIFEST.sha256")
     if [ "$got" != "$(to_lower "$want_list")" ]; then
@@ -2429,54 +2457,94 @@ test_kit_tree() {
             return 0
         fi
     done < "$dir/MANIFEST.sha256"
-    allowed=$( { awk '{ print $2 }' "$dir/MANIFEST.sha256"; printf 'MANIFEST.sha256\nbootstrap.sh\nbootstrap.ps1\npairing.json\n'; } | LC_ALL=C sort -u)
-    extra=$( (cd "$dir" && find . -type f -print) | sed 's|^\./||' | LC_ALL=C sort | awk -v allowed="$allowed" '
-        BEGIN { n = split(allowed, a, "\n"); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
-        !($0 in ok) { print; exit }')
-    if [ -n "$extra" ]; then echo "It holds a file that its list does not name: $extra"; fi
+    # What is there against what may be there, as two sorted lists in files
+    # (a list handed to awk in a variable is not read by every awk).
+    tmp=$(umask 077 && mktemp -d "${TMPDIR:-/tmp}/farmkit-tree.XXXXXX" 2> /dev/null) || { echo 'Its files could not be compared with its list (no temporary folder).'; return 0; }
+    extra=$(_fk_kit_tree_extra "$dir" "$tmp") || extra='Its files could not be compared with its list.'
+    rm -rf "$tmp"
+    if [ -n "$extra" ]; then echo "$extra"; fi
+    return 0
+}
+
+_fk_kit_tree_extra() {
+    # _fk_kit_tree_extra <kit folder> <empty work folder>
+    # Prints the first file the list does not name, or the first folder that
+    # holds no file of the list. Status 1 when a step failed.
+    local dir=$1 tmp=$2 extra
+    { awk '{ print $2 }' "$dir/MANIFEST.sha256" && printf 'MANIFEST.sha256\nbootstrap.sh\nbootstrap.ps1\npairing.json\n'; } > "$tmp/names" || return 1
+    LC_ALL=C sort -u "$tmp/names" > "$tmp/allowed" || return 1
+    (cd "$dir" && find . -type f -print) > "$tmp/found" || return 1
+    sed 's|^\./||' "$tmp/found" > "$tmp/found.names" && LC_ALL=C sort "$tmp/found.names" > "$tmp/files" || return 1
+    LC_ALL=C comm -23 "$tmp/files" "$tmp/allowed" > "$tmp/extra" || return 1
+    extra=$(head -n 1 "$tmp/extra")
+    if [ -n "$extra" ]; then echo "It holds a file that its list does not name: $extra"; return 0; fi
+    # every folder must lie on the way to a file of the list
+    awk '{ n = split($2, part, "/"); d = ""; for (i = 1; i < n; i++) { d = (i == 1 ? part[i] : d "/" part[i]); print d } }' "$dir/MANIFEST.sha256" > "$tmp/names" || return 1
+    LC_ALL=C sort -u "$tmp/names" > "$tmp/allowed" || return 1
+    (cd "$dir" && find . -type d -print) > "$tmp/found" || return 1
+    sed -e '/^\.$/d' -e 's|^\./||' "$tmp/found" > "$tmp/found.names" && LC_ALL=C sort "$tmp/found.names" > "$tmp/files" || return 1
+    LC_ALL=C comm -23 "$tmp/files" "$tmp/allowed" > "$tmp/extra" || return 1
+    extra=$(head -n 1 "$tmp/extra")
+    if [ -n "$extra" ]; then echo "It holds a folder that its list names no file for: $extra"; fi
     return 0
 }
 
 test_kit_update_rules() {
     # test_kit_update_rules <text of this kit's versions.json> <text of the fetched kit's versions.json>
     # Prints why a kit that was fetched may not replace this one, or nothing.
-    # The rules a kit enforces on its successor, whoever published it:
-    #   * the version goes up, never back or sideways;
+    # The rules a kit enforces on its successor:
+    #   * the kit version is three numbers and goes up: the same version, a
+    #     lower one, or the same one in another spelling (1.0, 1.0.0.0,
+    #     01.0.0) is refused;
+    #   * the versions of GADS and of the patched provider are written in
+    #     the one form versions.json uses (v6.0.0, v6.0.0-drag.1), so that
+    #     "the same version" has one meaning;
     #   * a program keeps its checksum as long as it keeps its version: a kit
     #     that names the provider (or the hub) by the version this kit names
-    #     must pin the same SHA-256 for it, on every system. Another file
-    #     under the same version is refused; a changed program has to come
-    #     with a new version, which the update shows before it replaces
-    #     anything;
+    #     must pin the same SHA-256 for it, on every system;
     #   * every download address is https.
-    local old=$1 new=$2 a b key
+    # They stop mistakes and a plain swap of a file under a version that is
+    # in use. They are not a control over whoever can write to the branch
+    # main: that person can give a changed program a new version, and can
+    # change the scripts themselves (docs/security.md, section 9).
+    local old=$1 new=$2 a b key group
     a=$(json_get "$old" kit); b=$(json_get "$new" kit)
-    case $b in '' | *[!0-9.]*) echo 'It names no usable kit version.'; return 0 ;; esac
-    if [ "$a" = "$b" ] || ! version_at_least "$b" "$a"; then
+    if ! test_kit_version_text "$b"; then echo 'It names no usable kit version (three numbers, like 1.2.3).'; return 0; fi
+    if ! version_greater "$b" "$a"; then
         echo "It is kit $b, which is not newer than this kit ($a)."
         return 0
     fi
-    if [ "$(json_get "$old" gadsDrag.version)" = "$(json_get "$new" gadsDrag.version)" ]; then
-        for key in gadsDrag.sha256 macos.arm64.provider.sha256 macos.x86_64.provider.sha256; do
-            a=$(to_lower "$(json_get "$old" "$key")"); b=$(to_lower "$(json_get "$new" "$key")")
-            if [ -n "$a" ] && [ "$a" != "$b" ]; then
-                echo "It pins another file for the provider $(json_get "$new" gadsDrag.version) than this kit does ($key: $b instead of $a). A changed program must carry a new version."
+    for key in gads.version gadsDrag.version; do
+        if ! test_program_version_text "$(json_get "$new" "$key")"; then
+            echo "Its $key is not written like a version of GADS (v6.0.0, v6.0.0-drag.1)."
+            return 0
+        fi
+    done
+    for group in 'gadsDrag.version|the provider|gadsDrag.sha256 macos.arm64.provider.sha256 macos.x86_64.provider.sha256' \
+        'gads.version|GADS|gads.hubZipSha256 gads.hubExeSha256 macos.arm64.hub.zipSha256 macos.arm64.hub.exeSha256 macos.x86_64.hub.zipSha256 macos.x86_64.hub.exeSha256'; do
+        key=${group%%|*}
+        [ "$(json_get "$old" "$key")" = "$(json_get "$new" "$key")" ] || continue
+        b=${group#*|}
+        for key in ${group##*|}; do
+            a=$(to_lower "$(json_get "$old" "$key")")
+            if [ -n "$a" ] && [ "$a" != "$(to_lower "$(json_get "$new" "$key")")" ]; then
+                echo "It pins another file for ${b%%|*} $(json_get "$new" "${group%%|*}") than this kit does ($key: $(to_lower "$(json_get "$new" "$key")") instead of $a). A changed program must carry a new version."
                 return 0
             fi
         done
+    done
+    if ! b=$(printf '%s' "$new" | json_flatten 2> /dev/null | LC_ALL=C awk -F '\t' '$1 ~ /(^|\.)([a-zA-Z]*[uU]rl)$/ && $2 !~ /^https:\/\// { print $1; exit }'); then
+        echo 'Its versions.json could not be read.'
+        return 0
     fi
-    if [ "$(json_get "$old" gads.version)" = "$(json_get "$new" gads.version)" ]; then
-        for key in gads.hubZipSha256 gads.hubExeSha256 macos.arm64.hub.zipSha256 macos.arm64.hub.exeSha256 macos.x86_64.hub.zipSha256 macos.x86_64.hub.exeSha256; do
-            a=$(to_lower "$(json_get "$old" "$key")"); b=$(to_lower "$(json_get "$new" "$key")")
-            if [ -n "$a" ] && [ "$a" != "$b" ]; then
-                echo "It pins another file for GADS $(json_get "$new" gads.version) than this kit does ($key: $b instead of $a). A changed program must carry a new version."
-                return 0
-            fi
-        done
-    fi
-    b=$(printf '%s' "$new" | json_flatten 2> /dev/null | LC_ALL=C awk -F '\t' '$1 ~ /(^|\.)([a-zA-Z]*[uU]rl)$/ && $2 !~ /^https:\/\// { print $1; exit }')
     if [ -n "$b" ]; then echo "Its download address $b is not https."; fi
     return 0
+}
+
+describe_kit_versions() {
+    # describe_kit_versions <text of a versions.json>
+    # One line: the kit, GADS and the patched provider it names.
+    printf 'kit %s, hub %s, provider %s\n' "$(json_get "$1" kit)" "$(json_get "$1" gads.version)" "$(json_get "$1" gadsDrag.version)"
 }
 
 kit_fetch_file() {
@@ -2512,9 +2580,10 @@ get_released_kit() {
         return 1
     fi
     RELEASED_KIT_VERSION=$(json_file_get "$work/main-versions.json" kit)
-    case $RELEASED_KIT_VERSION in
-        '' | *[!0-9.]*) RELEASED_KIT_VERSION=''; RELEASED_KIT_ERROR='versions.json of the kit repository names no kit version.'; return 1 ;;
-    esac
+    if ! test_kit_version_text "$RELEASED_KIT_VERSION"; then
+        RELEASED_KIT_VERSION=''; RELEASED_KIT_ERROR='versions.json of the kit repository names no kit version (three numbers, like 1.2.3).'
+        return 1
+    fi
     if ! kit_fetch_file "$FARM_KIT_RAW_URL/main/pairing.json" "$work/main-pairing.json" 60; then
         if [ "$KIT_FETCH_STATUS" = 404 ]; then return 0; fi
         RELEASED_KIT_ERROR="pairing.json of the kit repository could not be read ($KIT_FETCH_ERROR)."
@@ -2556,8 +2625,8 @@ fetch_kit_commit() {
     bad=$(awk -v top="$top" '
         $0 == top || $0 == top "/" { next }
         index($0, top "/") != 1 { print; exit }
-        /(^|\/)\.\.(\/|$)/ { print; exit }' "$work/names")
-    [ -n "$bad" ] || bad=$(awk '{ t = substr($0, 1, 1); if (t != "-" && t != "d") { print "a link or a device"; exit } }' "$work/listing")
+        /(^|\/)\.\.(\/|$)/ { print; exit }' "$work/names") || bad='its list could not be read'
+    [ -n "$bad" ] || bad=$(awk '{ t = substr($0, 1, 1); if (t != "-" && t != "d") { print "a link or a device"; exit } }' "$work/listing") || bad='its list could not be read'
     if [ -n "$bad" ]; then
         rm -f "$work/kit.tar.gz"
         FETCHED_KIT_ERROR="The kit archive holds something that does not belong to the kit ($bad)."

@@ -13,10 +13,12 @@
       1. downloads the archive GitHub makes of the kit at that same commit;
       2. looks at the list of what is in the archive before unpacking it
          (nothing may lie outside the kit's own folder), and unpacks it into
-         a folder only Administrators can change;
+         a new folder only Administrators can change (its name cannot be
+         guessed, and it is created together with its permissions);
       3. compares the SHA-256 of MANIFEST.sha256 in it with the value written
          below, and then the SHA-256 of every unpacked file with that list.
-         A file that is missing, changed or not on the list stops everything;
+         A file that is missing, changed or not on the list stops everything,
+         and so does a folder that holds no file of the list;
       4. puts the kit into C:\blossom-farm-kit, for Administrators to change
          and everybody else to read (a kit that was there before is kept as
          C:\blossom-farm-kit.previous);
@@ -39,7 +41,7 @@
 $ErrorActionPreference = 'Stop'
 $KitRepository = 'fyhcrew-art/blossom-farm-kit'
 $KitArchiveUrl = 'https://github.com/fyhcrew-art/blossom-farm-kit/archive'
-$KitManifestSha256 = '3a7ce77a92d75b00ffe6d3a05b19005fd7516a06d6073347bf13efa9ca28764c'
+$KitManifestSha256 = 'c003825f8a505b51b1068fadadc207ba68285aad8b8d918830ec0883b1630dab'
 
 # No param() block on purpose: every option except the three below belongs to
 # install.ps1 and is passed on exactly as it was written.
@@ -87,21 +89,65 @@ $Destination = $Destination.TrimEnd('\', '/')
 $top = ($KitRepository -split '/')[-1] + '-' + $KitCommit
 $url = $KitArchiveUrl + '/' + $KitCommit + '.zip'
 $previous = $Destination + '.previous'
-if ($VerifyOnly) { $stage = Join-Path ([System.IO.Path]::GetTempPath()) ('blossom-kit-' + [Guid]::NewGuid().ToString('N')) }
-else { $stage = $Destination + '.new' }
 
 Write-Host ''
 Write-Host ('Blossom farm kit - fetching the kit (commit ' + $KitCommit + ')') -ForegroundColor Cyan
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
-if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-New-Item -ItemType Directory -Path $stage -Force | Out-Null
+
+# The folder everything is unpacked and checked in. Administrators run the
+# scripts of the kit, so nobody else may be able to change them - and ordinary
+# accounts may create folders directly on a drive. The folder must therefore
+# be one nobody could prepare: its name cannot be guessed, it must not exist,
+# it is created together with its permissions (Administrators and SYSTEM:
+# full; Users: read; nothing inherited), and it is looked at again before
+# anything is written into it. (lib\FarmKit.psm1 does the same in
+# New-KitStagingFolder for scripts\update.ps1 -Latest.)
+if ($VerifyOnly) { $newStage = Join-Path ([System.IO.Path]::GetTempPath()) ('blossom-kit-' + [Guid]::NewGuid().ToString('N')) }
+else { $newStage = $Destination + '.new-' + [Guid]::NewGuid().ToString('N') }
+$ntfs = 'Check that the drive is NTFS, then run the command again; if it repeats, report it on the kit repository.'
+if (Test-Path -LiteralPath $newStage) { Stop-Bootstrap ($newStage + ' exists already.') 'Run the command again.' }
+try {
+    if (-not $onWindows -or $VerifyOnly) { New-Item -ItemType Directory -Path $newStage -ErrorAction Stop | Out-Null }
+    else {
+        $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+        $none = [System.Security.AccessControl.PropagationFlags]::None
+        $allow = [System.Security.AccessControl.AccessControlType]::Allow
+        $security = New-Object System.Security.AccessControl.DirectorySecurity
+        $security.SetAccessRuleProtection($true, $false)
+        foreach ($grant in @(@('S-1-5-32-544', 'FullControl'), @('S-1-5-18', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
+            $account = New-Object System.Security.Principal.SecurityIdentifier($grant[0])
+            $rights = [System.Security.AccessControl.FileSystemRights]$grant[1]
+            $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($account, $rights, $inherit, $none, $allow)))
+        }
+        if ($PSVersionTable.PSVersion.Major -lt 6) { [void][System.IO.Directory]::CreateDirectory($newStage, $security) }
+        else { [void][System.IO.FileSystemAclExtensions]::CreateDirectory($security, $newStage) }
+    }
+} catch { Stop-Bootstrap ('Could not create ' + $newStage + ': ' + $_.Exception.Message) $ntfs }
 if ($onWindows -and -not $VerifyOnly) {
-    # Administrators run these scripts: nobody else may change them. Set
-    # before anything is put into the folder (Administrators, SYSTEM: full;
-    # Users: read).
-    & icacls.exe $stage /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' /grant:r '*S-1-5-18:(OI)(CI)F' /grant:r '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
-    if ($LASTEXITCODE -ne 0) { Stop-Bootstrap ('Could not restrict access to ' + $stage + '.') 'Check that the drive is NTFS, then run the command again.' }
+    $problem = ''
+    try {
+        $sid = [System.Security.Principal.SecurityIdentifier]
+        $acl = Get-Acl -LiteralPath $newStage
+        $owner = $acl.GetOwner($sid).Value
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if (@('S-1-5-32-544', 'S-1-5-18', $me) -notcontains $owner) { $problem = 'its owner is another account (' + $owner + ')' }
+        elseif (-not $acl.AreAccessRulesProtected) { $problem = 'it takes permissions from the folder above it' }
+        elseif (@(Get-ChildItem -LiteralPath $newStage -Force).Count -ne 0) { $problem = 'it is not empty' }
+        else {
+            foreach ($rule in $acl.GetAccessRules($true, $true, $sid)) {
+                if ($rule.AccessControlType -ne $allow) { continue }
+                $who = $rule.IdentityReference.Value
+                if ($who -eq 'S-1-5-32-544' -or $who -eq 'S-1-5-18') { continue }
+                if ($who -eq 'S-1-5-32-545' -and (([int]$rule.FileSystemRights) -band (-bnot 0x1200A9)) -eq 0) { continue }
+                $problem = 'the account ' + $who + ' may change it'
+                break
+            }
+        }
+    } catch { $problem = 'its permissions cannot be read: ' + $_.Exception.Message }
+    # $stage is still empty here: a folder that failed this check is not ours to delete.
+    if ($problem) { Stop-Bootstrap ($newStage + ' is not a folder only Administrators can change: ' + $problem + '. Nothing was downloaded or run.') $ntfs }
 }
+$stage = $newStage
 
 $zip = Join-Path $stage 'kit.zip'
 $oldProgress = $ProgressPreference
@@ -170,15 +216,28 @@ foreach ($line in [System.IO.File]::ReadAllLines($manifest)) {
     }
     [void]$listed.Add($name)
 }
-# Nothing may be there that the list does not name. Four files cannot be on
-# the list (tools/make-manifest.sh says why); they are not part of the
-# installed kit and are removed.
+# Nothing may be there that the list does not name: no file, and no folder
+# that holds no file of the list. Four files cannot be on the list
+# (tools/make-manifest.sh says why); they are not part of the installed kit
+# and are removed.
 $unlisted = @('MANIFEST.sha256', 'bootstrap.sh', 'bootstrap.ps1', 'pairing.json')
 $kitFull = (Get-Item -LiteralPath $kit).FullName.TrimEnd('\', '/')
 foreach ($item in (Get-ChildItem -LiteralPath $kit -Recurse -Force -File)) {
     $name = $item.FullName.Substring($kitFull.Length + 1) -replace '\\', '/'
     if (-not $listed.Contains($name) -and $unlisted -cnotcontains $name) {
         Stop-Bootstrap ('The kit that was downloaded holds a file that its list does not name: ' + $name + '. Nothing was run.') $report
+    }
+}
+# Nor a folder that holds no file of the list.
+$folders = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+foreach ($name in $listed) {
+    $parts = $name -split '/'
+    for ($i = 1; $i -lt $parts.Count; $i++) { [void]$folders.Add(($parts[0..($i - 1)] -join '/')) }
+}
+foreach ($item in (Get-ChildItem -LiteralPath $kit -Recurse -Force -Directory)) {
+    $name = $item.FullName.Substring($kitFull.Length + 1) -replace '\\', '/'
+    if (-not $folders.Contains($name)) {
+        Stop-Bootstrap ('The kit that was downloaded holds a folder that its list names no file for: ' + $name + '. Nothing was run.') $report
     }
 }
 foreach ($name in @('bootstrap.sh', 'bootstrap.ps1', 'pairing.json')) {

@@ -14,7 +14,8 @@
 #      and unpacks it into a private folder;
 #   3. compares the SHA-256 of MANIFEST.sha256 in it with the value written
 #      below, and then the SHA-256 of every unpacked file with that list.
-#      A file that is missing, changed or not on the list stops everything;
+#      A file that is missing, changed or not on the list stops everything,
+#      and so does a folder that holds no file of the list;
 #   4. puts the kit into /opt/blossom-farm-kit (a kit that was there before
 #      is kept as /opt/blossom-farm-kit.previous);
 #   5. starts install.sh from there with the options it was given.
@@ -38,7 +39,7 @@
 set -u
 KIT_REPOSITORY='fyhcrew-art/blossom-farm-kit'
 KIT_ARCHIVE_URL='https://github.com/fyhcrew-art/blossom-farm-kit/archive'
-KIT_MANIFEST_SHA256='3a7ce77a92d75b00ffe6d3a05b19005fd7516a06d6073347bf13efa9ca28764c'
+KIT_MANIFEST_SHA256='c003825f8a505b51b1068fadadc207ba68285aad8b8d918830ec0883b1630dab'
 
 fail() {
     printf '\nPROBLEM:    %s\n' "$1" >&2
@@ -73,7 +74,7 @@ case $KIT_COMMIT in
 esac
 [ "${#KIT_COMMIT}" -eq 40 ] || fail 'The value of --kit-commit is not a commit: it must be 40 digits and letters a to f.' "$AGAIN"
 case $DEST in /*) ;; *) fail "The folder for the kit must be a full path: $DEST" 'Leave --dest out to use /opt/blossom-farm-kit.' ;; esac
-for tool in curl tar awk find sort sed; do
+for tool in curl tar awk find sort sed comm grep head; do
     command -v "$tool" > /dev/null 2>&1 || fail "The program $tool was not found." 'It is part of macOS. Run the command in Terminal on the Mac.'
 done
 
@@ -119,9 +120,9 @@ fi
 bad=$(awk -v top="$TOP" '
     $0 == top || $0 == top "/" { next }
     index($0, top "/") != 1 { print; exit }
-    /(^|\/)\.\.(\/|$)/ { print; exit }' "$STAGE/names")
+    /(^|\/)\.\.(\/|$)/ { print; exit }' "$STAGE/names") || fail 'The list of the kit archive could not be read. Nothing was unpacked or run.' 'Run the command again.'
 [ -z "$bad" ] || fail "The kit archive holds something outside the folder of this commit ($bad). Nothing was unpacked or run." "$REPORT"
-bad=$(awk '{ t = substr($0, 1, 1); if (t != "-" && t != "d") { print; exit } }' "$STAGE/listing")
+bad=$(awk '{ t = substr($0, 1, 1); if (t != "-" && t != "d") { print; exit } }' "$STAGE/listing") || fail 'The list of the kit archive could not be read. Nothing was unpacked or run.' 'Run the command again.'
 [ -z "$bad" ] || fail 'The kit archive holds something that is neither a file nor a folder. Nothing was unpacked or run.' "$REPORT"
 
 mkdir "$STAGE/unpacked" || fail "Could not write to $STAGE." 'Check the free space on the disk.'
@@ -152,12 +153,28 @@ while read -r want name; do
     fi
     count=$((count + 1))
 done < "$KIT/MANIFEST.sha256"
-# Nothing may be there that the list does not name. Four files cannot be on
-# the list (tools/make-manifest.sh says why); they are not part of the
-# installed kit and are removed.
-{ awk '{ print $2 }' "$KIT/MANIFEST.sha256"; printf 'MANIFEST.sha256\nbootstrap.sh\nbootstrap.ps1\npairing.json\n'; } | LC_ALL=C sort -u > "$STAGE/allowed"
-extra=$( (cd "$KIT" && find . -type f -print) | sed 's|^\./||' | LC_ALL=C sort | LC_ALL=C comm -23 - "$STAGE/allowed" | head -n 1)
+# Nothing may be there that the list does not name: no file, and no folder
+# that holds no file of the list. Four files cannot be on the list
+# (tools/make-manifest.sh says why); they are not part of the installed kit
+# and are removed. A step that cannot be carried out stops everything: it
+# never counts as "nothing found".
+cannot_compare() { fail 'The files of the kit that was downloaded could not be compared with its list. Nothing was run.' 'Check the free space on the disk and run the command again.'; }
+{ awk '{ print $2 }' "$KIT/MANIFEST.sha256" && printf 'MANIFEST.sha256\nbootstrap.sh\nbootstrap.ps1\npairing.json\n'; } > "$STAGE/list.names" || cannot_compare
+LC_ALL=C sort -u "$STAGE/list.names" > "$STAGE/allowed" || cannot_compare
+(cd "$KIT" && find . -type f -print) > "$STAGE/found" || cannot_compare
+sed 's|^\./||' "$STAGE/found" > "$STAGE/found.names" || cannot_compare
+LC_ALL=C sort "$STAGE/found.names" > "$STAGE/found.sorted" || cannot_compare
+LC_ALL=C comm -23 "$STAGE/found.sorted" "$STAGE/allowed" > "$STAGE/extra" || cannot_compare
+extra=$(head -n 1 "$STAGE/extra")
 [ -z "$extra" ] || fail "The kit that was downloaded holds a file that its list does not name: $extra. Nothing was run." "$REPORT"
+awk '{ n = split($2, part, "/"); d = ""; for (i = 1; i < n; i++) { d = (i == 1 ? part[i] : d "/" part[i]); print d } }' "$KIT/MANIFEST.sha256" > "$STAGE/list.names" || cannot_compare
+LC_ALL=C sort -u "$STAGE/list.names" > "$STAGE/allowed" || cannot_compare
+(cd "$KIT" && find . -type d -print) > "$STAGE/found" || cannot_compare
+sed -e '/^\.$/d' -e 's|^\./||' "$STAGE/found" > "$STAGE/found.names" || cannot_compare
+LC_ALL=C sort "$STAGE/found.names" > "$STAGE/found.sorted" || cannot_compare
+LC_ALL=C comm -23 "$STAGE/found.sorted" "$STAGE/allowed" > "$STAGE/extra" || cannot_compare
+extra=$(head -n 1 "$STAGE/extra")
+[ -z "$extra" ] || fail "The kit that was downloaded holds a folder that its list names no file for: $extra. Nothing was run." "$REPORT"
 rm -f "$KIT/bootstrap.sh" "$KIT/bootstrap.ps1" "$KIT/pairing.json"
 echo "   [ok]   The kit was downloaded and every one of its $count files has the SHA-256 this command pins."
 

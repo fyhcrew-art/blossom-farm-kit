@@ -3,11 +3,15 @@
 #   tools/make-manifest.sh    writes MANIFEST.sha256 and pins it in the bootstrap files
 #   bootstrap.sh              the one-command setup
 #   lib/farmkit.sh            get_released_kit, fetch_kit_commit, test_kit_tree,
-#                             test_kit_update_rules (scripts/update.sh --latest)
+#                             test_kit_update_rules
+#   scripts/update.sh         --check and --latest, run as a whole
 # A small stand-in for the kit is packed the way GitHub packs a commit and
 # served over https by tests/fake-blossom.js; the scripts are run against it:
-# an unchanged kit, a changed file, a file too many, a list that was not
-# regenerated, another commit's kit, a download that was cut short.
+# an unchanged kit, a changed file, a file or a folder too many, a list that
+# was not regenerated, another commit's kit, a download that was cut short.
+# scripts/update.sh runs unchanged from a copy of the kit whose library has a
+# few lines added at its end: they point it at the stand-in server and at a
+# folder of this run, and replace the checks that need root and a Mac.
 #
 #   bash tests/bootstrap.test.sh
 #
@@ -159,6 +163,34 @@ cp -R "$SRC" "$WORK/t5"; printf '%s  ../outside\n' "$(printf '%064d' 3)" >> "$WO
 matches "$(test_kit_tree "$WORK/t5" "$(sha256_of "$WORK/t5/MANIFEST.sha256")")" 'not a checksum and a file name' 'a list that points outside the kit is refused'
 cp -R "$SRC" "$WORK/t6"; echo 'changed' >> "$WORK/t6/bootstrap.ps1"; rm "$WORK/t6/pairing.json"
 is "$(test_kit_tree "$WORK/t6" "$LIST")" '' 'the files that cannot be on the list do not count'
+cp -R "$SRC" "$WORK/t7"; mkdir -p "$WORK/t7/services/node_modules"
+matches "$(test_kit_tree "$WORK/t7" "$LIST")" 'a folder that its list names no file for: services' 'an empty folder too many is named'
+cp -R "$SRC" "$WORK/t8"; mkdir "$WORK/t8/lib/deeper"
+matches "$(test_kit_tree "$WORK/t8" "$LIST")" 'a folder that its list names no file for: lib/deeper' 'also inside a folder of the kit'
+cp -R "$SRC" "$WORK/t9"; printf 'x' > "$WORK/t9/install.sh
+versions.json"
+matches "$(test_kit_tree "$WORK/t9" "$LIST")" 'does not name' 'a file whose name is two listed names on two lines is not taken for them'
+# The awk of macOS does not accept a value with a line break in "-v name=value":
+# it prints an error and runs nothing. The comparison must not depend on that.
+mkdir -p "$WORK/strict-awk"
+REAL_AWK=$(command -v awk)
+cat > "$WORK/strict-awk/awk" << SH
+#!/bin/bash
+prev=''
+for a in "\$@"; do
+    case \$prev in -v) case \$a in *'
+'*) echo 'awk: newline in string' >&2; exit 2 ;; esac ;; esac
+    prev=\$a
+done
+exec "$REAL_AWK" "\$@"
+SH
+chmod +x "$WORK/strict-awk/awk"
+is "$(PATH="$WORK/strict-awk:$PATH" test_kit_tree "$SRC" "$LIST")" '' 'with an awk that refuses a line break in -v: an unchanged kit passes'
+matches "$(PATH="$WORK/strict-awk:$PATH" test_kit_tree "$WORK/t2" "$LIST")" 'does not name: scripts/extra.sh' 'and a file too many is still named'
+matches "$(PATH="$WORK/strict-awk:$PATH" test_kit_tree "$WORK/t7" "$LIST")" 'names no file for: services' 'and a folder too many'
+mkdir -p "$WORK/no-comm"
+printf '#!/bin/bash\nexit 2\n' > "$WORK/no-comm/comm"; chmod +x "$WORK/no-comm/comm"
+matches "$(PATH="$WORK/no-comm:$PATH" test_kit_tree "$SRC" "$LIST")" 'could not be compared' 'a comparison that cannot be carried out is a problem, not "nothing found"'
 
 describe 'test_kit_update_rules'
 OLD=$(cat "$SRC/versions.json")
@@ -172,6 +204,38 @@ is "$(test_kit_update_rules "$OLD" "$(sed 's/v6.0.0-drag.1/v6.0.0-drag.2/' "$WOR
 matches "$(test_kit_update_rules "$OLD" "$(printf '%s' "$NEWER" | sed "s/$(printf '%064d' 7)/$(printf '%064d' 8)/")")" 'pins another file for GADS v6.0.0' 'another hub under the same GADS version is refused'
 matches "$(test_kit_update_rules "$OLD" "$(printf '%s' "$NEWER" | sed 's|https://example.org|http://example.org|')")" 'gadsDrag.url is not https' 'a download address that is not https is refused'
 matches "$(test_kit_update_rules "$OLD" '{ "kit": "latest" }')" 'no usable kit version' 'a version that is not a number is refused'
+# sideways: the same or a higher version in another spelling
+for v in 9.9.9.0 9.9.09 09.9.9 9.9.9.0.9 9.9 9.9.9. 9.9.10.0 9.10 010.0.0 '9.9.10 ' 10.0.0-1; do
+    matches "$(test_kit_update_rules "$OLD" "$(printf '%s' "$NEWER" | sed "s/\"kit\": \"9.9.10\"/\"kit\": \"$v\"/")")" 'no usable kit version' "the kit version [$v] is not a version"
+done
+matches "$(test_kit_update_rules "$(printf '%s' "$OLD" | sed 's/"kit": "9.9.9"/"kit": "9.9"/')" "$NEWER")" 'not newer' 'a kit whose own version is not well-formed accepts no successor by comparison'
+for v in V6.0.0-drag.1 'v6.0.0-drag.1 ' v6.0.0-DRAG.1 6.0.0-drag.1 'v6.0.0 drag'; do
+    matches "$(test_kit_update_rules "$OLD" "$(printf '%s' "$NEWER" | sed "s/\"version\": \"v6.0.0-drag.1\"/\"version\": \"$v\"/; s/$(printf '%064d' 1)/$(printf '%064d' 2)/")")" 'gadsDrag.version is not written like a version' "another file under the provider version [$v] is refused"
+done
+matches "$(test_kit_update_rules "$OLD" "$(printf '%s' "$NEWER" | sed 's/"version": "v6.0.0"/"version": "V6.0.0"/')")" 'gads.version is not written like a version' 'the same for the version of GADS'
+matches "$(test_kit_update_rules "$OLD" '{ "kit": "9.9.10" }')" 'gads.version is not written like a version' 'a kit that names no program versions is refused'
+is "$(describe_kit_versions "$OLD")" 'kit 9.9.9, hub v6.0.0, provider v6.0.0-drag.1' 'describe_kit_versions: one line'
+
+describe 'version_greater'
+ok version_greater 1.0.1 1.0.0
+ok version_greater 1.10.0 1.9.9
+ok version_greater 2.0.0 1.99.99
+not_ok version_greater 1.0.0 1.0.0
+not_ok version_greater 1.0.0 1.0.1
+not_ok version_greater 1.0 1.0.0
+not_ok version_greater 1.0.0.1 1.0.0
+not_ok version_greater 01.0.1 1.0.0
+not_ok version_greater 1.0.1 ''
+not_ok version_greater '' 1.0.0
+not_ok version_greater 1.0.1 latest
+ok test_kit_version_text 0.0.1
+not_ok test_kit_version_text 1.0.0.
+not_ok test_kit_version_text ' 1.0.0'
+not_ok test_kit_version_text 1.0.1234567
+ok test_program_version_text v6.0.0
+ok test_program_version_text v6.0.0-drag.12
+not_ok test_program_version_text v6.0.0-
+not_ok test_program_version_text ''
 REAL=$(cat "$KIT_ROOT/versions.json")
 matches "$(test_kit_update_rules "$REAL" "$REAL")" 'not newer' 'the real versions.json is read'
 NEXT=$(printf '%s' "$REAL" | sed 's/"kit": "[0-9.]*"/"kit": "999.0.0"/')
@@ -278,6 +342,17 @@ refused "$K2" 'lacks the file lib/farmkit.sh' 'a missing file is refused'
 cp -R "$SRC" "$WORK/evil4"; ln -s /etc/hosts "$WORK/evil4/lib/hosts"
 pack "$WORK/evil4" "$K2"
 refused "$K2" 'neither a file nor a folder' 'a link in the archive is refused'
+cp -R "$SRC" "$WORK/evil6"; mkdir -p "$WORK/evil6/services/node_modules"
+pack "$WORK/evil6" "$K2"
+refused "$K2" 'a folder that its list names no file for: services' 'an empty folder too many is refused'
+PLAIN_PATH=$PATH
+PATH="$WORK/strict-awk:$PATH"
+refused "$K2" 'a folder that its list names no file for: services' 'the same with an awk that refuses a line break in -v'
+pack "$WORK/evil2" "$K2"
+refused "$K2" 'a file that its list does not name: scripts/extra.sh' 'and a file too many, with that awk'
+out=$(bash "$BOOT" --kit-commit "$K" --verify-only 2>&1); code=$?
+is "$code" 0 "and the unchanged kit passes with that awk: $out"
+PATH=$PLAIN_PATH
 cp -R "$SRC" "$WORK/evil5"; rm "$WORK/evil5/MANIFEST.sha256"
 pack "$WORK/evil5" "$K2"
 refused "$K2" 'no MANIFEST.sha256' 'a kit without a list is refused'
@@ -381,6 +456,10 @@ pack "$WORK/evil2" "$K2"
 fetched "$K2" "$LIST"; code=$?
 is "$code" 1 'a kit with a file too many is refused'
 matches "$FETCHED_KIT_ERROR" 'does not name: scripts/extra.sh' 'with the reason'
+pack "$WORK/evil6" "$K2"
+fetched "$K2" "$LIST"; code=$?
+is "$code" 1 'a kit with an empty folder too many is refused'
+matches "$FETCHED_KIT_ERROR" 'names no file for: services' 'with the reason'
 pack "$WORK/stale" "$K2"
 fetched "$K2" "$LIST"; code=$?
 is "$code" 1 'a kit whose list is stale is refused'
@@ -402,6 +481,189 @@ is "$code" 1 'a branch name is not fetched'
 fetched 3333333333333333333333333333333333333333 "$LIST"; code=$?
 is "$code" 1 'a commit that is not there is reported'
 matches "$FETCHED_KIT_ERROR" 'HTTP 404' 'with the status'
+
+# ---------------------------------------------------------------------------
+# scripts/update.sh as a whole. The installed kit is a stand-in (version
+# 9.9.9) with the real lib/farmkit.sh, lib/json.awk and scripts/update.sh.
+# The lines added to the END of its library are the only difference to what
+# runs on a Mac: where the kit is looked for, where it is installed, and no
+# check for root and macOS. The kit that is fetched is another stand-in whose
+# scripts/update.sh writes down how it was called.
+describe 'scripts/update.sh --check and --latest'
+U=$WORK/u
+INST=$U/opt/blossom-farm-kit
+K3=4444444444444444444444444444444444444444
+new_installed() {
+    rm -rf "$U"
+    mkdir -p "$U/opt" "$U/farm"
+    new_stand_in "$INST" 9.9.9
+    cp "$KIT_ROOT/lib/farmkit.sh" "$KIT_ROOT/lib/json.awk" "$INST/lib/"
+    cp "$KIT_ROOT/scripts/update.sh" "$INST/scripts/update.sh"
+    cat >> "$INST/lib/farmkit.sh" << SH
+
+# --- added by tests/bootstrap.test.sh ---
+FARM_KIT_HOME='$INST'
+FARM_KIT_RAW_URL='$BASE/raw'
+FARM_KIT_ARCHIVE_URL='$BASE/archive'
+assert_macos_root() { :; }
+use_protected_kit_folder() { :; }
+read_farm_config() { FARM_HAS_CONFIG=0; [ -f '$U/farm/installed' ] && FARM_HAS_CONFIG=1; return 0; }
+chown() { :; }
+SH
+    : > "$U/farm/installed"
+}
+new_next() {
+    # new_next <kit version> [provider sha256]: the kit that main will announce
+    new_stand_in "$WORK/next" "$@"
+    cat > "$WORK/next/scripts/update.sh" << 'SH'
+#!/bin/bash
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+printf '%s\n' "$#" "$@" > "$here/update-called.txt"
+echo "the update script of the new kit ran in $here"
+SH
+    bash "$MAKE_MANIFEST" --tree "$WORK/next" > /dev/null 2>&1
+    NEXT_LIST=$(sha256_of "$WORK/next/MANIFEST.sha256")
+}
+announce() {
+    # announce <kit version on main> <kit version in pairing.json> [commit]
+    sed "s/\"kit\": \"[^\"]*\"/\"kit\": \"$1\"/" "$WORK/next/versions.json" > "$STATIC/raw/main/versions.json"
+    printf '{ "kitVersion": "%s", "kitCommit": "%s", "manifestSha256": "%s" }\n' "$2" "${3:-$K3}" "$NEXT_LIST" > "$STATIC/raw/main/pairing.json"
+}
+tree_of() { (cd "$1" && find . -type f -exec cksum {} + | LC_ALL=C sort; find . -type d | LC_ALL=C sort); }
+update() { out=$(bash "$INST/scripts/update.sh" "$@" 2>&1); code=$?; }
+# unchanged <what>: the installed kit is the one from before, nothing is next to it
+unchanged() {
+    is "$(tree_of "$INST")" "$BEFORE" "$1: the installed kit is unchanged"
+    is "$(find "$U/opt" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" 1 "$1: nothing is left next to it"
+    case $out in *'update script of the new kit ran'*) fail "$1: the update script of the fetched kit ran" ;; *) pass ;; esac
+}
+
+new_next 9.9.10
+pack "$WORK/next" "$K3"
+new_installed
+BEFORE=$(tree_of "$INST")
+
+announce 9.9.10 9.9.10
+update --check
+is "$code" 0 "--check with a newer kit on main: $out"
+matches "$out" 'Kit 9.9.10 is available \(commit 4444' 'says which kit and which commit'
+unchanged '--check'
+
+announce 9.9.9 9.9.9
+update --latest
+is "$code" 0 'the same version on main'
+matches "$out" 'This kit is the newest one' 'says so'
+unchanged 'the same version'
+announce 9.9.8 9.9.8
+update --latest
+is "$code" 0 'an older version on main'
+matches "$out" 'This kit is the newest one' 'says so'
+unchanged 'an older version'
+for v in 9.9.9.1 9.9.10.0 9.10 09.9.10 latest; do
+    announce "$v" "$v"
+    update --latest
+    is "$code" 1 "main names the kit [$v]"
+    matches "$out" 'names no kit version' "[$v]: with the reason"
+    unchanged "the kit version [$v]"
+done
+announce 9.9.10 9.9.9
+update --latest
+is "$code" 0 'a version on main that pairing.json does not name yet'
+matches "$out" 'being prepared' 'says that it is not released'
+unchanged 'a kit that is not released'
+
+announce 9.9.11 9.9.11
+update --latest
+is "$code" 1 'main announces another version than the commit holds'
+matches "$out" 'says it is kit 9.9.10, but the repository announced kit 9.9.11' 'with the reason'
+unchanged 'another version than announced'
+
+announce 9.9.10 9.9.10
+cp -R "$WORK/next" "$WORK/next-evil"; echo 'echo evil' >> "$WORK/next-evil/scripts/update.sh"
+pack "$WORK/next-evil" "$K3"
+update --latest
+is "$code" 1 'a changed file in the archive'
+matches "$out" 'did not pass its check.*scripts/update.sh is not the one the list names' 'with the reason'
+unchanged 'a changed file'
+bash "$MAKE_MANIFEST" --tree "$WORK/next-evil" > /dev/null 2>&1
+pack "$WORK/next-evil" "$K3"
+update --latest
+is "$code" 1 'a changed file with a rewritten list'
+matches "$out" 'list of files is not the expected one' 'with the reason'
+unchanged 'a changed file with a rewritten list'
+cp -R "$WORK/next" "$WORK/next-dir"; mkdir "$WORK/next-dir/extra-folder"
+pack "$WORK/next-dir" "$K3"
+update --latest
+is "$code" 1 'an empty folder too many in the archive'
+unchanged 'a folder too many'
+pack "$WORK/next" "$K3"
+size=$(wc -c < "$STATIC/archive/$K3.tar.gz" | tr -d ' ')
+echo $((size / 2)) > "$STATIC/archive/$K3.tar.gz.cut"
+update --latest
+is "$code" 1 'a download that breaks off'
+matches "$out" 'could not be downloaded' 'with the reason'
+unchanged 'a download that breaks off'
+rm -f "$STATIC/archive/$K3.tar.gz.cut"
+head -c $((size / 2)) "$STATIC/archive/$K3.tar.gz" > "$WORK/half" && cat "$WORK/half" > "$STATIC/archive/$K3.tar.gz"
+update --latest
+is "$code" 1 'half an archive'
+matches "$out" 'incomplete or damaged' 'with the reason'
+unchanged 'half an archive'
+announce 9.9.10 9.9.10 5555555555555555555555555555555555555555
+update --latest
+is "$code" 1 'a commit the repository does not have'
+unchanged 'a missing commit'
+
+# another file for the provider under the version the installed kit pins
+new_next 9.9.10 "$(printf '%064d' 2)"
+pack "$WORK/next" "$K3"
+announce 9.9.10 9.9.10
+update --latest
+is "$code" 1 'a kit that pins another provider file under the same provider version'
+matches "$out" 'was refused. It pins another file for the provider v6.0.0-drag.1' 'with the reason'
+unchanged 'a changed pin'
+sed 's/v6.0.0-drag.1/V6.0.0-drag.1/' "$WORK/next/versions.json" > "$WORK/v.json" && cat "$WORK/v.json" > "$WORK/next/versions.json"
+bash "$MAKE_MANIFEST" --tree "$WORK/next" > /dev/null 2>&1
+NEXT_LIST=$(sha256_of "$WORK/next/MANIFEST.sha256")
+pack "$WORK/next" "$K3"
+announce 9.9.10 9.9.10
+update --latest
+is "$code" 1 'the same with the provider version in another spelling'
+matches "$out" 'was refused. Its gadsDrag.version is not written like a version' 'with the reason'
+unchanged 'a changed pin under a respelled version'
+
+new_next 9.9.10
+pack "$WORK/next" "$K3"
+announce 9.9.10 9.9.10
+rm -f "$U/farm/installed"
+update --latest
+is "$code" 1 'a computer without a farm'
+matches "$out" 'no farm installation' 'with the reason'
+unchanged 'no farm'
+: > "$U/farm/installed"
+out=$(env -u CURL_CA_BUNDLE bash "$INST/scripts/update.sh" --latest 2>&1); code=$?
+is "$code" 1 'a certificate that cannot be verified'
+unchanged 'an untrusted connection'
+update --check --latest
+is "$code" 1 'two of --check, --latest, --rollback at a time are refused'
+unchanged 'two options'
+
+# and the kit that passes everything
+update --latest --provider-binary '/a path/GADS-drag'
+is "$code" 0 "a newer kit is fetched, checked and put in place: $out"
+matches "$out" 'Commit:    4444444444444444444444444444444444444444' 'the commit is shown before the kit is replaced'
+matches "$out" 'This kit:  kit 9.9.9, hub v6.0.0, provider v6.0.0-drag.1' 'and the versions of this kit'
+matches "$out" 'New kit:   kit 9.9.10, hub v6.0.0, provider v6.0.0-drag.1' 'and of the new one'
+matches "$out" 'the update script of the new kit ran in .*/opt/blossom-farm-kit' 'the update script of the new kit continues'
+is "$(printf '%s\n' "$out" | grep -E 'New kit:|update script of the new kit ran' | cut -c1-10 | tr '\n' '|')" '   New kit|the update|' 'in that order'
+is "$(tr '\n' '|' < "$INST/update-called.txt")" '2|--provider-binary|/a path/GADS-drag|' 'with the option that belongs to it, and not --latest'
+is "$(json_file_get "$INST/versions.json" kit)" 9.9.10 'the kit folder holds the new kit'
+is "$(sha256_of "$INST/MANIFEST.sha256")" "$NEXT_LIST" 'with its list'
+not_ok test -e "$INST/bootstrap.sh"
+not_ok test -e "$INST/pairing.json"
+ok cmp -s "$INST.previous/scripts/update.sh" "$KIT_ROOT/scripts/update.sh"
+is "$(json_file_get "$INST.previous/versions.json" kit)" 9.9.9 'the kit before it is kept as .previous'
+is "$(find "$U/opt" -mindepth 1 -maxdepth 1 | LC_ALL=C sort | sed "s|$U/opt/||" | tr '\n' ' ')" 'blossom-farm-kit blossom-farm-kit.previous ' 'and nothing else is left'
 
 # ---------------------------------------------------------------------------
 echo

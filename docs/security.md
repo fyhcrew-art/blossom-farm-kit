@@ -636,12 +636,20 @@ The bootstrap file then fetches the kit:
    must lie inside the one folder that belongs to the commit, and on macOS
    every entry must be a plain file or a folder (on Windows the script
    writes each file itself, to a path it has checked). Then it unpacks into
-   a new folder that only Administrators or root can change.
+   a new folder that only Administrators or root can change. On Windows,
+   where ordinary accounts may create folders directly on a drive, that
+   folder is one nobody could have prepared: its name ends in 32 random
+   digits and letters, it must not exist, it is created together with its
+   permissions, and its owner and permissions are read back before anything
+   is written into it. If that check fails, nothing is downloaded.
 6. The kit holds `MANIFEST.sha256`: one line per file with its SHA-256. The
    bootstrap file carries the SHA-256 of that list. It compares the list
    with that value, then every unpacked file with the list. A file that is
-   changed, a file that is missing, a file the list does not name: each one
-   stops everything, the folder is deleted, and nothing was run.
+   changed, a file that is missing, a file the list does not name, a folder
+   that holds no file of the list (an empty folder too many): each one
+   stops everything, the folder is deleted, and nothing was run. A step of
+   the comparison that cannot be carried out stops everything as well; it
+   never counts as "nothing found".
 7. Only then is the kit moved to `C:\blossom-farm-kit` or
    `/opt/blossom-farm-kit` and its installer started.
 
@@ -658,8 +666,11 @@ Four files cannot be on the list: the list itself; the two bootstrap files,
 because they contain the list's checksum (each is pinned by its own SHA-256
 in the command instead); and `pairing.json`, which is written after the
 commit it names. The bootstrap file removes the two bootstrap files and
-`pairing.json` from the kit it installs, so that nothing stays in the kit
-folder that was not checked.
+`pairing.json` from the kit it installs, so that no file and no folder
+stays in the kit folder that the list does not account for. (The list
+carries names and contents. It does not carry permissions: those are set
+anew on the whole folder, for Administrators or root only, before anything
+in it is run.)
 
 `-VerifyOnly` / `--verify-only` after the bootstrap file's name does steps 4
 to 6 in a temporary folder, says what it found and stops: nothing is
@@ -725,31 +736,47 @@ archive of exactly that commit and check it as the bootstrap file does:
 the list against the announced SHA-256, every file against the list.
 
 Before the new kit replaces the one on the disk, the **old** kit applies
-three rules to it, whoever published it:
+these rules to it:
 
-1. **The version goes up.** A kit with the same or a lower version is
-   refused, so nobody can use this path to put an old kit back.
-2. **A program keeps its checksum as long as it keeps its version.** If the
-   new kit names the provider (or the hub) by the version the installed kit
-   names, it must pin the same SHA-256 for it, for every system. A different
-   file under the same version is refused. A changed program has to come
-   with a new version number, and the update prints the old and the new
-   versions before it replaces anything.
+1. **The kit version goes up.** A kit version is three numbers (`1.2.3`),
+   written one way only. The same version, a lower one, and the same
+   version in another spelling (`1.2`, `1.2.3.0`, `01.2.3`) are all
+   refused, on Windows and on macOS alike, so this path cannot put an old
+   kit back or exchange a kit for another one of the same version. The kit
+   that was fetched must also say the version `main` announced.
+2. **A program keeps its checksum as long as it keeps its version.** The
+   versions of GADS and of the provider must be written the one way
+   `versions.json` writes them (`v6.0.0`, `v6.0.0-drag.1`; lower case,
+   nothing before or after), so that "the same version" has one meaning. If
+   the new kit names the provider (or the hub) by the version the installed
+   kit names, it must pin the same SHA-256 for it, for every system. A
+   different file under the same version is refused.
 3. **Every download address is https.**
 
-Then the new kit downloads its programs and checks each against its own
-`versions.json`, as every kit does.
+Then the old kit prints, before it replaces anything: the commit of the new
+kit, and the versions of the kit, of GADS and of the provider, old and new,
+on two lines. It does not stop and ask; the update then continues with the
+new kit, which downloads its programs and checks each against its own
+`versions.json`, as every kit does. The kit that was replaced stays next to
+the new one as `<kit folder>.previous`.
 
 What this protects against: a download changed on the way, a download cut
-short, a kit put back to an older one, and a program silently exchanged
-under a version you already run. What it does not: as above, **whoever can
-write to `main` can publish a new kit with a new version**, with other
-scripts and other programs in it, and `-Latest` would take it. The rules
-make such a change visible (a new kit version, a new program version); they
-cannot make it impossible. If you want to look before you take a kit, use
-`-Check` / `--check`, read what changed in the repository between the two
-commits, and run `-Latest` afterwards; or download the kit by hand and run
-its `update` script without an option. Nothing updates by itself.
+short, a kit put back to an older one, and a program exchanged under a
+version you already run, whether by mistake or by somebody who can alter
+one file but not publish a release.
+
+What it does not, said plainly: **the rules are not a control over whoever
+can write to `main`.** That person can publish a new kit with a new kit
+version, give a changed program a new version number, and change the
+scripts themselves, the rules included; `-Latest` would take all of it, and
+the two lines it prints are the only notice. The rules catch mistakes and
+plain swaps. The remaining trust is the owner of this repository (and
+GitHub, which hosts it), exactly as for the command from Blossom and for a
+kit downloaded by hand. If you want to look before you take a kit, use
+`-Check` / `--check`, which names the commit, read what changed in the
+repository between the two commits, and run `-Latest` afterwards; or
+download the kit by hand and run its `update` script without an option.
+Nothing updates by itself.
 
 ### The published provider programs
 
@@ -764,8 +791,15 @@ a build service you could inspect:
 * The build gives the same files bit for bit every time. The recipe, the
   patch, the pinned upstream commit and the Go version are in this
   repository, and the checksums are published next to the programs. Anybody
-  can run the build and compare (`patch/README.md`). You do not have to
-  believe the maintainer's computer; you can check its result.
+  can run the build and compare (`patch/README.md`), from upstream GADS and
+  the patch or from the source archive that lies next to the programs. You
+  do not have to believe the maintainer's computer; you can check its
+  result.
+
+A program on `dist` is never replaced: a changed program gets a new version
+and a new folder. The papers next to a program (build instructions, source
+archive) can be corrected by a later commit of `dist`; `versions.json` then
+names that commit, and the three SHA-256 values do not change.
 
 ## 10. Reporting a problem
 

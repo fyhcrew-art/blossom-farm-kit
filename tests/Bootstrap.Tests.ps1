@@ -1,8 +1,12 @@
 # Pester 5 tests for the chain of checks that brings a kit onto a Windows
-# computer (the mirror of tests/bootstrap.test.sh): bootstrap.ps1, and the
-# functions of lib\FarmKit.psm1 behind scripts\update.ps1 -Latest. A small
-# stand-in for the kit is packed the way GitHub packs a commit and served over
-# https by tests/fake-blossom.js; the scripts are run against it.
+# computer (the mirror of tests/bootstrap.test.sh): bootstrap.ps1, the
+# functions of lib\FarmKit.psm1 behind scripts\update.ps1 -Latest, and
+# scripts\update.ps1 -Check and -Latest run as a whole. A small stand-in for
+# the kit is packed the way GitHub packs a commit and served over https by
+# tests/fake-blossom.js; the scripts are run against it. scripts\update.ps1
+# runs unchanged from a copy of the kit whose library has a few lines added
+# at its end: they point it at the stand-in server and replace the checks
+# that need Administrator rights and an installed farm.
 #   Invoke-Pester .\tests
 # Needs node and openssl and a trusted certificate, exactly as
 # tests\Pairing.Tests.ps1 does (see the top of that file).
@@ -92,6 +96,13 @@ Describe 'bootstrap.ps1 and the kit it fetches' {
             $out = & $script:Shell -NoProfile -ExecutionPolicy Bypass -File $File @With 2>&1 | ForEach-Object { [string]$_ }
             return New-Object PSObject -Property @{ Code = $LASTEXITCODE; Text = ($out -join "`n") }
         }
+        function Assert-NoStagingFolder {
+            # Nothing named <folder>.new... is left next to a kit folder.
+            param([string]$Beside)
+            $parent = Split-Path -Parent $Beside
+            if (-not (Test-Path -LiteralPath $parent)) { return }
+            @(Get-ChildItem -LiteralPath $parent -Force | Where-Object { $_.Name -like ((Split-Path -Leaf $Beside) + '.new*') }).Count | Should -Be 0
+        }
         function Assert-Refused {
             # The bootstrap stops, says why, runs nothing and leaves nothing.
             param([string]$Commit, [string]$Pattern)
@@ -101,7 +112,7 @@ Describe 'bootstrap.ps1 and the kit it fetches' {
             $r.Text | Should -Match $Pattern
             $r.Text | Should -Not -Match 'the stand-in installer ran'
             Test-Path -LiteralPath $dest | Should -BeFalse
-            Test-Path -LiteralPath ($dest + '.new') | Should -BeFalse
+            Assert-NoStagingFolder -Beside $dest
             (Invoke-Bootstrap -File $script:Boot -With @('-KitCommit', $Commit, '-VerifyOnly')).Code | Should -Be 1
         }
 
@@ -205,6 +216,14 @@ Describe 'bootstrap.ps1 and the kit it fetches' {
             [System.IO.File]::AppendAllText((Join-Path $t 'MANIFEST.sha256'), (('3' * 64) + "  ../outside`n"))
             Test-KitTree -Path $t -ManifestSha256 (Get-Sha (Join-Path $t 'MANIFEST.sha256')) | Should -Match 'not a checksum and a file name'
         }
+        It 'names a folder that holds no file of the list' {
+            $t = Join-Path $script:Work 't7'; Copy-Item -LiteralPath $script:Src -Destination $t -Recurse
+            New-Item -ItemType Directory -Path (Join-Path $t 'services/node_modules') -Force | Out-Null
+            Test-KitTree -Path $t -ManifestSha256 $script:List | Should -Match 'a folder that its list names no file for: services'
+            $t = Join-Path $script:Work 't8'; Copy-Item -LiteralPath $script:Src -Destination $t -Recurse
+            New-Item -ItemType Directory -Path (Join-Path $t 'lib/deeper') -Force | Out-Null
+            Test-KitTree -Path $t -ManifestSha256 $script:List | Should -Match 'a folder that its list names no file for: lib/deeper'
+        }
         It 'does not count the files that cannot be on the list' {
             $t = Join-Path $script:Work 't6'; Copy-Item -LiteralPath $script:Src -Destination $t -Recurse
             Add-Content -LiteralPath (Join-Path $t 'bootstrap.sh') -Value 'changed'
@@ -235,6 +254,54 @@ Describe 'bootstrap.ps1 and the kit it fetches' {
             $renamed = (Get-Content -LiteralPath (Join-Path $script:Src 'versions.json') -Raw).Replace('"kit": "9.9.9"', '"kit": "9.9.10"').Replace(('1' * 64), ('2' * 64)).Replace('v6.0.0-drag.1', 'v6.0.0-drag.2') | ConvertFrom-Json
             Test-KitUpdateRule -Current $script:Old -New $renamed | Should -BeNullOrEmpty
             Test-KitUpdateRule -Current $script:Old -New (Get-Changed ('7' * 64) ('8' * 64)) | Should -Match 'pins another file for GADS v6.0.0'
+        }
+        It 'refuses a kit version in another spelling (sideways), like the bash twin' {
+            foreach ($v in @('9.9.9.0', '9.9.09', '09.9.9', '9.9.9.0.9', '9.9', '9.9.9.', '9.9.10.0', '9.10', '010.0.0', '9.9.10 ', '10.0.0-1')) {
+                Test-KitUpdateRule -Current $script:Old -New (Get-Changed '"kit": "9.9.10"' ('"kit": "' + $v + '"')) | Should -Match 'no usable kit version' -Because $v
+            }
+            $odd = (Get-Content -LiteralPath (Join-Path $script:Src 'versions.json') -Raw).Replace('"kit": "9.9.9"', '"kit": "9.9"') | ConvertFrom-Json
+            Test-KitUpdateRule -Current $odd -New (Get-Changed 'nothing' 'nothing') | Should -Match 'not newer'
+        }
+        It 'refuses a program version that is not written the one way, so that a file cannot change under a respelled version' {
+            foreach ($v in @('V6.0.0-drag.1', 'v6.0.0-drag.1 ', 'v6.0.0-DRAG.1', '6.0.0-drag.1', 'v6.0.0 drag')) {
+                $new = (Get-Content -LiteralPath (Join-Path $script:Src 'versions.json') -Raw).Replace('"kit": "9.9.9"', '"kit": "9.9.10"').Replace('"version": "v6.0.0-drag.1"', ('"version": "' + $v + '"')).Replace(('1' * 64), ('2' * 64)) | ConvertFrom-Json
+                Test-KitUpdateRule -Current $script:Old -New $new | Should -Match 'gadsDrag.version is not written like a version' -Because $v
+            }
+            Test-KitUpdateRule -Current $script:Old -New (Get-Changed '"version": "v6.0.0"' '"version": "V6.0.0"') | Should -Match 'gads.version is not written like a version'
+            Test-KitUpdateRule -Current $script:Old -New ('{ "kit": "9.9.10" }' | ConvertFrom-Json) | Should -Match 'gads.version is not written like a version'
+        }
+        It 'Test-KitVersionText and Test-ProgramVersionText accept one spelling only' {
+            Test-KitVersionText -Text '0.0.1' | Should -BeTrue
+            foreach ($v in @('1.0', '1.0.0.0', '01.0.0', '1.0.0.', ' 1.0.0', '1.0.1234567', '', 'latest')) { Test-KitVersionText -Text $v | Should -BeFalse -Because $v }
+            Test-ProgramVersionText -Text 'v6.0.0' | Should -BeTrue
+            Test-ProgramVersionText -Text 'v6.0.0-drag.12' | Should -BeTrue
+            foreach ($v in @('V6.0.0', 'v6.0.0-', '', 'v6.0.0 ')) { Test-ProgramVersionText -Text $v | Should -BeFalse -Because $v }
+            Get-KitVersionLine -Versions $script:Old | Should -BeExactly 'kit 9.9.9, hub v6.0.0, provider v6.0.0-drag.1'
+        }
+        It 'New-KitStagingFolder: a new, empty folder with a name that cannot be guessed; never one that exists' {
+            $beside = Join-Path $script:Work 'staging-kit'
+            $a = New-KitStagingFolder -Beside $beside
+            $b = New-KitStagingFolder -Beside ($beside + '/')
+            $a.Error | Should -BeNullOrEmpty
+            $a.Ok | Should -BeTrue
+            $b.Ok | Should -BeTrue
+            (Split-Path -Leaf $a.Path) | Should -Match '^staging-kit\.new-[0-9a-f]{32}$'
+            (Split-Path -Leaf $b.Path) | Should -Match '^staging-kit\.new-[0-9a-f]{32}$'
+            $a.Path | Should -Not -Be $b.Path
+            Test-Path -LiteralPath $a.Path -PathType Container | Should -BeTrue
+            @(Get-ChildItem -LiteralPath $a.Path -Force).Count | Should -Be 0
+            $planted = $beside + '.new-planted'
+            New-Item -ItemType Directory -Path $planted | Out-Null
+            Set-Content -LiteralPath (Join-Path $planted 'install.ps1') -Value 'planted'
+            $c = New-KitStagingFolder -Beside $beside -Suffix 'planted'
+            $c.Ok | Should -BeFalse
+            $c.Error | Should -Match 'exists already'
+            Get-Content -LiteralPath (Join-Path $planted 'install.ps1') | Should -BeExactly 'planted'
+        }
+        It 'the scripts never use a staging folder with a fixed name' {
+            foreach ($f in @('bootstrap.ps1', 'scripts/update.ps1', 'lib/FarmKit.psm1')) {
+                [System.IO.File]::ReadAllText((Join-Path $script:Kit $f)) | Should -Not -Match "\+ '\.new'" -Because $f
+            }
         }
         It 'refuses a download address that is not https, and a version that is not a number' {
             Test-KitUpdateRule -Current $script:Old -New (Get-Changed 'https://example.org' 'http://example.org') | Should -Match 'gadsDrag.url is not https'
@@ -273,7 +340,7 @@ Describe 'bootstrap.ps1 and the kit it fetches' {
             Test-Path -LiteralPath (Join-Path $dest 'MANIFEST.sha256') | Should -BeTrue
             foreach ($f in @('bootstrap.ps1', 'bootstrap.sh', 'pairing.json')) { Test-Path -LiteralPath (Join-Path $dest $f) | Should -BeFalse }
             (Get-Content -LiteralPath (Join-Path $dest 'called-with.txt')) -join ' ' | Should -BeExactly '7 -AppOrigin https://app.blossom.example -PairingCode K7QM-2XVD-9HTR-4BWN-6CPA -Domain agency.io -WithAppium'
-            Test-Path -LiteralPath ($dest + '.new') | Should -BeFalse
+            Assert-NoStagingFolder -Beside $dest
         }
 
         It 'replaces a kit that is there and keeps it as .previous' {
@@ -295,7 +362,7 @@ Describe 'bootstrap.ps1 and the kit it fetches' {
             $r.Text | Should -Match 'nothing was installed'
             $r.Text | Should -Not -Match 'the stand-in installer ran'
             Test-Path -LiteralPath $dest | Should -BeFalse
-            Test-Path -LiteralPath ($dest + '.new') | Should -BeFalse
+            Assert-NoStagingFolder -Beside $dest
         }
 
         It 'refuses a changed file, also when the list was rewritten to match' {
@@ -323,6 +390,12 @@ Describe 'bootstrap.ps1 and the kit it fetches' {
             Remove-Item -LiteralPath (Join-Path $t 'MANIFEST.sha256')
             $null = Publish-Kit -Folder $t -Commit $script:K2
             Assert-Refused -Commit $script:K2 -Pattern 'no MANIFEST.sha256'
+        }
+
+        It 'refuses a folder that holds no file of the list' {
+            if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+            $null = Publish-Kit -Folder $script:Src -Commit $script:K2 -Also @{ ('blossom-farm-kit-' + $script:K2 + '/services/node_modules/') = '' }
+            Assert-Refused -Commit $script:K2 -Pattern 'a folder that its list names no file for: services'
         }
 
         It 'refuses an archive with an entry outside the folder of the commit, before unpacking' {
@@ -464,6 +537,223 @@ Describe 'bootstrap.ps1 and the kit it fetches' {
             (Save-KitCommit -Commit $script:K2 -ManifestSha256 $script:List -WorkFolder (New-WorkFolder)).Error | Should -Match 'incomplete or damaged'
             (Save-KitCommit -Commit 'main' -ManifestSha256 $script:List -WorkFolder (New-WorkFolder)).Ok | Should -BeFalse
             (Save-KitCommit -Commit ('3' * 40) -ManifestSha256 $script:List -WorkFolder (New-WorkFolder)).Error | Should -Match 'could not be downloaded'
+            $null = Publish-Kit -Folder $script:Src -Commit $script:K2 -Also @{ ('blossom-farm-kit-' + $script:K2 + '/extra-folder/') = '' }
+            (Save-KitCommit -Commit $script:K2 -ManifestSha256 $script:List -WorkFolder (New-WorkFolder)).Error | Should -Match 'names no file for: extra-folder'
+        }
+    }
+
+    # scripts\update.ps1 as a whole. The installed kit is a stand-in (version
+    # 9.9.9) with the real lib\FarmKit.psm1 and scripts\update.ps1. The lines
+    # added to the END of its library are the only difference to what runs on
+    # a farm: where the kit is looked for, and no check for Administrator
+    # rights, the kit folder's place and an installed farm. The kit that is
+    # fetched is another stand-in whose scripts\update.ps1 writes down how it
+    # was called.
+    Context 'scripts\update.ps1 -Check and -Latest, run as a whole' {
+        BeforeAll {
+            $script:U = Join-Path $script:Work 'u'
+            $script:Opt = Join-Path $script:U 'opt'
+            $script:Inst = Join-Path $script:Opt 'blossom-farm-kit'
+            $script:Farm = Join-Path $script:U 'farm'
+            $script:K3 = '4' * 40
+            $script:Next = Join-Path $script:Work 'next'
+            function New-Installed {
+                if (Test-Path -LiteralPath $script:U) { Remove-Item -LiteralPath $script:U -Recurse -Force }
+                New-Item -ItemType Directory -Path $script:Opt -Force | Out-Null
+                New-Item -ItemType Directory -Path $script:Farm -Force | Out-Null
+                New-StandIn -Folder $script:Inst
+                $added = @(
+                    '# --- added by tests/Bootstrap.Tests.ps1 ---',
+                    ('$script:KitSource.RawUrl = ''' + $script:Base + '/raw'''),
+                    ('$script:KitSource.ArchiveUrl = ''' + $script:Base + '/archive'''),
+                    'function Assert-Administrator { }',
+                    'function Protect-KitFolder { param([string]$KitRoot) $null = $KitRoot }',
+                    ('function Get-FarmPaths { return (New-Object PSObject -Property @{ Root = ''' + $script:Farm + ''' }) }'),
+                    'function Read-FarmConfig { param($Paths) if (Test-Path -LiteralPath (Join-Path $Paths.Root ''installed'')) { return (New-Object PSObject -Property @{ kit = ''9.9.9'' }) }; return $null }',
+                    'Export-ModuleMember -Function *'
+                ) -join "`n"
+                $lib = [System.IO.File]::ReadAllText((Join-Path $script:Kit 'lib/FarmKit.psm1'))
+                $at = $lib.LastIndexOf('Export-ModuleMember -Function *')
+                $at | Should -BeGreaterThan 0
+                [System.IO.File]::WriteAllText((Join-Path $script:Inst 'lib/FarmKit.psm1'), ($lib.Substring(0, $at) + $added + "`n"))
+                Copy-Item -LiteralPath (Join-Path $script:Kit 'scripts/update.ps1') -Destination (Join-Path $script:Inst 'scripts/update.ps1') -Force
+                Set-Content -LiteralPath (Join-Path $script:Farm 'installed') -Value 'yes'
+            }
+            function New-Next {
+                # The kit that main will announce; the SHA-256 of its list goes to $script:NextList.
+                param([string]$Version = '9.9.10', [string]$ProviderSha = ('1' * 64), [string]$ProviderVersion = '')
+                New-StandIn -Folder $script:Next -Version $Version -ProviderSha $ProviderSha
+                if ($ProviderVersion) {
+                    $file = Join-Path $script:Next 'versions.json'
+                    [System.IO.File]::WriteAllText($file, [System.IO.File]::ReadAllText($file).Replace('v6.0.0-drag.1', $ProviderVersion))
+                }
+                [System.IO.File]::WriteAllText((Join-Path $script:Next 'scripts/update.ps1'), ('Set-Content -LiteralPath (Join-Path (Split-Path -Parent $PSScriptRoot) ''update-called.txt'') -Value (@($args.Count) + $args)' + "`n" + 'Write-Host ''the update script of the new kit ran''' + "`n"))
+                $script:NextList = Write-Manifest -Folder $script:Next
+            }
+            function Set-Announced {
+                param([string]$Version, [string]$PairingVersion, [string]$Commit = $script:K3)
+                $versions = [regex]::Replace([System.IO.File]::ReadAllText((Join-Path $script:Next 'versions.json')), '"kit": "[^"]*"', ('"kit": "' + $Version + '"'))
+                [System.IO.File]::WriteAllText((Join-Path $script:Static 'raw/main/versions.json'), $versions)
+                [System.IO.File]::WriteAllText((Join-Path $script:Static 'raw/main/pairing.json'), ('{ "kitVersion": "' + $PairingVersion + '", "kitCommit": "' + $Commit + '", "manifestSha256": "' + $script:NextList + '" }'))
+            }
+            function Get-Tree {
+                param([string]$Folder)
+                $full = (Get-Item -LiteralPath $Folder).FullName.TrimEnd('\', '/')
+                $lines = @(Get-ChildItem -LiteralPath $Folder -Recurse -Force | ForEach-Object {
+                        $name = $_.FullName.Substring($full.Length + 1) -replace '\\', '/'
+                        if ($_.PSIsContainer) { $name + '/' } else { $name + ' ' + (Get-Sha $_.FullName) }
+                    })
+                [Array]::Sort($lines, [System.StringComparer]::Ordinal)
+                return ($lines -join "`n")
+            }
+            function Invoke-Update { param([string[]]$With = @()) return (Invoke-Bootstrap -File (Join-Path $script:Inst 'scripts/update.ps1') -With $With) }
+            function Assert-Unchanged {
+                # The installed kit is the one from before, nothing is next to it, nothing of the fetched kit ran.
+                param($Result)
+                Get-Tree -Folder $script:Inst | Should -BeExactly $script:Before
+                @(Get-ChildItem -LiteralPath $script:Opt -Force).Count | Should -Be 1
+                $Result.Text | Should -Not -Match 'the update script of the new kit ran'
+            }
+            if (-not $script:Skip) {
+                New-Next
+                $null = Publish-Kit -Folder $script:Next -Commit $script:K3
+                New-Installed
+                $script:Before = Get-Tree -Folder $script:Inst
+            }
+        }
+
+        It '-Check says that a newer kit is released, and changes nothing' {
+            if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+            Set-Announced -Version '9.9.10' -PairingVersion '9.9.10'
+            $r = Invoke-Update -With @('-Check')
+            $r.Code | Should -Be 0 -Because $r.Text
+            $r.Text | Should -Match 'Kit 9\.9\.10 is available \(commit 4444'
+            Assert-Unchanged $r
+        }
+        It '-Latest fetches nothing for the same version, an older one, or one that is not released yet' {
+            if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+            foreach ($v in @('9.9.9', '9.9.8')) {
+                Set-Announced -Version $v -PairingVersion $v
+                $r = Invoke-Update -With @('-Latest')
+                $r.Code | Should -Be 0
+                $r.Text | Should -Match 'This kit is the newest one'
+                Assert-Unchanged $r
+            }
+            Set-Announced -Version '9.9.10' -PairingVersion '9.9.9'
+            $r = Invoke-Update -With @('-Latest')
+            $r.Code | Should -Be 0
+            $r.Text | Should -Match 'being prepared'
+            Assert-Unchanged $r
+        }
+        It '-Latest refuses a kit version on main in another spelling' {
+            if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+            foreach ($v in @('9.9.9.1', '9.9.10.0', '9.10', '09.9.10', 'latest')) {
+                Set-Announced -Version $v -PairingVersion $v
+                $r = Invoke-Update -With @('-Latest')
+                $r.Code | Should -Be 1 -Because $v
+                $r.Text | Should -Match 'names no kit version'
+                Assert-Unchanged $r
+            }
+        }
+        It '-Latest refuses a kit that says another version than main announced' {
+            if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+            Set-Announced -Version '9.9.11' -PairingVersion '9.9.11'
+            $r = Invoke-Update -With @('-Latest')
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'says it is kit 9\.9\.10, but the repository announced kit 9\.9\.11'
+            Assert-Unchanged $r
+        }
+        It '-Latest refuses a changed archive, a folder too many, a cut download and a missing commit' {
+            if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+            Set-Announced -Version '9.9.10' -PairingVersion '9.9.10'
+            $evil = Join-Path $script:Work 'next-evil'; Copy-Item -LiteralPath $script:Next -Destination $evil -Recurse
+            Add-Content -LiteralPath (Join-Path $evil 'scripts/update.ps1') -Value 'Write-Host evil'
+            $null = Publish-Kit -Folder $evil -Commit $script:K3
+            $r = Invoke-Update -With @('-Latest')
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'did not pass its check.*scripts/update.ps1 is not the one the list names'
+            Assert-Unchanged $r
+            $null = Write-Manifest -Folder $evil
+            $null = Publish-Kit -Folder $evil -Commit $script:K3
+            $r = Invoke-Update -With @('-Latest')
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'list of files is not the expected one'
+            Assert-Unchanged $r
+            $null = Publish-Kit -Folder $script:Next -Commit $script:K3 -Also @{ ('blossom-farm-kit-' + $script:K3 + '/extra-folder/') = '' }
+            $r = Invoke-Update -With @('-Latest')
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'names no file for: extra-folder'
+            Assert-Unchanged $r
+            $zip = Publish-Kit -Folder $script:Next -Commit $script:K3
+            $bytes = [System.IO.File]::ReadAllBytes($zip)
+            [System.IO.File]::WriteAllText(($zip + '.cut'), [string][int]($bytes.Length / 2))
+            $r = Invoke-Update -With @('-Latest')
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'could not be downloaded|incomplete or damaged'
+            Assert-Unchanged $r
+            Remove-Item -LiteralPath ($zip + '.cut') -Force
+            $half = New-Object byte[] ([int]($bytes.Length / 2))
+            [Array]::Copy($bytes, $half, $half.Length)
+            [System.IO.File]::WriteAllBytes($zip, $half)
+            $r = Invoke-Update -With @('-Latest')
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'incomplete or damaged'
+            Assert-Unchanged $r
+            Set-Announced -Version '9.9.10' -PairingVersion '9.9.10' -Commit ('5' * 40)
+            $r = Invoke-Update -With @('-Latest')
+            $r.Code | Should -Be 1
+            Assert-Unchanged $r
+        }
+        It '-Latest refuses another provider file under the provider version this kit pins, also under a respelled version' {
+            if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+            New-Next -ProviderSha ('2' * 64)
+            $null = Publish-Kit -Folder $script:Next -Commit $script:K3
+            Set-Announced -Version '9.9.10' -PairingVersion '9.9.10'
+            $r = Invoke-Update -With @('-Latest')
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'was refused\. It pins another file for the provider v6\.0\.0-drag\.1'
+            Assert-Unchanged $r
+            New-Next -ProviderSha ('2' * 64) -ProviderVersion 'V6.0.0-drag.1'
+            $null = Publish-Kit -Folder $script:Next -Commit $script:K3
+            Set-Announced -Version '9.9.10' -PairingVersion '9.9.10'
+            $r = Invoke-Update -With @('-Latest')
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'was refused\. Its gadsDrag\.version is not written like a version'
+            Assert-Unchanged $r
+        }
+        It '-Latest refuses to fetch anything on a computer without a farm, and two options at a time' {
+            if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+            New-Next
+            $null = Publish-Kit -Folder $script:Next -Commit $script:K3
+            Set-Announced -Version '9.9.10' -PairingVersion '9.9.10'
+            Remove-Item -LiteralPath (Join-Path $script:Farm 'installed') -Force
+            $r = Invoke-Update -With @('-Latest')
+            $r.Code | Should -Be 1
+            $r.Text | Should -Match 'no farm installation'
+            Assert-Unchanged $r
+            Set-Content -LiteralPath (Join-Path $script:Farm 'installed') -Value 'yes'
+            $r = Invoke-Update -With @('-Check', '-Latest')
+            $r.Code | Should -Be 1
+            Assert-Unchanged $r
+        }
+        It '-Latest fetches a newer kit, checks it, shows what changes, puts it in place and continues with it' {
+            if ($script:Skip) { Set-ItResult -Skipped -Because $script:Skip; return }
+            New-Next
+            $null = Publish-Kit -Folder $script:Next -Commit $script:K3
+            Set-Announced -Version '9.9.10' -PairingVersion '9.9.10'
+            $r = Invoke-Update -With @('-Latest', '-ProviderExe', 'C:\a path\GADS-drag.exe')
+            $r.Code | Should -Be 0 -Because $r.Text
+            $r.Text | Should -Match ('Commit:    ' + $script:K3)
+            $r.Text | Should -Match 'This kit:  kit 9\.9\.9, hub v6\.0\.0, provider v6\.0\.0-drag\.1'
+            $r.Text | Should -Match 'New kit:   kit 9\.9\.10, hub v6\.0\.0, provider v6\.0\.0-drag\.1'
+            $r.Text | Should -Match 'the update script of the new kit ran'
+            $r.Text.IndexOf('New kit:') | Should -BeLessThan $r.Text.IndexOf('the update script of the new kit ran')
+            (Get-Content -LiteralPath (Join-Path $script:Inst 'update-called.txt')) -join '|' | Should -BeExactly '2|-ProviderExe|C:\a path\GADS-drag.exe'
+            (Get-Content -LiteralPath (Join-Path $script:Inst 'versions.json') -Raw | ConvertFrom-Json).kit | Should -BeExactly '9.9.10'
+            Get-Sha (Join-Path $script:Inst 'MANIFEST.sha256') | Should -BeExactly $script:NextList
+            foreach ($f in @('bootstrap.ps1', 'bootstrap.sh', 'pairing.json')) { Test-Path -LiteralPath (Join-Path $script:Inst $f) | Should -BeFalse }
+            Get-Sha (Join-Path ($script:Inst + '.previous') 'scripts/update.ps1') | Should -BeExactly (Get-Sha (Join-Path $script:Kit 'scripts/update.ps1'))
+            (@(Get-ChildItem -LiteralPath $script:Opt -Force | ForEach-Object { $_.Name } | Sort-Object) -join ' ') | Should -BeExactly 'blossom-farm-kit blossom-farm-kit.previous'
         }
     }
 }

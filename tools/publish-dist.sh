@@ -15,32 +15,42 @@
 # and pins the SHA-256 of each file. A commit cannot change, so the address
 # keeps giving the same bytes; the SHA-256 proves it on every download.
 #
-#   tools/publish-dist.sh --from <folder made by build-provider.sh> [--one-file-per-commit] [--push]
+#   tools/publish-dist.sh --from <folder made by build-provider.sh> [--one-file-per-commit]
+#                         [--correct-papers] [--push]
 #
 #   --from                 the build output; it must match versions.json
 #   --one-file-per-commit  commit each large program by itself (smaller pushes;
 #                          for a connection or proxy that refuses one big push)
+#   --correct-papers       the folder is published already and the three
+#                          programs in --from are the published ones, byte for
+#                          byte: replace what lies next to them (BUILD.md,
+#                          MODIFICATIONS.md, the source archive, the notices,
+#                          SHA256SUMS) in a new commit. For a mistake in the
+#                          build instructions or the source archive.
 #   --push                 also run "git push origin dist"
 #
 # It only creates commits on the local branch "dist" (made when missing, from
-# origin/dist when that exists). It never rewrites the branch, never changes a
-# folder that is already there (a published file is never replaced: a changed
-# program needs a new provider version), and never touches the working tree.
+# origin/dist when that exists). It never rewrites the branch and never
+# touches the working tree. A published PROGRAM is never replaced: a changed
+# program needs a new provider version and gets a new folder. The papers next
+# to a program can be corrected with --correct-papers; the commit before the
+# correction stays in the branch and its addresses keep working.
 # At the end it prints the commit and the three addresses for versions.json.
 set -euo pipefail
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-FROM=''; SPLIT=0; PUSH=0
+FROM=''; SPLIT=0; PUSH=0; CORRECT=0
 while [ $# -gt 0 ]; do
     case $1 in
         --from) FROM=$2; shift ;;
         --one-file-per-commit) SPLIT=1 ;;
+        --correct-papers) CORRECT=1 ;;
         --push) PUSH=1 ;;
         -h | --help) awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift
 done
-[ -n "$FROM" ] && [ -d "$FROM" ] || { echo 'usage: tools/publish-dist.sh --from <folder made by build-provider.sh> [--one-file-per-commit] [--push]' >&2; exit 2; }
+[ -n "$FROM" ] && [ -d "$FROM" ] || { echo 'usage: tools/publish-dist.sh --from <folder made by build-provider.sh> [--one-file-per-commit] [--correct-papers] [--push]' >&2; exit 2; }
 FROM=$(cd "$FROM" && pwd)
 
 pin() {
@@ -91,51 +101,75 @@ trap 'rm -rf "$WORK"' EXIT
 export GIT_INDEX_FILE="$WORK/index"
 if [ -n "$PARENT" ]; then git read-tree "$PARENT"; else git read-tree --empty; fi
 
-# A folder that is published already is never changed.
+commit() {
+    # commit <message>: one commit from the temporary index
+    local tree new
+    tree=$(git write-tree)
+    if [ -n "$PARENT" ]; then new=$(git commit-tree "$tree" -p "$PARENT" -m "$1"); else new=$(git commit-tree "$tree" -m "$1"); fi
+    PARENT=$new
+}
+add() { git update-index --add --cacheinfo "$3,$(git hash-object -w "$1"),$2"; }
+add_all() {
+    local f mode
+    for f in $FILES; do
+        mode=100644
+        case $f in GADS-drag.exe | GADS-drag-darwin-*) mode=100755 ;; esac
+        add "$FROM/$f" "$RELEASE_TAG/$f" "$mode"
+    done
+}
+# shellcheck disable=SC2016  # the backticks are Markdown
+{
+    echo '# Published programs of the Blossom farm kit'
+    echo
+    echo 'This branch holds no source code of the kit. It holds the programs the'
+    echo "kit's installers download, one folder per version of the patched GADS"
+    echo 'provider (`GADS-drag`), each with its checksums, its complete source'
+    echo 'archive, its build instructions and the licence texts. The kit itself is'
+    echo "on the branch \`main\`: <https://github.com/$SLUG>."
+    echo
+    echo 'Nothing here is meant to be downloaded by hand. The installers fetch a'
+    echo 'program by the address of one exact commit of this branch and compare'
+    echo "its SHA-256 with the value pinned in the kit's \`versions.json\`."
+    echo
+    echo 'The programs are a modified version of [GADS](https://github.com/shamanec/GADS),'
+    echo 'licensed under the GNU AGPL v3.0. They were built on a maintainer'"'"'s'
+    echo 'computer with `tools/build-provider.sh` of the kit. The build is'
+    echo 'reproducible: `BUILD.md` in each folder gives the commands, and anyone'
+    echo 'who runs them gets files with the SHA-256 values of `SHA256SUMS`.'
+    echo
+    echo 'A program, once published, is never changed: a changed program gets a'
+    echo 'new version and a new folder. What lies next to a program (the build'
+    echo 'instructions, the source archive, the notices) can be corrected by a'
+    echo 'later commit, which says so in its message; the programs and their'
+    echo 'SHA-256 values stay as they are, and every earlier commit of this'
+    echo 'branch keeps serving what it held.'
+} > "$WORK/README.md"
+
 if [ -n "$(git ls-files -- "$RELEASE_TAG/")" ]; then
-    SAME=1
+    SAME=1; SAME_PROGRAMS=1
     for f in $FILES; do
         have=$(git ls-files -s -- "$RELEASE_TAG/$f" | awk '{ print $2 }')
-        [ -n "$have" ] && [ "$have" = "$(git hash-object "$FROM/$f")" ] || SAME=0
+        if [ -z "$have" ] || [ "$have" != "$(git hash-object "$FROM/$f")" ]; then
+            SAME=0
+            case $f in GADS-drag.exe | GADS-drag-darwin-*) SAME_PROGRAMS=0 ;; esac
+        fi
     done
     if [ "$SAME" = 1 ]; then
         echo "The branch dist already holds exactly these files in $RELEASE_TAG/ (commit $PARENT). Nothing to do."
+    elif [ "$SAME_PROGRAMS" = 1 ] && [ "$CORRECT" = 1 ]; then
+        add "$WORK/README.md" README.md 100644
+        add_all
+        commit "GADS-drag $VERSION: corrected papers (build instructions, source archive, checksums of both); the three programs are unchanged"
+        git update-ref refs/heads/dist "$PARENT"
+        echo "Committed the corrected papers of $RELEASE_TAG/ to the local branch dist. The three programs are the published ones."
+    elif [ "$SAME_PROGRAMS" = 1 ]; then
+        echo "The branch dist already holds $RELEASE_TAG/ with these three programs; what lies next to them differs (BUILD.md, the source archive, ...). To publish that as a correction, run again with --correct-papers." >&2
+        exit 1
     else
-        echo "The branch dist already holds a folder $RELEASE_TAG/ with other files. A published file is never replaced: installed kits pin its checksum, and the address by commit keeps serving the old one. Give the provider a new version (gadsDrag.releaseTag and gadsDrag.version in versions.json), build again and publish that." >&2
+        echo "The branch dist already holds a folder $RELEASE_TAG/ with other programs. A published program is never replaced: installed kits pin its checksum, and the address by commit keeps serving the old one. Give the provider a new version (gadsDrag.releaseTag and gadsDrag.version in versions.json), build again and publish that." >&2
         exit 1
     fi
 else
-    commit() {
-        # commit <message>: one commit from the temporary index
-        local tree new
-        tree=$(git write-tree)
-        if [ -n "$PARENT" ]; then new=$(git commit-tree "$tree" -p "$PARENT" -m "$1"); else new=$(git commit-tree "$tree" -m "$1"); fi
-        PARENT=$new
-    }
-    add() { git update-index --add --cacheinfo "$3,$(git hash-object -w "$1"),$2"; }
-    # shellcheck disable=SC2016  # the backticks are Markdown
-    {
-        echo '# Published programs of the Blossom farm kit'
-        echo
-        echo 'This branch holds no source code of the kit. It holds the programs the'
-        echo "kit's installers download, one folder per version of the patched GADS"
-        echo 'provider (`GADS-drag`), each with its checksums, its complete source'
-        echo 'archive, its build instructions and the licence texts. The kit itself is'
-        echo "on the branch \`main\`: <https://github.com/$SLUG>."
-        echo
-        echo 'Nothing here is meant to be downloaded by hand. The installers fetch a'
-        echo 'program by the address of one exact commit of this branch and compare'
-        echo "its SHA-256 with the value pinned in the kit's \`versions.json\`."
-        echo
-        echo 'The programs are a modified version of [GADS](https://github.com/shamanec/GADS),'
-        echo 'licensed under the GNU AGPL v3.0. They were built on a maintainer'"'"'s'
-        echo 'computer with `tools/build-provider.sh` of the kit. The build is'
-        echo 'reproducible: `BUILD.md` in each folder gives the commands, and anyone'
-        echo 'who runs them gets files with the SHA-256 values of `SHA256SUMS`.'
-        echo
-        echo 'A folder, once published, is never changed. A changed program gets a'
-        echo 'new version and a new folder.'
-    } > "$WORK/README.md"
     add "$WORK/README.md" README.md 100644
     if [ "$SPLIT" = 1 ]; then
         for f in GADS-drag.exe GADS-drag-darwin-arm64 GADS-drag-darwin-amd64; do
@@ -143,11 +177,7 @@ else
             commit "GADS-drag $VERSION: $f"
         done
     fi
-    for f in $FILES; do
-        mode=100644
-        case $f in GADS-drag.exe | GADS-drag-darwin-*) mode=100755 ;; esac
-        add "$FROM/$f" "$RELEASE_TAG/$f" "$mode"
-    done
+    add_all
     commit "GADS-drag $VERSION: the three programs, their checksums, source archive and notices"
     git update-ref refs/heads/dist "$PARENT"
     echo "Committed $RELEASE_TAG/ to the local branch dist."

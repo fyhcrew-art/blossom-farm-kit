@@ -68,7 +68,7 @@ installs and updates stop at step 4 with "is not at its download address
 
 ```sh
 bash tools/check.sh                # everything this computer has the tools for
-bash tools/check.sh --require-all  # a check that cannot run counts as failed
+bash tools/check.sh --require-all  # a check that cannot run, or a test that skips itself, counts as failed
 bash tools/check.sh --upstream     # also: the patch applies to the pinned upstream commit (network)
 ```
 
@@ -82,7 +82,19 @@ check of every PowerShell file, PSScriptAnalyzer and the Pester tests. The
 pairing, bootstrap and update tests talk https to `tests/fake-blossom.js`, a
 stand-in for Blossom's pairing API and for the places a kit is fetched from;
 they prove the client against the contract, not against Blossom itself (the
-checklists below do that).
+checklists below do that). `tests/bootstrap.test.sh` and
+`tests/Bootstrap.Tests.ps1` also run `scripts/update.sh --latest` and
+`scripts\update.ps1 -Latest` as whole scripts, from a copy of the kit, against
+that stand-in: a newer kit that is taken, and every kind of kit that must be
+refused with the installed kit left as it was.
+
+**Read the end of the output.** The last line is "All ... checks passed;
+nothing was skipped" only when that is true. When a tool is missing, or
+tests skipped themselves inside a suite, they are listed under "Skipped" and
+the last line says that the run is not complete. On Linux and macOS the
+script makes a certificate for the stand-in server and hands it to
+PowerShell, so that the Pester tests which fetch a kit do run there; if they
+still skip themselves (no node, no openssl), the count is under "Skipped".
 
 One computer does not have every tool. Before a kit release, run it on:
 
@@ -138,8 +150,8 @@ version is downloaded by Go itself, and the script checks which one runs).
    ```
 
    It refuses anything that does not match `versions.json` or its own
-   `SHA256SUMS`, any file of 100 MB or more, and any change to a folder that
-   is already on `dist`. It adds one commit to the local branch `dist`
+   `SHA256SUMS`, any file of 100 MB or more, and any change to a program
+   that is already on `dist`. It adds one commit to the local branch `dist`
    (created as an orphan branch the first time), never touches the working
    tree, pushes with `git push origin dist`, and prints the commit and the
    three addresses. If the push is refused for its size, run it again with
@@ -151,6 +163,29 @@ version is downloaded by Go itself, and the script checks which one runs).
 5. `bash tools/release.sh kit` (next section) downloads the three files from
    those addresses and compares them with the pinned values before it lets a
    kit be committed.
+
+**Correcting the papers of a published version.** A program on `dist` is
+never replaced. What lies next to it (`BUILD.md`, `MODIFICATIONS.md`, the
+source archive, the notices, `SHA256SUMS`) can be: when the build
+instructions or the source archive turn out to be wrong, fix
+`tools/make-source-archive.sh`, build again (the three programs must come
+out with the pinned SHA-256 values, twice), and publish with
+
+```sh
+bash tools/publish-dist.sh --from /tmp/gads-drag --correct-papers --push
+```
+
+which is refused unless the three programs are the published ones byte for
+byte. It adds a commit to `dist`; the commit before it stays, and the
+addresses that name it keep working. Put the new commit into the three
+addresses of `versions.json` with the next kit release, so that the commit
+a kit names holds the corrected papers. Then prove the correction: unpack
+the published source archive, follow its `BUILD.md` to the letter, and
+compare the three results with `SHA256SUMS`. (This was done once, for
+`gads-v6.0.0-drag.1`: the first archive kept its note about Apple's
+developer disk image inside `resources/`, a folder the program embeds, so a
+rebuild that followed `BUILD.md` gave other checksums. The note is now at
+the top of the tree, outside `resources/`.)
 
 What is being claimed, and what is not: the programs are built on a
 maintainer's computer, not on a neutral build service, so the fact that they
@@ -358,10 +393,18 @@ the points in this order.
    `update.ps1 -Check` says that this kit is the newest one. To see a fetch
    happen, lower `"kit"` in `C:\blossom-farm-kit\versions.json` by hand (for
    example to `0.0.1`), then `update.ps1 -Check` names the released kit and
-   `update.ps1 -Latest` fetches it, reports every file checked, keeps the
+   `update.ps1 -Latest` fetches it, reports every file checked, prints the
+   commit and two lines with the versions of the kit, of GADS and of the
+   provider (this kit, new kit) **before** the folder is replaced, keeps the
    old folder as `C:\blossom-farm-kit.previous` (`icacls` on the new folder
    as in point 1), and continues into the update. With the network cable
    pulled, `-Latest` stops with "could not be read" and changes nothing.
+   While `-Latest` or the command from Blossom downloads, `dir C:\` shows a
+   folder `blossom-farm-kit.new-` followed by 32 digits and letters; `icacls`
+   on it shows Administrators and SYSTEM with full control and Users with
+   read only, and nothing inherited; it is gone at the end, also after a
+   refusal. As a standard user, create `C:\blossom-farm-kit.new` with a file
+   in it beforehand: the run neither uses nor removes that folder.
 9. With `install.ps1 -WithAppium`: the provider starts, and an Appium session
    opens through the provider host name. In the registry,
    `HKLM:\SYSTEM\CurrentControlSet\Services\GadsProvider\Parameters`,
@@ -445,8 +488,13 @@ On a spare Mac with Apple Silicon and the macOS version named in
 down every command that had to be changed.
 
 Before anything else, `bash tools/check.sh` was run on this Mac, from a
-checkout of the commit, and passed (it covers the scripts with the bash 3.2,
-awk and sed of macOS, `plutil` and `pfctl -n`; nothing below).
+checkout of the commit, and its last line was "All ... checks passed;
+nothing was skipped" (it covers the scripts with the bash 3.2, awk and sed
+of macOS, `plutil` and `pfctl -n`; nothing below). `tests/bootstrap.test.sh`
+is the part that matters most there: it is where the comparison of a fetched
+kit with its list, and `scripts/update.sh --latest` as a whole, meet the awk,
+sort, comm, find and tar of macOS. If it reports a failure on the Mac and
+not on Linux, the difference is a finding: do not release.
 
 1. **The kit folder and the installer, first run.** Homebrew installed as
    the normal user. Unpack the kit to `~/blossom-farm-kit` and run `sudo
@@ -556,7 +604,9 @@ awk and sed of macOS, `plutil` and `pfctl -n`; nothing below).
     that this kit is the newest one; with `"kit"` in
     `/opt/blossom-farm-kit/versions.json` lowered by hand (for example to
     `0.0.1`), `--check` names the released kit and `--latest` fetches it,
-    reports every file checked, keeps the old folder as
+    reports every file checked, prints the commit and two lines with the
+    versions of the kit, of GADS and of the provider (this kit, new kit)
+    **before** the folder is replaced, keeps the old folder as
     `/opt/blossom-farm-kit.previous`, leaves the new one owned by root and
     not writable by anybody else, and continues into the update.
     With the provider program downloaded **in a browser** from its address in

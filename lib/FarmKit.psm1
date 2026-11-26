@@ -1983,12 +1983,99 @@ function Compare-KitVersion {
     return 0
 }
 
+function Test-KitVersionText {
+    # A kit version as the kit writes it: three numbers with dots between
+    # them (1.0.0), no leading zero, nothing before or after. '1.0',
+    # '1.0.0.0' and '01.0.0' are other spellings of a version, not versions:
+    # a kit that names itself that way is not compared, it is refused.
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    return ([string]$Text -cmatch '^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$')
+}
+
+function Test-ProgramVersionText {
+    # The version of GADS or of the patched provider as versions.json writes
+    # it: v6.0.0, v6.0.0-drag.1. Lower case, no blank, nothing else: two
+    # versions are the same exactly when their texts are the same.
+    param([AllowEmptyString()][AllowNull()][string]$Text)
+    return ([string]$Text -cmatch '^v[0-9]{1,6}(\.[0-9]{1,6}){1,3}(-[a-z0-9]{1,16}(\.[a-z0-9]{1,16}){0,3})?$')
+}
+
+function Get-KitVersionLine {
+    # One line: the kit, GADS and the patched provider a versions.json names.
+    param([Parameter(Mandatory = $true)]$Versions)
+    return ('kit ' + $Versions.kit + ', hub ' + $Versions.gads.version + ', provider ' + $Versions.gadsDrag.version)
+}
+
+function Get-KitStagingProblem {
+    # Windows only. Returns $null when the folder is one that only
+    # Administrators and SYSTEM can change: its owner is Administrators,
+    # SYSTEM or the account that runs this script; it inherits no permissions
+    # from the folder above; nobody else has more than reading; it is empty.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $sid = [System.Security.Principal.SecurityIdentifier]
+        $acl = Get-Acl -LiteralPath $Path
+        $owner = $acl.GetOwner($sid).Value
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        if (@('S-1-5-32-544', 'S-1-5-18', $me) -notcontains $owner) { return ('its owner is another account (' + $owner + ')') }
+        if (-not $acl.AreAccessRulesProtected) { return 'it takes permissions from the folder above it' }
+        foreach ($rule in $acl.GetAccessRules($true, $true, $sid)) {
+            if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+            $who = $rule.IdentityReference.Value
+            if ($who -eq 'S-1-5-32-544' -or $who -eq 'S-1-5-18') { continue }
+            if ($who -eq 'S-1-5-32-545' -and (([int]$rule.FileSystemRights) -band (-bnot 0x1200A9)) -eq 0) { continue }
+            return ('the account ' + $who + ' may change it')
+        }
+        if (@(Get-ChildItem -LiteralPath $Path -Force).Count -ne 0) { return 'it is not empty' }
+    } catch { return ('its permissions cannot be read: ' + $_.Exception.Message) }
+    return $null
+}
+
+function New-KitStagingFolder {
+    # The folder a fetched kit is unpacked and checked in before it takes the
+    # place of the kit folder: <kit folder>.new-<32 random hex digits>, next
+    # to the kit folder. Ordinary accounts may create folders directly on a
+    # drive, so the folder must be one nobody could prepare: its name cannot
+    # be guessed, it must not exist, it is created together with its
+    # permissions (Administrators and SYSTEM: full; Users: read; nothing
+    # inherited), and it is looked at again before anything is written into
+    # it (Get-KitStagingProblem). Returns Ok, Error and Path. -Suffix is for
+    # the tests only.
+    param([Parameter(Mandatory = $true)][string]$Beside, [string]$Suffix = '')
+    $out = New-Object PSObject -Property @{ Ok = $false; Error = ''; Path = '' }
+    if (-not $Suffix) { $Suffix = [Guid]::NewGuid().ToString('N') }
+    $path = $Beside.TrimEnd('\', '/') + '.new-' + $Suffix
+    if (Test-Path -LiteralPath $path) { $out.Error = $path + ' exists already.'; return $out }
+    try {
+        if ($env:OS -ne 'Windows_NT') { New-Item -ItemType Directory -Path $path -ErrorAction Stop | Out-Null }
+        else {
+            $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+            $none = [System.Security.AccessControl.PropagationFlags]::None
+            $allow = [System.Security.AccessControl.AccessControlType]::Allow
+            $security = New-Object System.Security.AccessControl.DirectorySecurity
+            $security.SetAccessRuleProtection($true, $false)
+            foreach ($grant in @(@('S-1-5-32-544', 'FullControl'), @('S-1-5-18', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
+                $account = New-Object System.Security.Principal.SecurityIdentifier($grant[0])
+                $rights = [System.Security.AccessControl.FileSystemRights]$grant[1]
+                $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($account, $rights, $inherit, $none, $allow)))
+            }
+            if ($PSVersionTable.PSVersion.Major -lt 6) { [void][System.IO.Directory]::CreateDirectory($path, $security) }
+            else { [void][System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path) }
+            $problem = Get-KitStagingProblem -Path $path
+            if ($problem) { $out.Error = $path + ' is not a folder only Administrators can change: ' + $problem + '.'; return $out }
+        }
+    } catch { $out.Error = 'Could not create ' + $path + ': ' + $_.Exception.Message; return $out }
+    $out.Ok = $true; $out.Path = $path
+    return $out
+}
+
 function Test-KitTree {
     # Returns what is wrong with an unpacked kit, or $null when every file is
     # the one its list names: the list has the SHA-256 given; every file on
     # the list is there with its SHA-256; nothing is there that the list does
     # not name, except the four files that cannot be on it (MANIFEST.sha256
-    # itself, bootstrap.sh, bootstrap.ps1, pairing.json).
+    # itself, bootstrap.sh, bootstrap.ps1, pairing.json); no folder is there
+    # that holds no file of the list.
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$ManifestSha256)
     $manifest = Join-Path $Path 'MANIFEST.sha256'
     if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { return 'It has no MANIFEST.sha256.' }
@@ -2014,20 +2101,36 @@ function Test-KitTree {
         $name = $item.FullName.Substring($full.Length + 1) -replace '\\', '/'
         if (-not $listed.Contains($name) -and $unlisted -cnotcontains $name) { return ('It holds a file that its list does not name: ' + $name) }
     }
+    # every folder must lie on the way to a file of the list
+    $folders = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($name in $listed) {
+        $parts = $name -split '/'
+        for ($i = 1; $i -lt $parts.Count; $i++) { [void]$folders.Add(($parts[0..($i - 1)] -join '/')) }
+    }
+    foreach ($item in (Get-ChildItem -LiteralPath $Path -Recurse -Force -Directory)) {
+        $name = $item.FullName.Substring($full.Length + 1) -replace '\\', '/'
+        if (-not $folders.Contains($name)) { return ('It holds a folder that its list names no file for: ' + $name) }
+    }
     return $null
 }
 
 function Test-KitUpdateRule {
     # Returns why a kit that was fetched may not replace this one, or $null.
-    # The rules a kit enforces on its successor, whoever published it:
-    #   * the version goes up, never back or sideways;
+    # The rules a kit enforces on its successor:
+    #   * the kit version is three numbers and goes up: the same version, a
+    #     lower one, or the same one in another spelling (1.0, 1.0.0.0,
+    #     01.0.0) is refused;
+    #   * the versions of GADS and of the patched provider are written in
+    #     the one form versions.json uses (v6.0.0, v6.0.0-drag.1), so that
+    #     'the same version' has one meaning;
     #   * a program keeps its checksum as long as it keeps its version: a kit
     #     that names the provider (or the hub) by the version this kit names
-    #     must pin the same SHA-256 for it, on every system. Another file
-    #     under the same version is refused; a changed program has to come
-    #     with a new version, which the update shows before it replaces
-    #     anything;
+    #     must pin the same SHA-256 for it, on every system;
     #   * every download address is https.
+    # They stop mistakes and a plain swap of a file under a version that is
+    # in use. They are not a control over whoever can write to the branch
+    # main: that person can give a changed program a new version, and can
+    # change the scripts themselves (docs\security.md, section 9).
     param([Parameter(Mandatory = $true)]$Current, [Parameter(Mandatory = $true)]$New)
     $get = {
         param($Object, [string]$KeyPath)
@@ -2040,8 +2143,11 @@ function Test-KitUpdateRule {
         return ([string]$value)
     }
     $a = & $get $Current 'kit'; $b = & $get $New 'kit'
-    if ($b -notmatch '^[0-9.]+$') { return 'It names no usable kit version.' }
-    if ((Compare-KitVersion -Have $b -Want $a) -le 0) { return ('It is kit ' + $b + ', which is not newer than this kit (' + $a + ').') }
+    if (-not (Test-KitVersionText -Text $b)) { return 'It names no usable kit version (three numbers, like 1.2.3).' }
+    if (-not (Test-KitVersionText -Text $a) -or (Compare-KitVersion -Have $b -Want $a) -le 0) { return ('It is kit ' + $b + ', which is not newer than this kit (' + $a + ').') }
+    foreach ($key in @('gads.version', 'gadsDrag.version')) {
+        if (-not (Test-ProgramVersionText -Text (& $get $New $key))) { return ('Its ' + $key + ' is not written like a version of GADS (v6.0.0, v6.0.0-drag.1).') }
+    }
     $groups = @(
         @{ Version = 'gadsDrag.version'; What = 'the provider'; Keys = @('gadsDrag.sha256', 'macos.arm64.provider.sha256', 'macos.x86_64.provider.sha256') },
         @{ Version = 'gads.version'; What = 'GADS'; Keys = @('gads.hubZipSha256', 'gads.hubExeSha256', 'macos.arm64.hub.zipSha256', 'macos.arm64.hub.exeSha256', 'macos.x86_64.hub.zipSha256', 'macos.x86_64.hub.exeSha256') }
@@ -2101,7 +2207,7 @@ function Get-ReleasedKit {
     $r = Get-KitFile -Url ($script:KitSource.RawUrl + '/main/versions.json') -OutFile $file -TimeoutSec 60
     if (-not $r.Ok) { $out.Error = 'versions.json of the kit repository could not be read (' + $r.Error + ').'; return $out }
     try { $out.Version = [string](Get-Content -LiteralPath $file -Raw | ConvertFrom-Json).kit } catch { $out.Version = '' }
-    if ($out.Version -notmatch '^[0-9.]+$') { $out.Version = ''; $out.Error = 'versions.json of the kit repository names no kit version.'; return $out }
+    if (-not (Test-KitVersionText -Text $out.Version)) { $out.Version = ''; $out.Error = 'versions.json of the kit repository names no kit version (three numbers, like 1.2.3).'; return $out }
     $file = Join-Path $WorkFolder 'main-pairing.json'
     $r = Get-KitFile -Url ($script:KitSource.RawUrl + '/main/pairing.json') -OutFile $file -TimeoutSec 60
     if (-not $r.Ok) {

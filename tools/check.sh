@@ -6,8 +6,9 @@
 #
 #   bash tools/check.sh [--require-all] [--upstream]
 #
-#   --require-all   a check whose tool is missing counts as failed instead of
-#                   being skipped (use it before a kit release)
+#   --require-all   a check whose tool is missing, and a test that was
+#                   skipped inside a suite, count as failed instead of being
+#                   listed under "Skipped" (use it before a kit release)
 #   --upstream      also fetch upstream GADS at the pinned commit and check
 #                   that patch/provider-drag.patch applies (needs the network)
 #
@@ -23,7 +24,13 @@
 #   with powershell (Windows PowerShell 5.1) or pwsh   every script parses and is
 #                 ASCII; PSScriptAnalyzer 1.24.0 and Pester 5.7.1 when the
 #                 modules are installed. On Linux and macOS the Pester tests
-#                 of pairing need SSL_CERT_FILE (tests/Pairing.Tests.ps1 says how).
+#                 that talk to the stand-in server need its certificate to be
+#                 trusted: this script makes one for the run and hands it to
+#                 PowerShell (SSL_CERT_FILE), which needs node and openssl.
+#                 On Windows they need an Administrator window instead.
+#
+# A run ends with "All ... checks passed" only when nothing was skipped; what
+# was skipped, whole checks and single tests, is listed before the last line.
 #
 # On a Mac this runs with the bash, awk and sed of macOS, which is where the
 # shell scripts meet the tools they are written for; on Windows run it from
@@ -180,6 +187,16 @@ if ($r.FailedCount -gt 0 -or $r.Result -ne 'Passed') { exit 1 }
 exit 0
 PS1
     run "Every PowerShell script parses and is ASCII ($PS)" "$PS" -NoProfile -ExecutionPolicy Bypass -File "$TMP/parse.ps1" -Root "$KIT"
+    # Outside Windows, PowerShell trusts the stand-in server only through
+    # SSL_CERT_FILE: without it half of the Pester tests skip themselves.
+    case $(uname -s) in
+        MINGW* | MSYS* | CYGWIN*) ;;
+        *)
+            if have node && have openssl && node tests/fake-blossom.js --make-cert "$TMP/cert" > /dev/null 2>&1 && [ -s "$TMP/cert/cert.pem" ]; then
+                export SSL_CERT_FILE="$TMP/cert/cert.pem"
+            fi
+            ;;
+    esac
     for part in analyze pester; do
         name='PSScriptAnalyzer'; [ "$part" = pester ] && name='The Pester tests'
         "$PS" -NoProfile -ExecutionPolicy Bypass -File "$TMP/$part.ps1" -Root "$KIT" > "$TMP/ps.out" 2>&1; code=$?
@@ -189,6 +206,13 @@ PS1
             # shellcheck disable=SC2329
             show() { cat "$TMP/ps.out"; return "$code"; }
             run "$name ($PS)" show
+            if [ "$part" = pester ]; then
+                n=$(sed -n 's/^Pester .*, skipped \([0-9][0-9]*\)$/\1/p' "$TMP/ps.out" | tail -n 1)
+                if [ -n "$n" ] && [ "$n" != 0 ]; then
+                    grep -E 'are skipped:|\[!\]' "$TMP/ps.out" | sed 's/^/   /' | head -n 20
+                    skip "$n of the Pester tests" 'they skipped themselves (the reason is in the lines above; usually the stand-in server could not be used: node or openssl missing, or on Windows no Administrator window)'
+                fi
+            fi
         fi
     done
 else
@@ -203,4 +227,8 @@ if [ -n "$FAILED" ]; then
     printf 'FAILED:%s\n' "$FAILED"
     exit 1
 fi
-echo "All $RAN checks that ran passed."
+if [ -n "$SKIPPED" ]; then
+    echo "The $RAN checks that ran passed, but not everything ran (see \"Skipped\" above). This is not a complete run."
+else
+    echo "All $RAN checks passed; nothing was skipped."
+fi

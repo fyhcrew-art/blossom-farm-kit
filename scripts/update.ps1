@@ -21,9 +21,10 @@
     (versions.json and pairing.json there), downloads that commit's archive
     from GitHub, checks every file against the commit's MANIFEST.sha256, and
     refuses a kit that is not newer or that pins another file for a program
-    version this kit already pins. The kit that was here is kept as
-    <kit folder>.previous. What this does and does not protect against is in
-    docs\security.md, section 9.
+    version this kit already pins. Before anything is replaced it prints the
+    commit and the versions of the kit, of GADS and of the provider, old and
+    new. The kit that was here is kept as <kit folder>.previous. What this
+    does and does not protect against is in docs\security.md, section 9.
 
     Programs installed with winget (MongoDB, Node.js, FFmpeg, cloudflared) are
     not changed by this script; see README, section "Updating".
@@ -77,7 +78,7 @@ try {
         if (-not $released.Ok) { Stop-Farm -Problem $released.Error -WhatToDo 'Nothing was changed. Check the internet connection of this computer and run the script again.' }
         Write-Note ('This kit:          ' + $thisKit.kit)
         Write-Note ('The newest kit:    ' + $released.Version)
-        if ((Compare-KitVersion -Have $released.Version -Want ([string]$thisKit.kit)) -le 0) {
+        if (-not (Test-KitVersionText -Text ([string]$thisKit.kit)) -or (Compare-KitVersion -Have $released.Version -Want ([string]$thisKit.kit)) -le 0) {
             Write-Ok 'This kit is the newest one. Nothing to fetch.'
             if ($Latest) { Write-Note 'To bring the farm to the versions of this kit, run scripts\update.ps1 without an option.' }
             exit 0
@@ -96,19 +97,13 @@ try {
         }
         Write-Step ('Fetching kit ' + $released.Version + ' (the farm keeps running)')
         $kitFolder = $KitRoot.TrimEnd('\', '/')
-        $stage = $kitFolder + '.new'
         $previous = $kitFolder + '.previous'
-        if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-        New-Item -ItemType Directory -Path $stage -Force | Out-Null
-        if ($env:OS -eq 'Windows_NT') {
-            # Administrators run these scripts: nobody else may change them. Set
-            # before anything is put into the folder.
-            $r = Invoke-Native -File 'icacls.exe' -Arguments @($stage, '/inheritance:r', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '/grant:r', '*S-1-5-18:(OI)(CI)F', '/grant:r', '*S-1-5-32-545:(OI)(CI)RX')
-            if ($r.Code -ne 0) {
-                Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
-                Stop-Farm -Problem ('Could not restrict access to ' + $stage + '.') -WhatToDo 'Nothing was changed. Check that the drive is NTFS, then run the script again.'
-            }
-        }
+        # Administrators run these scripts: nobody else may change them, and
+        # nobody may have prepared the folder they are checked in
+        # (New-KitStagingFolder in lib\FarmKit.psm1 says how that is made sure).
+        $staging = New-KitStagingFolder -Beside $kitFolder
+        if (-not $staging.Ok) { Stop-Farm -Problem $staging.Error -WhatToDo 'Nothing was changed. Check that the drive is NTFS, then run the script again; if it repeats, report it on the kit repository.' }
+        $stage = $staging.Path
         $saved = Save-KitCommit -Commit $released.Commit -ManifestSha256 $released.ManifestSha256 -WorkFolder $stage
         if (-not $saved.Ok) {
             Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
@@ -125,6 +120,9 @@ try {
             Stop-Farm -Problem ('The kit that was fetched was refused. ' + $problem) -WhatToDo 'Nothing was changed. Do not work around it: report it on the kit repository.'
         }
         Write-Ok ('Kit ' + $released.Version + ' was downloaded and every file has the SHA-256 its list names.')
+        Write-Note ('Commit:    ' + $released.Commit)
+        Write-Note ('This kit:  ' + (Get-KitVersionLine -Versions $thisKit))
+        Write-Note ('New kit:   ' + (Get-KitVersionLine -Versions $fetched))
         # The kit's files move up into the staging folder, which already carries
         # the permissions; then the folder takes the place of this kit.
         Get-ChildItem -LiteralPath $saved.Path -Force | Move-Item -Destination $stage -Force
