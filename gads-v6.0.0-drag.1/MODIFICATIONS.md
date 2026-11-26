@@ -16,8 +16,8 @@ What differs from the upstream tree at that commit:
 | `docs/docs.go`, `docs/swagger.json`, `docs/swagger.yaml` | added: generated with `swag init` (the program imports this package) |
 | `vendor/` | added: the sources of the Go modules the program is built from (`go mod vendor`) |
 | `THIRD-PARTY-NOTICES.txt` | added: licence texts of the modules linked into the programs |
-| `BUILD.md`, `MODIFICATIONS.md` | added |
-| `resources/ios-ddi/*` | removed: Apple's developer disk image; see `resources/ios-ddi/NOT-INCLUDED.txt` |
+| `BUILD.md`, `MODIFICATIONS.md`, `IOS-DDI-NOT-INCLUDED.txt` | added |
+| `resources/ios-ddi/*` | removed: Apple's developer disk image; see `IOS-DDI-NOT-INCLUDED.txt` |
 
 Everything else is upstream's, unchanged. That includes the pre-built files
 upstream keeps in `resources/` (`gads-broadcast.ipa`, `gads-settings.apk`,

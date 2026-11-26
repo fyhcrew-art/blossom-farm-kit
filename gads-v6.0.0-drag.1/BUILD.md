@@ -4,9 +4,12 @@ On Linux x64, with Go 1.26.0, on a maintainer's computer, with the kit's
 `tools/build-provider.sh` (the commands below are what it runs). From this
 tree:
 
-1. Put Apple's developer disk image back (`resources/ios-ddi/NOT-INCLUDED.txt`
-   says where to get the files and gives their checksums). The program embeds
-   that folder and does not compile without it.
+1. Put Apple's developer disk image back into `resources/ios-ddi/`
+   (`IOS-DDI-NOT-INCLUDED.txt`, at the top of this tree, says where to get
+   the files and gives their checksums). The program embeds the whole
+   folder `resources/` and does not compile without them. Put nothing else
+   into `resources/`: one file more or less there gives a program with
+   another SHA-256.
 2. Build (the same command three times; only the target system differs):
 
 ```sh

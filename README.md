@@ -16,5 +16,9 @@ computer with `tools/build-provider.sh` of the kit. The build is
 reproducible: `BUILD.md` in each folder gives the commands, and anyone
 who runs them gets files with the SHA-256 values of `SHA256SUMS`.
 
-A folder, once published, is never changed. A changed program gets a
-new version and a new folder.
+A program, once published, is never changed: a changed program gets a
+new version and a new folder. What lies next to a program (the build
+instructions, the source archive, the notices) can be corrected by a
+later commit, which says so in its message; the programs and their
+SHA-256 values stay as they are, and every earlier commit of this
+branch keeps serving what it held.
